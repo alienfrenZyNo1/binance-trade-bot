@@ -8,9 +8,14 @@
 [![Deploy to DO](https://mp-assets1.sfo2.digitaloceanspaces.com/deploy-to-do/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/coinbookbrasil/binance-trade-bot/tree/master&refcode=a076ff7a9a6a)
 
 
-## Follow me on Twitter :)
+####  Join our Telegram community and follow me on Twitter :)
 
-[![Twitter](https://img.shields.io/twitter/url/https/twitter.com/cloudposse.svg?style=social&label=Follow%20%400xedeng)](https://twitter.com/0xedeng)
+[![telegram](https://patrolavia.github.io/telegram-badge/chat.png)](https://t.me/binancetradebotchat) [![Twitter](https://img.shields.io/twitter/url/https/twitter.com/cloudposse.svg?style=social&label=Follow%20%400xedeng)](https://twitter.com/0xedeng)
+
+
+#### Community Telegram Chat
+https://t.me/binancetradebotchat
+
 
 ## Why?
 
@@ -39,7 +44,7 @@ The bot jumps between a configured set of coins on the condition that it does no
 
 ## Binance Setup
 
--   Create a [Binance account](https://www.binance.com/en/register?ref=13222128) (Includes my referral link, I'll be super grateful if you use it).
+-   Create a [Binance account](https://accounts.binance.com/register?ref=PGDFCE46) (Includes my referral link, I'll be super grateful if you use it).
 -   Enable Two-factor Authentication.
 -   Create a new API key.
 -   Get a cryptocurrency. If its symbol is not in the default list, add it.
@@ -166,6 +171,12 @@ A list of answers to what seem to be the most frequently asked questions can be 
 <p align="center">
   <img src = "https://usercontent2.hubstatic.com/6061829.jpg">
 </p>
+
+## Want to build a bot from scratch?
+
+- Check out [CCXT](https://github.com/ccxt/ccxt)  for more than 100 crypto exchanges with a unified trading API.
+- Check out [Python-Binance](https://github.com/sammchardy/python-binance) for a complete Python Wrapper.
+
 
 ## Disclaimer
 
