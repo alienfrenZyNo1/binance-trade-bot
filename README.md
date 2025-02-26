@@ -1,21 +1,27 @@
-# binance-trade-bot
-> Automated cryptocurrency trading bot
+# Binance Trade Bot
+> An automated cryptocurrency trading bot for Binance
 
-![github](https://img.shields.io/github/workflow/status/edeng23/binance-trade-bot/binance-trade-bot)
-![docker](https://img.shields.io/docker/pulls/edeng23/binance-trade-bot)
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/edeng23/binance-trade-bot)
+## Author
+Created by **Eden Gaon**
 
-[![Deploy to DO](https://mp-assets1.sfo2.digitaloceanspaces.com/deploy-to-do/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/coinbookbrasil/binance-trade-bot/tree/master&refcode=a076ff7a9a6a)
+[![Twitter Follow](https://img.shields.io/twitter/url/https/twitter.com/cloudposse.svg?style=social&label=Follow%20%400xedeng)](https://twitter.com/shapeden)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-Connect-blue?style=flat&logo=linkedin)](https://www.linkedin.com/in/eden-gaon-6956a219/)
 
+## Project Status
+[![GitHub Status](https://img.shields.io/github/workflow/status/edeng23/binance-trade-bot/binance-trade-bot?label=build)](https://github.com/edeng23/binance-trade-bot/actions)
+[![Docker Pulls](https://img.shields.io/docker/pulls/edeng23/binance-trade-bot)](https://hub.docker.com/r/edeng23/binance-trade-bot)
 
-####  Join our Telegram community and follow me on Twitter :)
+## Quick Deploy
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/edeng23/binance-trade-bot)
+[![Deploy to DigitalOcean](https://mp-assets1.sfo2.digitaloceanspaces.com/deploy-to-do/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/coinbookbrasil/binance-trade-bot/tree/master&refcode=a076ff7a9a6a)
 
-[![telegram](https://patrolavia.github.io/telegram-badge/chat.png)](https://t.me/binancetradebotchat) [![Twitter](https://img.shields.io/twitter/url/https/twitter.com/cloudposse.svg?style=social&label=Follow%20%400xedeng)](https://twitter.com/0xedeng)
+## Community
+Join our growing community on Telegram to discuss strategies, get help, or just chat!
 
+[![Telegram Chat](https://patrolavia.github.io/telegram-badge/chat.png)](https://t.me/binancetradebotchat)
 
 #### Community Telegram Chat
 https://t.me/binancetradebotchat
-
 
 ## Why?
 
