@@ -23,6 +23,7 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             "strategy": "default",
             "sell_timeout": "0",
             "buy_timeout": "0",
+            "testnet": False,
         }
 
         if not os.path.exists(CFG_FL_NAME):
@@ -33,6 +34,7 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
 
         self.BRIDGE_SYMBOL = os.environ.get("BRIDGE_SYMBOL") or config.get(USER_CFG_SECTION, "bridge")
         self.BRIDGE = Coin(self.BRIDGE_SYMBOL, False)
+        self.TESTNET = os.environ.get("TESTNET") or config.getboolean(USER_CFG_SECTION, "testnet")
 
         # Prune settings
         self.SCOUT_HISTORY_PRUNE_TIME = float(

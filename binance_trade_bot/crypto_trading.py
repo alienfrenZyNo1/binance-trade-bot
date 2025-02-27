@@ -15,7 +15,7 @@ def main():
 
     config = Config()
     db = Database(logger, config)
-    manager = BinanceAPIManager(config, db, logger)
+    manager = BinanceAPIManager(config, db, logger, config.TESTNET)
     # check if we can access API feature that require valid config
     try:
         _ = manager.get_account()

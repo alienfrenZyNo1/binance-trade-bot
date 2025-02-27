@@ -75,10 +75,13 @@ class BinanceStreamManager:
     ):
         self.cache = cache
         self.logger = logger
+        exchange_name = f"binance.{config.BINANCE_TLD}"
+        if config.TESTNET:
+            exchange_name += "-testnet"
         self.bw_api_manager = BinanceWebSocketApiManager(
             output_default="UnicornFy",
             enable_stream_signal_buffer=True,
-            exchange=f"binance.{config.BINANCE_TLD}",
+            exchange=exchange_name,
         )
         self.bw_api_manager.create_stream(
             ["arr"],

@@ -69,6 +69,7 @@ Create a .cfg file named `user.cfg` based off `.user.cfg.example`, then add your
 
 -   **api_key** - Binance API key generated in the Binance account setup stage.
 -   **api_secret_key** - Binance secret key generated in the Binance account setup stage.
+-   **testnet** - Default is false, whether to use the testnet or not
 -   **current_coin** - This is your starting coin of choice. This should be one of the coins from your supported coin list. If you want to start from your bridge currency, leave this field empty - the bot will select a random coin from your supported coin list and buy it.
 -   **bridge** - Your bridge currency of choice. Notice that different bridges will allow different sets of supported coins. For example, there may be a Binance particular-coin/USDT pair but no particular-coin/BUSD pair.
 -   **tld** - 'com' or 'us', depending on your region. Default is 'com'.

@@ -15,16 +15,18 @@ from .models import Coin
 
 
 class BinanceAPIManager:
-    def __init__(self, config: Config, db: Database, logger: Logger):
+    def __init__(self, config: Config, db: Database, logger: Logger, testnet = False):
         # initializing the client class calls `ping` API endpoint, verifying the connection
         self.binance_client = Client(
             config.BINANCE_API_KEY,
             config.BINANCE_API_SECRET_KEY,
             tld=config.BINANCE_TLD,
+            testnet=testnet,
         )
         self.db = db
         self.logger = logger
         self.config = config
+        self.testnet = testnet
 
         self.cache = BinanceCache()
         self.stream_manager: Optional[BinanceStreamManager] = None
@@ -40,7 +42,18 @@ class BinanceAPIManager:
 
     @cached(cache=TTLCache(maxsize=1, ttl=43200))
     def get_trade_fees(self) -> Dict[str, float]:
-        return {ticker["symbol"]: float(ticker["takerCommission"]) for ticker in self.binance_client.get_trade_fee()}
+        if not self.testnet:
+            return {ticker["symbol"]: float(ticker["takerCommission"]) for ticker in self.binance_client.get_trade_fee()}
+
+
+        ## testnet does not provide trade fee API, emulating it
+        exchange_info = self.binance_client.get_exchange_info()
+        symbols = exchange_info["symbols"]
+        return {
+            symbol["symbol"]: 0.001
+            for symbol in symbols
+        }
+
 
     @cached(cache=TTLCache(maxsize=1, ttl=60))
     def get_using_bnb_for_fees(self):
@@ -48,8 +61,9 @@ class BinanceAPIManager:
 
     def get_fee(self, origin_coin: Coin, target_coin: Coin, selling: bool):
         base_fee = self.get_trade_fees()[origin_coin + target_coin]
-        if not self.get_using_bnb_for_fees():
-            return base_fee
+        if not self.testnet:
+            if not self.get_using_bnb_for_fees():
+                return base_fee
 
         # The discount is only applied if we have enough BNB to cover the fee
         amount_trading = (
