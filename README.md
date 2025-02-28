@@ -116,11 +116,18 @@ There is an example version of this file to get you started.
 
 If you are interested in running a Telegram bot, more information can be found at [Telegram's official documentation](https://core.telegram.org/bots).
 
-### Run
+### Run the bot
 
 ```shell
 python -m binance_trade_bot
 ```
+
+### Run the server that returns the information
+
+```shell
+ python -m binance_trade_bot.api_server
+ ```
+
 
 ### Docker
 
