@@ -1,5 +1,6 @@
 #!python3
 import time
+import traceback
 
 from .binance_api_manager import BinanceAPIManager
 from .config import Config
@@ -62,5 +63,19 @@ def main():
         while True:
             schedule.run_pending()
             time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}")
+        logger.error(traceback.format_exc())
+        # Try to send Telegram alert
+        try:
+            import os
+            from binance_trade_bot.notifications import NotificationHandler
+            nm = NotificationHandler()
+            nm.send_notification(f"🚨 BOT CRASHED\n\nError: {str(e)[:200]}\n\nThe trading bot has stopped unexpectedly and needs attention.")
+        except Exception:
+            pass  # Don't let notification failure mask the original error
+        raise
     finally:
         manager.stream_manager.close()

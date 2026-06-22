@@ -166,19 +166,49 @@ class BinanceAPIManager:
         
         For BUY: returns best bid (passive buy = maker fill)
         For SELL: returns best ask (passive sell = maker fill)
+        
+        If the USDC spread is very wide (> threshold), uses midpoint pricing
+        to fill faster while still getting partial maker benefits.
         Falls back to ticker price if order book unavailable.
         """
         try:
             depth = self.binance_client.get_orderbook_ticker(symbol=symbol)
-            if side == "BUY":
-                price = float(depth.get("bidPrice", 0))
-            else:
-                price = float(depth.get("askPrice", 0))
-            if price > 0:
-                return price
+            bid = float(depth.get("bidPrice", 0))
+            ask = float(depth.get("askPrice", 0))
+
+            if bid > 0 and ask > 0:
+                spread_pct = ((ask - bid) / bid) * 100
+                spread_threshold = float(getattr(self.config, 'USDT_FALLBACK_SPREAD_THRESHOLD', 0.15))
+
+                if spread_pct > spread_threshold * 2:
+                    # Very wide spread — use midpoint for faster fill
+                    # (still better than taker, but more aggressive than best bid/ask)
+                    mid = (bid + ask) / 2
+                    self.logger.info(
+                        f"Wide spread on {symbol}: {spread_pct:.3f}% — using midpoint {mid}"
+                    )
+                    return mid
+
+                if side == "BUY":
+                    return bid
+                else:
+                    return ask
         except Exception:
             pass
         return self.get_ticker_price(symbol)
+
+    def _get_spread(self, symbol: str):
+        """Get the bid-ask spread for a symbol. Returns (spread_pct, bid, ask).
+        spread_pct = (ask - bid) / bid * 100"""
+        try:
+            depth = self.binance_client.get_orderbook_ticker(symbol=symbol)
+            bid = float(depth.get("bidPrice", 0))
+            ask = float(depth.get("askPrice", 0))
+            if bid > 0 and ask > 0:
+                return ((ask - bid) / bid) * 100, bid, ask
+        except Exception:
+            pass
+        return 0.0, 0, 0
 
     def _get_tick_size(self, symbol: str):
         """Get the price tick size for a symbol."""
@@ -192,9 +222,31 @@ class BinanceAPIManager:
         except Exception:
             return 0.0001
 
+    def _check_order_filled(self, order_id, symbol):
+        """Quick check if an order has been filled. Returns True/False."""
+        try:
+            order = self.binance_client.get_order(symbol=symbol, orderId=order_id)
+            return order.get("status") in ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
+        except Exception:
+            return True  # Assume filled if we can't check (avoid stuck orders)
+
+    def _should_reprice_order(self, order_status):
+        """Check if a maker order should be repriced to taker (aggressive).
+        Returns True if the order has been NEW for longer than MAKER_REPRICE_TIMEOUT."""
+        reprice_timeout = float(getattr(self.config, 'MAKER_REPRICE_TIMEOUT', 5))
+        if reprice_timeout <= 0:
+            return False
+        if order_status is None or order_status.status != "NEW":
+            return False
+        minutes = (time.time() - order_status.time / 1000) / 60
+        return minutes > reprice_timeout
+
     def _wait_for_order(
-        self, order_id, origin_symbol: str, target_symbol: str
+        self, order_id, origin_symbol: str, target_symbol: str,
+        reprice_callback=None
     ) -> Optional[BinanceOrder]:  # pylint: disable=unsubscriptable-object
+        order_repriced = False
+
         while True:
             order_status: BinanceOrder = self.cache.orders.get(order_id, None)
             if order_status is not None:
@@ -209,6 +261,58 @@ class BinanceAPIManager:
                 order_status = self.cache.orders.get(order_id, None)
 
                 self.logger.debug(f"Waiting for order {order_id} to be filled")
+
+                # Maker reprice: if maker order hasn't filled, reprice to taker
+                if not order_repriced and reprice_callback and self._should_reprice_order(order_status):
+                    self.logger.info(
+                        f"Maker order {order_id} not filled in "
+                        f"{getattr(self.config, 'MAKER_REPRICE_TIMEOUT', 5)} min — repricing to taker"
+                    )
+                    # Cancel the maker order
+                    try:
+                        self.binance_client.cancel_order(
+                            symbol=origin_symbol + target_symbol, orderId=order_id
+                        )
+                    except Exception:
+                        pass
+
+                    # Place new aggressive order via callback
+                    new_order = reprice_callback()
+                    if new_order is None:
+                        self.logger.warning("Reprice failed — returning to scouting")
+                        return None
+
+                    order_repriced = True
+                    new_order_id = new_order["orderId"]
+                    self.logger.info(f"Repriced order placed: {new_order_id} (taker)")
+
+                    # Poll REST API for the repriced order (websocket may not track new ID)
+                    from .binance_stream_manager import BinanceOrder as _BO
+                    symbol_str = origin_symbol + target_symbol
+                    while True:
+                        try:
+                            order_info = self.binance_client.get_order(symbol=symbol_str, orderId=new_order_id)
+                            status = order_info.get("status", "")
+                            if status == "FILLED":
+                                self.logger.info(f"Repriced order filled: {new_order_id}")
+                                report = {
+                                    "symbol": order_info["symbol"],
+                                    "side": order_info["side"],
+                                    "order_type": order_info.get("type", "LIMIT"),
+                                    "order_id": order_info["orderId"],
+                                    "cumulative_quote_asset_transacted_quantity": order_info.get("cummulativeQuoteQty", 0),
+                                    "current_order_status": order_info["status"],
+                                    "order_price": order_info.get("price", 0),
+                                    "transaction_time": order_info.get("time", int(time.time() * 1000)),
+                                }
+                                return _BO(report)
+                            elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                                self.logger.warning(f"Repriced order {status}: {new_order_id}")
+                                return None
+                            time.sleep(1)
+                        except Exception as e:
+                            self.logger.debug(f"Polling repriced order: {e}")
+                            time.sleep(2)
 
                 if self._should_cancel_order(order_status):
                     cancel_order = None
@@ -249,10 +353,11 @@ class BinanceAPIManager:
         return order_status
 
     def wait_for_order(
-        self, order_id, origin_symbol: str, target_symbol: str, order_guard: OrderGuard
+        self, order_id, origin_symbol: str, target_symbol: str, order_guard: OrderGuard,
+        reprice_callback=None
     ) -> Optional[BinanceOrder]:  # pylint: disable=unsubscriptable-object
         with order_guard:
-            return self._wait_for_order(order_id, origin_symbol, target_symbol)
+            return self._wait_for_order(order_id, origin_symbol, target_symbol, reprice_callback)
 
     def _should_cancel_order(self, order_status):
         minutes = (time.time() - order_status.time / 1000) / 60
@@ -363,8 +468,22 @@ class BinanceAPIManager:
 
         trade_log.set_ordered(origin_balance, target_balance, order_quantity)
 
+        # Maker reprice callback: if maker order doesn't fill, reprice to taker
+        reprice_fn = None
+        if use_maker:
+            _self = self
+            _sym = origin_symbol + target_symbol
+            _qty = order_quantity_s
+            _precision = pair_info["quotePrecision"]
+            def _reprice_buy():
+                taker_price = _self.get_ticker_price(_sym)
+                taker_price_s = "{:0.0{}f}".format(taker_price, _precision)
+                _self.logger.info(f"Repricing BUY to taker price: {taker_price}")
+                return _self.binance_client.order_limit_buy(symbol=_sym, quantity=_qty, price=taker_price_s)
+            reprice_fn = _reprice_buy
+
         order_guard.set_order(origin_symbol, target_symbol, int(order["orderId"]))
-        order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard)
+        order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard, reprice_fn)
 
         if order is None:
             return None
@@ -452,8 +571,22 @@ class BinanceAPIManager:
 
         trade_log.set_ordered(origin_balance, target_balance, order_quantity)
 
+        # Maker reprice callback: if maker order doesn't fill, reprice to taker
+        reprice_fn = None
+        if use_maker:
+            _self = self
+            _sym = origin_symbol + target_symbol
+            _qty = order_quantity_s
+            _precision = pair_info["quotePrecision"]
+            def _reprice_sell():
+                taker_price = _self.get_ticker_price(_sym)
+                taker_price_s = "{:0.0{}f}".format(taker_price, _precision)
+                _self.logger.info(f"Repricing SELL to taker price: {taker_price}")
+                return _self.binance_client.order_limit_sell(symbol=_sym, quantity=_qty, price=taker_price_s)
+            reprice_fn = _reprice_sell
+
         order_guard.set_order(origin_symbol, target_symbol, int(order["orderId"]))
-        order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard)
+        order = self.wait_for_order(order["orderId"], origin_symbol, target_symbol, order_guard, reprice_fn)
 
         if order is None:
             return None

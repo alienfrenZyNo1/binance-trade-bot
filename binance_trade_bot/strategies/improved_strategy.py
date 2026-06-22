@@ -85,6 +85,11 @@ class Strategy(AutoTrader):
         self._recently_held = {}  # coin_symbol -> timestamp when sold
         self._churn_block_seconds = getattr(self.config, 'CHURN_BLOCK_SECONDS', 14400)  # 4 hours
 
+        # Indicator cache: avoid recomputing RSI/correlation/BB every scout cycle (1s)
+        # TTL is configurable, default 5 minutes
+        self._indicator_cache = {}  # key -> (value, timestamp)
+        self._cache_ttl = getattr(self.config, 'INDICATOR_CACHE_TTL', 300)
+
     # ─────────────────────────────────────────────────────────────────────────
     #  TECHNICAL INDICATORS (delegated to indicators.py)
     # ─────────────────────────────────────────────────────────────────────────
@@ -96,6 +101,41 @@ class Strategy(AutoTrader):
     @staticmethod
     def _compute_adx(highs, lows, closes, period=14):
         return _compute_adx_func(highs, lows, closes, period)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  INDICATOR CACHE HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _cache_get(self, key):
+        """Get cached value if fresh, else return None."""
+        entry = self._indicator_cache.get(key)
+        if entry is None:
+            return None
+        value, ts = entry
+        if time.time() - ts > self._cache_ttl:
+            del self._indicator_cache[key]
+            return None
+        return value
+
+    def _cache_set(self, key, value):
+        """Store value in cache with current timestamp."""
+        self._indicator_cache[key] = (value, time.time())
+
+    def _cached_klines(self, coin_symbol, interval="1h", limit=50):
+        """Fetch klines with caching to avoid API spam."""
+        key = f"klines:{coin_symbol}:{interval}:{limit}"
+        cached = self._cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            klines = self.manager.binance_client.get_klines(
+                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
+                interval=interval, limit=limit,
+            )
+            self._cache_set(key, klines)
+            return klines
+        except Exception:
+            return None
 
     # ─────────────────────────────────────────────────────────────────────────
     #  PHASE A: MARKET REGIME DETECTION
@@ -416,17 +456,21 @@ class Strategy(AutoTrader):
             return True  # Fail open
 
     def _get_rsi(self, coin_symbol, period=14):
-        """Calculate RSI for a coin. Returns 0-100, or None if insufficient data."""
+        """Calculate RSI for a coin with caching. Returns 0-100, or None."""
+        cache_key = f"rsi:{coin_symbol}:{period}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
-            klines = self.manager.binance_client.get_klines(
-                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
-                interval="1h",
-                limit=period + 2,
-            )
+            klines = self._cached_klines(coin_symbol, "1h", period + 2)
             if not klines or len(klines) < period + 1:
                 return None
             closes = [float(k[4]) for k in klines]
-            return _compute_rsi_func(closes, period)
+            rsi = _compute_rsi_func(closes, period)
+            if rsi is not None:
+                self._cache_set(cache_key, rsi)
+            return rsi
         except Exception:
             return None
 
@@ -454,24 +498,20 @@ class Strategy(AutoTrader):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_correlation_penalty(self, current_coin_symbol, target_coin_symbol):
-        """Compute correlation between current and target coin.
-        Returns penalty multiplier (0-1) to reduce score for highly correlated pairs.
-        Correlation > threshold → heavy penalty (mean reversion doesn't work when
-        both coins move together).
-        """
+        """Compute correlation between current and target coin with caching.
+        Returns penalty multiplier (0-1) to reduce score for highly correlated pairs."""
         if not getattr(self.config, 'CORRELATION_FILTER_ENABLED', False):
             return 1.0
 
+        # Check cache
+        pair_key = f"corr:{current_coin_symbol}:{target_coin_symbol}"
+        cached = self._cache_get(pair_key)
+        if cached is not None:
+            return cached
+
         try:
-            limit = 50
-            current_klines = self.manager.binance_client.get_klines(
-                symbol=f"{current_coin_symbol}{self.config.BRIDGE.symbol}",
-                interval="1h", limit=limit,
-            )
-            target_klines = self.manager.binance_client.get_klines(
-                symbol=f"{target_coin_symbol}{self.config.BRIDGE.symbol}",
-                interval="1h", limit=limit,
-            )
+            current_klines = self._cached_klines(current_coin_symbol, "1h", 50)
+            target_klines = self._cached_klines(target_coin_symbol, "1h", 50)
             if not current_klines or not target_klines:
                 return 1.0
 
@@ -493,7 +533,9 @@ class Strategy(AutoTrader):
                     f"Correlation penalty for {current_coin_symbol}→{target_coin_symbol}: "
                     f"corr={corr:.2f}, penalty={penalty:.2f}"
                 )
+                self._cache_set(pair_key, penalty)
                 return penalty
+            self._cache_set(pair_key, 1.0)
             return 1.0
         except Exception:
             return 1.0
@@ -503,23 +545,20 @@ class Strategy(AutoTrader):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _check_bb_squeeze_bonus(self, coin_symbol):
-        """Detect Bollinger Band squeeze — low volatility period that often
-        precedes a breakout. If detected, give the coin a small score bonus
-        since a move is imminent (and mean reversion strategies do well
-        after squeezes resolve).
-
-        Returns a multiplier (1.0 = no bonus, up to ~1.3 for strong squeeze).
-        """
+        """Detect Bollinger Band squeeze with caching.
+        Returns a multiplier (1.0 = no bonus, up to ~1.3 for strong squeeze)."""
         if not getattr(self.config, 'BB_SQUEEZE_ENABLED', False):
             return 1.0
+
+        cache_key = f"bb:{coin_symbol}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
 
         try:
             period = getattr(self.config, 'BB_PERIOD', 20)
             lookback = getattr(self.config, 'BB_SQUEEZE_LOOKBACK', 50)
-            klines = self.manager.binance_client.get_klines(
-                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
-                interval="1h", limit=period + lookback,
-            )
+            klines = self._cached_klines(coin_symbol, "1h", period + lookback)
             if not klines or len(klines) < period + 10:
                 return 1.0
 
@@ -529,14 +568,15 @@ class Strategy(AutoTrader):
             )
 
             if is_squeeze:
-                # Bonus: tighter squeeze = bigger bonus
                 bonus = 1.0 + (1.0 - percentile / 20.0) * 0.3
                 self.logger.info(
                     f"BB squeeze detected for {coin_symbol} "
                     f"(bandwidth: {bandwidth:.4f}, percentile: {percentile:.0f}%, "
                     f"bonus: {bonus:.2f}x)"
                 )
+                self._cache_set(cache_key, bonus)
                 return bonus
+            self._cache_set(cache_key, 1.0)
             return 1.0
         except Exception:
             return 1.0

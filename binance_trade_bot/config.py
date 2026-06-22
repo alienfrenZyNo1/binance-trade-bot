@@ -237,3 +237,21 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.BTC_CORRELATION_ENABLED = (
             os.environ.get("BTC_CORRELATION_ENABLED") or config.get(USER_CFG_SECTION, "btc_correlation_enabled", fallback="yes")
         ).lower() in ("yes", "true", "1")
+
+        # Maker reprice: reprice to taker after this many minutes if unfilled
+        self.MAKER_REPRICE_TIMEOUT = float(
+            os.environ.get("MAKER_REPRICE_TIMEOUT") or config.get(USER_CFG_SECTION, "maker_reprice_timeout", fallback="5")
+        )
+
+        # Indicator cache TTL (seconds) — cache RSI/correlation/BB results between scout cycles
+        self.INDICATOR_CACHE_TTL = int(
+            os.environ.get("INDICATOR_CACHE_TTL") or config.get(USER_CFG_SECTION, "indicator_cache_ttl", fallback="300")
+        )
+
+        # USDT fallback: if USDC spread > this %, use USDT pair instead
+        self.USDT_FALLBACK_ENABLED = (
+            os.environ.get("USDT_FALLBACK_ENABLED") or config.get(USER_CFG_SECTION, "usdt_fallback_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.USDT_FALLBACK_SPREAD_THRESHOLD = float(
+            os.environ.get("USDT_FALLBACK_SPREAD_THRESHOLD") or config.get(USER_CFG_SECTION, "usdt_fallback_spread_threshold", fallback="0.15")
+        )
