@@ -1,18 +1,32 @@
+# Major pairs - core liquidity anchors, mean-reverting
+BTC
+ETH
+BNB
+SOL
+
+# L1 alternatives - oscillate with BTC but different phase offsets
+AVAX
+NEAR
+APT
 ADA
 ATOM
-BAT
-BTTC
-DASH
+DOT
+SUI
+
+# L2 scaling
+
+# DeFi blue chips
+LINK
+INJ
+AAVE
+
+# High beta / memecoins with strong mean reversion
 DOGE
-EOS
-ETC
-ICX
-IOTA
-NEO
-OMG
-ONT
-QTUM
-TRX
-VET
-XLM
-XMR
+
+# Infrastructure / ecosystem
+FIL
+
+# Other
+XRP
+TIA
+BCH
