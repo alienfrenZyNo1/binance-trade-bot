@@ -34,7 +34,11 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
 
         self.BRIDGE_SYMBOL = os.environ.get("BRIDGE_SYMBOL") or config.get(USER_CFG_SECTION, "bridge")
         self.BRIDGE = Coin(self.BRIDGE_SYMBOL, False)
-        self.TESTNET = os.environ.get("TESTNET") or config.getboolean(USER_CFG_SECTION, "testnet")
+        _testnet_env = os.environ.get("TESTNET", "").strip().lower()
+        if _testnet_env:
+            self.TESTNET = _testnet_env in ("true", "1", "yes")
+        else:
+            self.TESTNET = config.getboolean(USER_CFG_SECTION, "testnet")
 
         # Prune settings
         self.SCOUT_HISTORY_PRUNE_TIME = float(
