@@ -214,6 +214,119 @@ class Database:
     def create_database(self):
         Base.metadata.create_all(self.engine)
 
+    # ── Phase 2/3: Rolling ratio statistics ────────────────────────────────
+
+    def sample_ratios(self, manager):
+        """Sample current price ratios for all enabled pairs and store them."""
+        from .models import Coin as CoinModel
+
+        session: Session
+        with self.db_session() as session:
+            coins = session.query(CoinModel).filter(CoinModel.enabled.is_(True)).all()
+            if len(coins) < 2:
+                return
+
+            # Fetch all prices in one API call
+            prices = {}
+            for coin in coins:
+                price = manager.get_ticker_price(coin.symbol + self.config.BRIDGE.symbol)
+                if price is not None and price > 0:
+                    prices[coin.symbol] = price
+
+            if len(prices) < 2:
+                self.logger.info("Not enough prices to sample ratios")
+                return
+
+            pair_count = 0
+            for from_coin in coins:
+                for to_coin in coins:
+                    if from_coin.symbol == to_coin.symbol:
+                        continue
+                    if from_coin.symbol not in prices or to_coin.symbol not in prices:
+                        continue
+
+                    pair = session.query(Pair).filter(
+                        Pair.from_coin_id == from_coin.symbol,
+                        Pair.to_coin_id == to_coin.symbol,
+                    ).first()
+                    if pair is None:
+                        continue
+
+                    ratio = prices[from_coin.symbol] / prices[to_coin.symbol]
+                    session.add(RatioSample(pair.id, ratio))
+                    pair_count += 1
+
+            self.logger.info(f"Sampled {pair_count} pair ratios")
+
+    def update_pair_stats(self):
+        """Compute EMA and std for all enabled pairs from ratio samples."""
+        import statistics as stats_mod
+
+        session: Session
+        with self.db_session() as session:
+            # Get all enabled pairs
+            pairs = session.query(Pair).all()
+            updated = 0
+
+            for pair in pairs:
+                # Get recent samples (up to 1008 = 7 days at 10-min intervals)
+                samples = session.query(RatioSample).filter(
+                    RatioSample.pair_id == pair.id
+                ).order_by(RatioSample.datetime.desc()).limit(1008).all()
+
+                if len(samples) < 5:
+                    continue
+
+                ratios = [s.ratio for s in samples]
+                ratios.reverse()  # chronological order for EMA
+
+                # Compute EMA (span = 144 = 1 day at 10-min intervals)
+                span = min(144, len(ratios))
+                alpha = 2.0 / (span + 1)
+                ema = ratios[0]
+                for r in ratios[1:]:
+                    ema = alpha * r + (1 - alpha) * ema
+
+                # Compute standard deviation
+                std = stats_mod.pstdev(ratios) if len(ratios) > 1 else 0.0
+
+                # Store/update the stat
+                stat = session.query(PairStat).filter(PairStat.pair_id == pair.id).first()
+                if stat:
+                    stat.ema_ratio = ema
+                    stat.std_ratio = std
+                    stat.sample_count = len(ratios)
+                    stat.last_updated = datetime.utcnow()
+                else:
+                    session.add(PairStat(pair.id, ema, std, len(ratios)))
+
+                # Also update pair.ratio so existing code + /hop command benefit
+                pair.ratio = ema
+                updated += 1
+
+            self.logger.info(f"Updated rolling stats for {updated} pairs")
+
+    def prune_ratio_samples(self):
+        """Delete ratio samples older than the retention period."""
+        retention_days = self.config.RATIO_SAMPLE_RETENTION_DAYS
+        time_diff = datetime.now() - timedelta(days=retention_days)
+        session: Session
+        with self.db_session() as session:
+            deleted = session.query(RatioSample).filter(
+                RatioSample.datetime < time_diff
+            ).delete()
+            if deleted:
+                self.logger.info(f"Pruned {deleted} old ratio samples")
+
+    def get_pair_stat(self, pair_id):
+        """Get cached rolling stats for a pair. Returns (ema, std) or (None, None)."""
+        session: Session
+        with self.db_session() as session:
+            stat = session.query(PairStat).filter(PairStat.pair_id == pair_id).first()
+            if stat and stat.sample_count >= 5:
+                return stat.ema_ratio, stat.std_ratio
+            return None, None
+
     def start_trade_log(self, from_coin: Coin, to_coin: Coin, selling: bool):
         return TradeLog(self, from_coin, to_coin, selling)
 

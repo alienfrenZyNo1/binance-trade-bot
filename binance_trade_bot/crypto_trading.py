@@ -43,6 +43,20 @@ def main():
     schedule.every(1).minutes.do(trader.update_values).tag("updating value history")
     schedule.every(1).minutes.do(db.prune_scout_history).tag("pruning scout history")
     schedule.every(1).hours.do(db.prune_value_history).tag("pruning value history")
+
+    # Phase 2/3: Rolling ratio statistics
+    sample_interval = getattr(config, "RATIO_SAMPLE_INTERVAL", 10)
+    schedule.every(sample_interval).minutes.do(db.sample_ratios, manager).tag("sampling ratios")
+    schedule.every(sample_interval).minutes.do(db.update_pair_stats).tag("updating pair stats")
+    schedule.every(6).hours.do(db.prune_ratio_samples).tag("pruning ratio samples")
+
+    logger.info(
+        f"Improved strategy active | "
+        f"Z-score threshold: {getattr(config, 'Z_SCORE_THRESHOLD', 1.5)} | "
+        f"Cooldown: {getattr(config, 'TRADE_COOLDOWN_SECONDS', 300)}s | "
+        f"Ratio sampling: every {sample_interval}min"
+    )
+
     try:
         while True:
             schedule.run_pending()

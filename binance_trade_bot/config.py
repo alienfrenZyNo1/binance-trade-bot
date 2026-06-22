@@ -81,3 +81,47 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
 
         self.USE_MARGIN = os.environ.get("USE_MARGIN") or config.get(USER_CFG_SECTION, "use_margin")
         self.SCOUT_MARGIN = float(os.environ.get("SCOUT_MARGIN") or config.get(USER_CFG_SECTION, "scout_margin"))
+
+        # ── Improved strategy settings ─────────────────────────────────────
+        # Phase 2: Rolling ratio baseline
+        self.RATIO_SAMPLE_INTERVAL = int(
+            os.environ.get("RATIO_SAMPLE_INTERVAL") or config.get(USER_CFG_SECTION, "ratio_sample_interval", fallback="10")
+        )
+        self.RATIO_SAMPLE_RETENTION_DAYS = int(
+            os.environ.get("RATIO_SAMPLE_RETENTION_DAYS") or config.get(USER_CFG_SECTION, "ratio_sample_retention_days", fallback="7")
+        )
+
+        # Phase 3: Z-score threshold (trade when z-score exceeds this)
+        self.Z_SCORE_THRESHOLD = float(
+            os.environ.get("Z_SCORE_THRESHOLD") or config.get(USER_CFG_SECTION, "z_score_threshold", fallback="1.5")
+        )
+
+        # Phase 4: Momentum filter
+        self.MOMENTUM_FILTER_ENABLED = (
+            os.environ.get("MOMENTUM_FILTER_ENABLED") or config.get(USER_CFG_SECTION, "momentum_filter_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.MOMENTUM_MAX_DROP_1H = float(
+            os.environ.get("MOMENTUM_MAX_DROP_1H") or config.get(USER_CFG_SECTION, "momentum_max_drop_1h", fallback="5.0")
+        )
+
+        # Phase 5: Market regime detection
+        self.REGIME_CHECK_ENABLED = (
+            os.environ.get("REGIME_CHECK_ENABLED") or config.get(USER_CFG_SECTION, "regime_check_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.REGIME_HIGH_VOL_THRESHOLD = float(
+            os.environ.get("REGIME_HIGH_VOL_THRESHOLD") or config.get(USER_CFG_SECTION, "regime_high_vol_threshold", fallback="8.0")
+        )
+        self.REGIME_Z_SCORE_MULTIPLIER = float(
+            os.environ.get("REGIME_Z_SCORE_MULTIPLIER") or config.get(USER_CFG_SECTION, "regime_z_score_multiplier", fallback="2.0")
+        )
+
+        # Phase 6: Trade cooldown + USDC profit-taking
+        self.TRADE_COOLDOWN_SECONDS = int(
+            os.environ.get("TRADE_COOLDOWN_SECONDS") or config.get(USER_CFG_SECTION, "trade_cooldown_seconds", fallback="300")
+        )
+        self.PROFIT_TAKING_ENABLED = (
+            os.environ.get("PROFIT_TAKING_ENABLED") or config.get(USER_CFG_SECTION, "profit_taking_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.PROFIT_TAKING_INTERVAL = int(
+            os.environ.get("PROFIT_TAKING_INTERVAL") or config.get(USER_CFG_SECTION, "profit_taking_interval", fallback="15")
+        )
