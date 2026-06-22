@@ -426,13 +426,61 @@ def cmd_swap(args):
 
 
 def cmd_hop():
-    """Show potential next hops from the current coin, ranked by profitability."""
+    """Show potential next hops with full strategy filter breakdown."""
     current = get_current_coin()
     conn = get_db()
 
-    # Get the latest scout entry per pair for the current coin
+    # ── Strategy config (matching the improved strategy) ──
+    ZSCORE_THRESHOLD = 1.5
+    MOMENTUM_CRASH_THRESHOLD = 5.0  # % drop in last hour = skip
+    VOLATILITY_REGIME_THRESHOLD = 8.0  # avg market vol % → double z-score
+    COOLDOWN_SECONDS = 300  # 5 min
+
+    # ── Fetch last trade time (for cooldown) ──
+    last_trade_row = conn.execute(
+        "SELECT MAX(datetime) FROM trade_history WHERE state = 'COMPLETE'"
+    ).fetchone()
+    last_trade_time = last_trade_row[0] if last_trade_row else None
+    cooldown_active = False
+    cooldown_remaining = ""
+    if last_trade_time:
+        last_dt = datetime.strptime(last_trade_time[:19], "%Y-%m-%d %H:%M:%S")
+        elapsed = (datetime.now() - last_dt).total_seconds()
+        if elapsed < COOLDOWN_SECONDS:
+            cooldown_active = True
+            cooldown_remaining = f"{int(COOLDOWN_SECONDS - elapsed)}s"
+
+    # ── Market regime (avg 24h volatility across enabled coins) ──
+    avg_volatility = 0.0
+    vol_count = 0
+    try:
+        r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+        if r.status_code == 200:
+            coins_rows = conn.execute("SELECT symbol FROM coins WHERE enabled = 1").fetchall()
+            coin_syms = {cr["symbol"] for cr in coins_rows}
+            price_map = {}
+            vol_map = {}
+            for t in r.json():
+                sym = t["symbol"]
+                price_map[sym] = float(t["lastPrice"])
+                vol_map[sym] = float(t["priceChangePercent"])
+            # Average % change across all enabled coins
+            for sym in coin_syms:
+                pair = f"{sym}{BRIDGE_SYMBOL}"
+                if pair in vol_map:
+                    avg_volatility += abs(vol_map[pair])
+                    vol_count += 1
+            if vol_count > 0:
+                avg_volatility /= vol_count
+    except Exception:
+        pass
+
+    regime = "stormy 🌩" if avg_volatility > VOLATILITY_REGIME_THRESHOLD else "normal ☀️"
+    active_zscore_threshold = ZSCORE_THRESHOLD * 2 if avg_volatility > VOLATILITY_REGIME_THRESHOLD else ZSCORE_THRESHOLD
+
+    # ── Get latest scout per pair for current coin ──
     rows = conn.execute(
-        """SELECT p.from_coin_id, p.to_coin_id, p.ratio as target_ratio,
+        """SELECT p.id as pair_id, p.from_coin_id, p.to_coin_id, p.ratio as target_ratio,
                   sh.current_coin_price, sh.other_coin_price, sh.datetime
            FROM scout_history sh
            JOIN pairs p ON sh.pair_id = p.id
@@ -457,16 +505,24 @@ def cmd_hop():
         conn.close()
         return f"❌ No scout data yet for `{current}`. The bot needs a few minutes to build up ratios."
 
-    # Calculate jump scores (same formula as the trade bot)
-    # score = current_ratio * (1 - fee * multiplier) - target_ratio
-    # Use 0.001 fee (0.1% maker) and multiplier=3 (from user.cfg, env var might differ)
     fee = 0.001
-    multiplier = 3.0  # scout_multiplier
-    transaction_fee = fee + fee - fee * fee  # ~0.001999
+    multiplier = 3.0
+    transaction_fee = fee + fee - fee * fee
+
+    # ── Get live prices + 1h-ago prices for momentum ──
+    price_map = {}
+    one_hour_ago_prices = {}
+    try:
+        r = requests.get(f"{API_BASE}/ticker/price", timeout=10)
+        if r.status_code == 200:
+            price_map = {p["symbol"]: float(p["price"]) for p in r.json()}
+    except Exception:
+        pass
 
     candidates = []
     for r in rows:
         to_coin = r["to_coin_id"]
+        pair_id = r["pair_id"]
         target = r["target_ratio"]
         cur_price = r["current_coin_price"]
         other_price = r["other_coin_price"]
@@ -476,13 +532,45 @@ def cmd_hop():
         score = (current_ratio - transaction_fee * multiplier * current_ratio) - target
         divergence_pct = ((current_ratio / target) - 1) * 100 if target > 0 else 0
 
+        # ── Z-score from pair_stats ──
+        ps = conn.execute(
+            "SELECT ema_ratio, std_ratio, sample_count FROM pair_stats WHERE pair_id = ?",
+            (pair_id,),
+        ).fetchone()
+        zscore = None
+        zscore_ok = None  # None = not enough data yet
+        if ps and ps["std_ratio"] and ps["std_ratio"] > 0 and ps["sample_count"] and ps["sample_count"] >= 5:
+            zscore = abs((current_ratio - ps["ema_ratio"]) / ps["std_ratio"])
+            zscore_ok = zscore >= active_zscore_threshold
+
+        # ── Momentum: check if target coin is crashing (>5% drop in last hour) ──
+        momentum_ok = True  # assume ok
+        target_pair = f"{to_coin}{BRIDGE_SYMBOL}"
+        try:
+            r24 = requests.get(
+                f"{API_BASE}/ticker/24hr", params={"symbol": target_pair}, timeout=10
+            )
+            if r24.status_code == 200:
+                price_change_pct = float(r24.json()["priceChangePercent"])
+                if price_change_pct < -MOMENTUM_CRASH_THRESHOLD:
+                    momentum_ok = False
+        except Exception:
+            pass
+
+        # ── Would the bot actually trade? ──
+        score_ok = score > 0
+        all_clear = score_ok and zscore_ok is True and momentum_ok and not cooldown_active
+
         candidates.append({
             "to": to_coin,
-            "current_ratio": current_ratio,
-            "target_ratio": target,
             "score": score,
             "divergence": divergence_pct,
-            "last_scouted": r["datetime"],
+            "zscore": zscore,
+            "zscore_ok": zscore_ok,
+            "momentum_ok": momentum_ok,
+            "score_ok": score_ok,
+            "all_clear": all_clear,
+            "price": price_map.get(target_pair, 0),
         })
 
     conn.close()
@@ -490,48 +578,214 @@ def cmd_hop():
     if not candidates:
         return f"❌ No viable pairs for `{current}`."
 
-    # Sort by score descending (best jump first)
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # Get live prices for top candidates
-    price_map = {}
-    try:
-        r = requests.get(f"{API_BASE}/ticker/price", timeout=10)
-        if r.status_code == 200:
-            price_map = {p["symbol"]: float(p["price"]) for p in r.json()}
-    except Exception:
-        pass
+    # ── Header ──
+    lines = [f"🚀 **Hops from `{current}`**\n"]
+    lines.append(f"Market: `{regime}` (avg vol {avg_volatility:.1f}%)")
 
-    lines = [f"🚀 **Potential Hops from `{current}`**\n"]
-    lines.append(f"Scout multiplier: `{multiplier}` | Fee: `0.2%` round trip")
-    lines.append(f"Pairs evaluated: {len(candidates)}\n")
+    cooldown_str = f"🔒 Cooldown active ({cooldown_remaining} left)" if cooldown_active else "✅ Cooldown clear"
+    lines.append(f"{cooldown_str}")
+    lines.append(f"Z-score threshold: `{active_zscore_threshold:.1f}` | Momentum guard: `skip if coin drops >{MOMENTUM_CRASH_THRESHOLD}%`\\n")
 
-    # Show top 5
+    # ── Legend ──
+    lines.append("Filter checklist per candidate:")
+    lines.append("  ✅ = pass | ⏳ = building data | ❌ = blocked")
+    lines.append("")
+
+    # ── Show top 5 ──
     for i, c in enumerate(candidates[:5], 1):
-        emoji = "🔥" if c["score"] > 0 else "⏳"
-        status = "**READY**" if c["score"] > 0 else "waiting"
-        div_emoji = "📈" if c["divergence"] > 0 else "📉"
-        pair = f"{current}{BRIDGE_SYMBOL}"
-        price = price_map.get(f"{c['to']}{BRIDGE_SYMBOL}", 0)
-        price_str = f"${price:.4f}" if price else "?"
-        lines.append(
-            f"{emoji} #{i}: `{c['to']}` — {status}"
-        )
-        lines.append(f"   {div_emoji} Divergence: {c['divergence']:+.3f}% | Price: {price_str}")
-        lines.append(
-            f"   Score: {c['score']:.6f} | Ratio: {c['current_ratio']:.6f} vs {c['target_ratio']:.6f}"
-        )
+        price_str = f"${c['price']:.4f}" if c["price"] else "?"
+
+        # Score line
+        score_icon = "✅" if c["score_ok"] else "❌"
+        score_detail = f"{c['score']:.6f}" if not c["score_ok"] else f"**{c['score']:.6f}**"
+        lines.append(f"**#{i}: `{c['to']}`** {price_str} | Divergence: {c['divergence']:+.2f}%")
+
+        # Filters
+        filters = f"  {score_icon} Score: {score_detail}"
+
+        # Z-score
+        if c["zscore"] is not None:
+            zs_icon = "✅" if c["zscore_ok"] else "❌"
+            filters += f"\n  {zs_icon} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed"
+        else:
+            filters += f"\n  ⏳ Z-score: collecting data..."
+
+        # Momentum
+        mom_icon = "✅" if c["momentum_ok"] else "❌"
+        mom_text = "stable" if c["momentum_ok"] else "CRASHING ⚠️"
+        filters += f"\n  {mom_icon} Momentum: {mom_text}"
+
+        # Verdict
+        if c["all_clear"]:
+            filters += "\n  🟢 **TRADE READY**"
+        elif cooldown_active and c["score_ok"] and c["zscore_ok"] is True and c["momentum_ok"]:
+            filters += "\n  🟡 waiting on cooldown"
+        else:
+            filters += "\n  🔴 blocked"
+
+        lines.append(filters)
         if i < 5:
             lines.append("")
 
-    # Summary
-    viable = sum(1 for c in candidates if c["score"] > 0)
-    if viable > 0:
-        best = candidates[0]
-        lines.append(f"\n🎯 **Bot would jump to: `{best['to']}`** (score: {best['score']:.6f})")
+    # ── Summary ──
+    viable = [c for c in candidates if c["all_clear"]]
+    close = [c for c in candidates if not c["all_clear"] and c["score_ok"]]
+    if viable:
+        best = viable[0]
+        lines.append(f"\n🎯 **Next hop: `{best['to']}`** — all filters passed!")
+    elif close:
+        best = close[0]
+        blocked = []
+        if not best["zscore_ok"]:
+            blocked.append(f"z-score ({best['zscore']:.1f} < {active_zscore_threshold:.1f})")
+        if not best["momentum_ok"]:
+            blocked.append("momentum crash")
+        if cooldown_active:
+            blocked.append("cooldown")
+        lines.append(f"\n⏸ Closest: `{best['to']}` — score is green but blocked by: {', '.join(blocked)}")
     else:
-        lines.append(f"\n⏸ No profitable hop yet. Best candidate is `{candidates[0]['to']}` — needs {abs(candidates[0]['score']):.6f} more divergence.")
-        lines.append("The bot will trade once a pair hits 0.000000 score or higher.")
+        lines.append(f"\n⏸ Best: `{candidates[0]['to']}` — score needs {abs(candidates[0]['score']):.6f} more")
+
+    return "\n".join(lines)
+
+
+def cmd_profit():
+    """Performance dashboard: P&L, win rate, trade stats."""
+    conn = get_db()
+
+    # ── Starting portfolio value (earliest coin_value snapshot) ──
+    row = conn.execute(
+        """SELECT MIN(id) as min_id FROM coin_value WHERE interval = 'MINUTELY'"""
+    ).fetchone()
+    starting_value = 0.0
+    start_time = None
+    if row and row["min_id"]:
+        snap = conn.execute(
+            """SELECT coin_id, balance, usd_price, datetime FROM coin_value
+               WHERE interval = 'MINUTELY' AND id = ?""",
+            (row["min_id"],),
+        ).fetchall()
+        start_time = snap[0]["datetime"] if snap else None
+        # Also get the full first snapshot set (all coins at that timestamp)
+        if snap:
+            ts = snap[0]["datetime"]
+            all_first = conn.execute(
+                """SELECT coin_id, balance, usd_price FROM coin_value
+                   WHERE interval = 'MINUTELY' AND datetime = ?""",
+                (ts,),
+            ).fetchall()
+            for s in all_first:
+                starting_value += (s["balance"] or 0) * (s["usd_price"] or 0)
+
+    # ── Current value via Binance API ──
+    holdings = get_holdings()
+    current_value = get_portfolio_value(holdings)
+
+    # ── Total trades ──
+    total_trades = conn.execute(
+        "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'COMPLETE'"
+    ).fetchone()["cnt"]
+
+    # ── Round-trip profit per coin hop ──
+    # Each hop = sell coin A → USDC, then buy coin B ← USDC
+    # Group trades in pairs: sell then buy
+    all_trades = conn.execute(
+        """SELECT alt_coin_id, crypto_coin_id, selling, alt_trade_amount,
+                  crypto_trade_amount, datetime
+           FROM trade_history WHERE state = 'COMPLETE'
+           ORDER BY id ASC"""
+    ).fetchall()
+
+    round_trips = []
+    wins = 0
+    losses = 0
+    total_fees_paid = 0.0  # rough estimate
+    best_trade = {"coin": "?", "pnl": -9999.0}
+    worst_trade = {"coin": "?", "pnl": 9999.0}
+
+    # Track sells to match with subsequent buys
+    pending_sell = None
+    for t in all_trades:
+        if t["selling"]:
+            pending_sell = t
+        elif pending_sell:
+            sold_usdc = pending_sell["crypto_trade_amount"] or 0
+            bought_usdc = t["crypto_trade_amount"] or 0
+            coin = t["alt_coin_id"]
+            pnl = bought_usdc - sold_usdc
+            fee_est = sold_usdc * 0.002  # 0.2% round trip
+
+            round_trips.append({
+                "from_coin": pending_sell["alt_coin_id"],
+                "to_coin": coin,
+                "sold_usdc": sold_usdc,
+                "bought_usdc": bought_usdc,
+                "pnl": pnl,
+                "fee_est": fee_est,
+                "datetime": t["datetime"],
+            })
+            total_fees_paid += fee_est
+
+            if pnl >= 0:
+                wins += 1
+            else:
+                losses += 1
+
+            if pnl > best_trade["pnl"]:
+                best_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
+            if pnl < worst_trade["pnl"]:
+                worst_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
+
+            pending_sell = None
+
+    total_pnl = current_value - starting_value
+    pnl_pct = (total_pnl / starting_value * 100) if starting_value > 0 else 0
+
+    # ── Uptime ──
+    if start_time:
+        start_dt = datetime.strptime(start_time[:19], "%Y-%m-%d %H:%M:%S")
+        now_dt = datetime.now()
+        uptime_hours = (now_dt - start_dt).total_seconds() / 3600
+        uptime_str = f"{uptime_hours:.1f}h" if uptime_hours < 48 else f"{uptime_hours / 24:.1f}d"
+    else:
+        uptime_str = "?"
+        uptime_hours = 0
+
+    conn.close()
+
+    # ── Build message ──
+    pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+    lines = [f"📊 **Performance Report**\n"]
+    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
+    lines.append(f"🏦 Starting: `${starting_value:.2f}` → Current: `${current_value:.2f}`")
+    lines.append(f"⏱ Uptime: `{uptime_str}` | Trades: `{total_trades}`\n")
+
+    if round_trips:
+        win_rate = wins / len(round_trips) * 100
+        wr_emoji = "✅" if win_rate >= 50 else "⚠️"
+        lines.append(f"**Round-trip Trades:** {len(round_trips)}")
+        lines.append(f"{wr_emoji} Win rate: `{win_rate:.0f}%` ({wins}W / {losses}L)")
+        lines.append(f"💸 Est. fees paid: `~${total_fees_paid:.2f}`\n")
+
+        # Per-trade P&L
+        lines.append("**Trade breakdown:**")
+        cumul_pnl = 0.0
+        for rt in round_trips:
+            cumul_pnl += rt["pnl"]
+            emoji = "🟢" if rt["pnl"] >= 0 else "🔴"
+            lines.append(
+                f"  {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
+                f"${rt['sold_usdc']:.2f} → ${rt['bought_usdc']:.2f} "
+                f"({rt['pnl']:+.2f})"
+            )
+        lines.append(f"\n  Cumulative P&L from trades: `${cumul_pnl:+.2f}`")
+
+    # ── Best / Worst ──
+    if best_trade["pnl"] > -9999:
+        lines.append(f"\n🏆 Best: `{best_trade['coin']}` ${best_trade['pnl']:+.2f}")
+        lines.append(f"📉 Worst: `{worst_trade['coin']}` ${worst_trade['pnl']:+.2f}")
 
     return "\n".join(lines)
 
@@ -543,6 +797,7 @@ def cmd_help():
     lines.append("/trades — Recent trade history")
     lines.append("/coins — List of monitored coins")
     lines.append("/price — Current coin live price")
+    lines.append("/profit — Performance dashboard & P&L")
     lines.append("/addcoin TICKER — Add a coin to the list")
     lines.append("/removecoin TICKER — Remove a coin from the list")
     lines.append("/swap OLD NEW — Replace one coin with another")
@@ -566,6 +821,7 @@ COMMANDS = {
     "/trades": cmd_trades,
     "/coins": cmd_coins,
     "/price": cmd_price,
+    "/profit": cmd_profit,
     "/hop": cmd_hop,
 }
 
@@ -680,6 +936,7 @@ def main():
             {"command": "trades", "description": "Recent trade history"},
             {"command": "coins", "description": "List of monitored coins"},
             {"command": "price", "description": "Current coin live price"},
+            {"command": "profit", "description": "Performance dashboard & P&L"},
             {"command": "hop", "description": "Show potential next trade"},
             {"command": "addcoin", "description": "Add a coin to trade list"},
             {"command": "removecoin", "description": "Remove a coin from list"},

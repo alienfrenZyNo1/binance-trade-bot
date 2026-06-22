@@ -1,11 +1,5 @@
 {
-  "low_volume_days": {
-    "APT": 1,
-    "DOT": 1,
-    "DOGE": 1,
-    "FIL": 1,
-    "TIA": 1
-  },
-  "last_run": "2026-06-22T09:36:20.066171",
+  "low_volume_days": {},
+  "last_run": "2026-06-22T20:04:20.683110",
   "actions_history": []
 }
