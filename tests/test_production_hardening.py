@@ -213,11 +213,11 @@ class TestSpreadDetection:
         return spread, (bid + ask) / 2
 
     def test_config_threshold_loaded(self):
-        """Config should load USDT_FALLBACK_SPREAD_THRESHOLD."""
+        """Config should load WIDE_SPREAD_THRESHOLD."""
         from binance_trade_bot.config import Config
         c = Config()
-        assert hasattr(c, 'USDT_FALLBACK_SPREAD_THRESHOLD')
-        assert c.USDT_FALLBACK_SPREAD_THRESHOLD > 0
+        assert hasattr(c, 'WIDE_SPREAD_THRESHOLD')
+        assert c.WIDE_SPREAD_THRESHOLD > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -271,15 +271,15 @@ class TestNewConfigParams:
     def test_usdt_fallback_enabled(self):
         from binance_trade_bot.config import Config
         c = Config()
-        assert hasattr(c, 'USDT_FALLBACK_ENABLED')
-        assert isinstance(c.USDT_FALLBACK_ENABLED, bool)
+        assert hasattr(c, 'SPREAD_DETECTION_ENABLED')
+        assert isinstance(c.SPREAD_DETECTION_ENABLED, bool)
 
     def test_usdt_fallback_spread_threshold(self):
         from binance_trade_bot.config import Config
         c = Config()
-        assert hasattr(c, 'USDT_FALLBACK_SPREAD_THRESHOLD')
-        assert isinstance(c.USDT_FALLBACK_SPREAD_THRESHOLD, float)
-        assert c.USDT_FALLBACK_SPREAD_THRESHOLD > 0
+        assert hasattr(c, 'WIDE_SPREAD_THRESHOLD')
+        assert isinstance(c.WIDE_SPREAD_THRESHOLD, float)
+        assert c.WIDE_SPREAD_THRESHOLD > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════

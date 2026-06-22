@@ -248,10 +248,10 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             os.environ.get("INDICATOR_CACHE_TTL") or config.get(USER_CFG_SECTION, "indicator_cache_ttl", fallback="300")
         )
 
-        # USDT fallback: if USDC spread > this %, use USDT pair instead
-        self.USDT_FALLBACK_ENABLED = (
-            os.environ.get("USDT_FALLBACK_ENABLED") or config.get(USER_CFG_SECTION, "usdt_fallback_enabled", fallback="yes")
+        # Spread detection: use midpoint pricing when USDC spread > threshold
+        self.SPREAD_DETECTION_ENABLED = (
+            os.environ.get("SPREAD_DETECTION_ENABLED") or config.get(USER_CFG_SECTION, "spread_detection_enabled", fallback="yes")
         ).lower() in ("yes", "true", "1")
-        self.USDT_FALLBACK_SPREAD_THRESHOLD = float(
-            os.environ.get("USDT_FALLBACK_SPREAD_THRESHOLD") or config.get(USER_CFG_SECTION, "usdt_fallback_spread_threshold", fallback="0.15")
+        self.WIDE_SPREAD_THRESHOLD = float(
+            os.environ.get("WIDE_SPREAD_THRESHOLD") or config.get(USER_CFG_SECTION, "wide_spread_threshold", fallback="0.15")
         )

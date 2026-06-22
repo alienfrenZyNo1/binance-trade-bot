@@ -185,7 +185,7 @@ class AutoTrader:
                 balance = self.manager.get_currency_balance(coin.symbol)
                 if balance == 0:
                     continue
-                usd_value = self.manager.get_ticker_price(coin + "USDT")
+                usd_value = self.manager.get_ticker_price(coin + self.config.BRIDGE.symbol)
                 btc_value = self.manager.get_ticker_price(coin + "BTC")
                 cv = CoinValue(coin, balance, usd_value, btc_value, datetime=now)
                 session.add(cv)

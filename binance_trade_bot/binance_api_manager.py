@@ -178,7 +178,7 @@ class BinanceAPIManager:
 
             if bid > 0 and ask > 0:
                 spread_pct = ((ask - bid) / bid) * 100
-                spread_threshold = float(getattr(self.config, 'USDT_FALLBACK_SPREAD_THRESHOLD', 0.15))
+                spread_threshold = float(getattr(self.config, 'WIDE_SPREAD_THRESHOLD', 0.15))
 
                 if spread_pct > spread_threshold * 2:
                     # Very wide spread — use midpoint for faster fill
