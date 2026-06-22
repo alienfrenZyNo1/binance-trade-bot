@@ -160,24 +160,24 @@ class TestBollingerBands:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBollingerSqueeze:
-    def _generate_compression_then_expansion(self, base=100, n=100):
-        """Generate price series with low vol period followed by expansion."""
+    def _generate_squeeze_data(self, base=100, n=80):
+        """Generate price series with high vol followed by low vol (squeeze)."""
         import random
         random.seed(42)
         prices = []
-        # Phase 1: low volatility (squeeze)
-        for i in range(60):
-            prices.append(base + random.gauss(0, 0.1))
-        # Phase 2: higher volatility
+        # Phase 1: HIGH volatility (wide bandwidth)
         for i in range(40):
-            prices.append(prices[-1] + random.gauss(0, 2))
+            prices.append(base + random.gauss(0, 5))
+        # Phase 2: LOW volatility (narrow bandwidth = squeeze)
+        for i in range(40):
+            prices.append(base + random.gauss(0, 0.2))
         return prices
 
-    def test_squeeze_in_low_vol_period(self):
-        """Should detect squeeze during low volatility."""
-        prices = []
-        for i in range(80):
-            prices.append(100 + 0.01 * math.sin(i / 10))
+    def test_squeeze_in_compression_period(self):
+        """Should detect squeeze when volatility compresses."""
+        prices = self._generate_squeeze_data()
+        # The recent prices have low vol → current bandwidth should be
+        # much smaller than the high-vol period → squeeze detected
         is_squeeze, bw, pct = detect_bollinger_squeeze(prices, period=20, squeeze_lookback=50)
         assert is_squeeze is True
         assert pct <= 20
@@ -199,12 +199,11 @@ class TestBollingerSqueeze:
         assert is_squeeze is False
         assert pct == 50.0
 
-    def test_squeeze_precedes_breakout(self):
-        """Simulate compression→expansion and verify squeeze detection."""
-        prices = self._generate_compression_then_expansion()
-        # Check during the compression phase (around index 55)
-        compression = prices[:60]
-        is_sq, _, _ = detect_bollinger_squeeze(compression, period=20, squeeze_lookback=40)
+    def test_squeeze_after_volatility_drop(self):
+        """Simulate high→low volatility transition and verify squeeze detection."""
+        # Use same data generator as the main squeeze test
+        prices = self._generate_squeeze_data()
+        is_sq, _, _ = detect_bollinger_squeeze(prices, period=20, squeeze_lookback=50)
         assert is_sq is True
 
 
