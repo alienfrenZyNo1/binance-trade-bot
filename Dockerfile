@@ -13,4 +13,9 @@ COPY . .
 RUN mkdir -p /app/data
 VOLUME /app/data
 
+# Entrypoint: loads config from persistent volume before starting
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["python", "-m", "binance_trade_bot"]

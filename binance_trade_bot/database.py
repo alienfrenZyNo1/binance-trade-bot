@@ -46,25 +46,30 @@ class Database:
         session.close()
 
     def set_coins(self, symbols: List[str]):
+        """Sync coin list from config, but NEVER re-enable a coin that was
+        manually disabled (e.g. via Telegram /removecoin or DB edit).
+
+        Only coins that are brand-new (not yet in DB) are added as enabled.
+        Existing coins keep their current enabled/disabled state unless they
+        are no longer in the config list at all, in which case they are disabled.
+        """
         session: Session
 
-        # Add coins to the database and set them as enabled or not
         with self.db_session() as session:
-            # For all the coins in the database, if the symbol no longer appears
-            # in the config file, set the coin as disabled
             coins: List[Coin] = session.query(Coin).all()
+
+            # Coins in DB but not in config → disable
             for coin in coins:
                 if coin.symbol not in symbols:
                     coin.enabled = False
 
-            # For all the symbols in the config file, add them to the database
-            # if they don't exist
+            # Coins in config but not yet in DB → add as enabled
+            # Coins already in DB → KEEP their existing enabled state
+            # (do NOT force re-enable — respects manual /removecoin etc.)
             for symbol in symbols:
-                coin = next((coin for coin in coins if coin.symbol == symbol), None)
+                coin = next((c for c in coins if c.symbol == symbol), None)
                 if coin is None:
                     session.add(Coin(symbol))
-                else:
-                    coin.enabled = True
 
         # For all the combinations of coins in the database, add a pair to the database
         with self.db_session() as session:
