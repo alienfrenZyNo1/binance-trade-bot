@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 from os import path
@@ -9,16 +10,24 @@ APPRISE_CONFIG_PATH = "config/apprise.yml"
 
 class NotificationHandler:
     def __init__(self, enabled=True):
+        self.enabled = False
+        self.apobj = apprise.Apprise()
+
+        # Try apprise.yml config file first
         if enabled and path.exists(APPRISE_CONFIG_PATH):
-            self.apobj = apprise.Apprise()
             config = apprise.AppriseConfig()
             config.add(APPRISE_CONFIG_PATH)
             self.apobj.add(config)
+            self.enabled = True
+        # Fall back to APPRISE_URLS env var (supports multiple, space-separated)
+        elif enabled and os.environ.get("APPRISE_URLS"):
+            for url in os.environ["APPRISE_URLS"].split():
+                self.apobj.add(url)
+            self.enabled = True
+
+        if self.enabled:
             self.queue = queue.Queue()
             self.start_worker()
-            self.enabled = True
-        else:
-            self.enabled = False
 
     def start_worker(self):
         threading.Thread(target=self.process_queue, daemon=True).start()
