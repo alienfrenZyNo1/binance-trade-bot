@@ -24,7 +24,16 @@ import random
 from datetime import datetime
 
 from binance_trade_bot.auto_trader import AutoTrader
-from binance_trade_bot.indicators import compute_ema as _compute_ema_func, compute_adx as _compute_adx_func
+from binance_trade_bot.indicators import (
+    compute_ema as _compute_ema_func,
+    compute_adx as _compute_adx_func,
+    compute_rsi as _compute_rsi_func,
+    compute_bollinger_bands as _compute_bb_func,
+    detect_bollinger_squeeze as _detect_bb_squeeze,
+    compute_correlation as _compute_corr_func,
+    compute_returns as _compute_returns_func,
+    compute_correlation_matrix as _compute_corr_matrix,
+)
 
 
 # ── Regime constants ─────────────────────────────────────────────────────────
@@ -144,6 +153,25 @@ class Strategy(AutoTrader):
             avg_volatility = self._compute_avg_volatility(coins)
             self._regime_volatility = avg_volatility
 
+            # BTC correlation: how correlated is this coin with BTC?
+            # High correlation + bearish BTC = more defensive
+            btc_corr = None
+            if getattr(self.config, 'BTC_CORRELATION_ENABLED', False):
+                try:
+                    btc_klines = self.manager.binance_client.get_klines(
+                        symbol=f"BTC{self.config.BRIDGE.symbol}",
+                        interval="1h",
+                        limit=min(len(closes), 50),
+                    )
+                    if btc_klines and len(btc_klines) >= 10:
+                        btc_closes = [float(k[4]) for k in btc_klines]
+                        ref_returns = _compute_returns_func(closes[-len(btc_closes):])
+                        btc_returns = _compute_returns_func(btc_closes)
+                        btc_corr = _compute_corr_func(ref_returns, btc_returns)
+                        self._regime_btc_corr = btc_corr
+                except Exception:
+                    pass
+
             # Classify
             old_regime = self._market_regime
             is_trending = adx >= self.config.ADX_TREND_THRESHOLD
@@ -175,11 +203,12 @@ class Strategy(AutoTrader):
             self._market_regime = new_regime
 
             if new_regime != old_regime:
+                corr_str = f", BTC corr: {btc_corr:.2f}" if btc_corr is not None else ""
                 self.logger.warning(
                     f"Market regime: {old_regime.upper()} → {new_regime.upper()} "
                     f"(ADX: {adx:.1f}, Vol: {avg_volatility:.1f}%, "
                     f"EMA20: {ema_short:.4f}, EMA50: {ema_long:.4f}, "
-                    f"Price: {current_price:.4f}, +DI: {plus_di:.1f}, -DI: {minus_di:.1f})"
+                    f"Price: {current_price:.4f}, +DI: {plus_di:.1f}, -DI: {minus_di:.1f}{corr_str})"
                 )
 
             # Log to DB
@@ -187,6 +216,7 @@ class Strategy(AutoTrader):
                 regime=new_regime,
                 adx_value=adx,
                 avg_volatility=avg_volatility,
+                btc_correlation=btc_corr,
                 ema_short=ema_short,
                 ema_long=ema_long,
             )
@@ -395,25 +425,8 @@ class Strategy(AutoTrader):
             )
             if not klines or len(klines) < period + 1:
                 return None
-
             closes = [float(k[4]) for k in klines]
-
-            gains = []
-            losses = []
-            for i in range(1, len(closes)):
-                change = closes[i] - closes[i - 1]
-                gains.append(max(change, 0))
-                losses.append(max(-change, 0))
-
-            # Use first 'period' changes for initial avg, then smooth
-            avg_gain = sum(gains[:period]) / period
-            avg_loss = sum(losses[:period]) / period
-
-            if avg_loss == 0:
-                return 100.0
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-            return rsi
+            return _compute_rsi_func(closes, period)
         except Exception:
             return None
 
@@ -435,6 +448,98 @@ class Strategy(AutoTrader):
             )
             return False
         return True
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  FEATURE 4: CORRELATION-BASED COIN SELECTION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _get_correlation_penalty(self, current_coin_symbol, target_coin_symbol):
+        """Compute correlation between current and target coin.
+        Returns penalty multiplier (0-1) to reduce score for highly correlated pairs.
+        Correlation > threshold → heavy penalty (mean reversion doesn't work when
+        both coins move together).
+        """
+        if not getattr(self.config, 'CORRELATION_FILTER_ENABLED', False):
+            return 1.0
+
+        try:
+            limit = 50
+            current_klines = self.manager.binance_client.get_klines(
+                symbol=f"{current_coin_symbol}{self.config.BRIDGE.symbol}",
+                interval="1h", limit=limit,
+            )
+            target_klines = self.manager.binance_client.get_klines(
+                symbol=f"{target_coin_symbol}{self.config.BRIDGE.symbol}",
+                interval="1h", limit=limit,
+            )
+            if not current_klines or not target_klines:
+                return 1.0
+
+            current_closes = [float(k[4]) for k in current_klines]
+            target_closes = [float(k[4]) for k in target_klines]
+
+            min_len = min(len(current_closes), len(target_closes))
+            current_returns = _compute_returns_func(current_closes[-min_len:])
+            target_returns = _compute_returns_func(target_closes[-min_len:])
+
+            corr = _compute_corr_func(current_returns, target_returns)
+            threshold = getattr(self.config, 'CORRELATION_THRESHOLD', 0.85)
+
+            if abs(corr) > threshold:
+                # Penalty: reduce score proportionally to how far above threshold
+                excess = (abs(corr) - threshold) / (1.0 - threshold)
+                penalty = max(0.2, 1.0 - excess * 0.5)
+                self.logger.debug(
+                    f"Correlation penalty for {current_coin_symbol}→{target_coin_symbol}: "
+                    f"corr={corr:.2f}, penalty={penalty:.2f}"
+                )
+                return penalty
+            return 1.0
+        except Exception:
+            return 1.0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  FEATURE 5: BOLLINGER BAND SQUEEZE DETECTION
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_bb_squeeze_bonus(self, coin_symbol):
+        """Detect Bollinger Band squeeze — low volatility period that often
+        precedes a breakout. If detected, give the coin a small score bonus
+        since a move is imminent (and mean reversion strategies do well
+        after squeezes resolve).
+
+        Returns a multiplier (1.0 = no bonus, up to ~1.3 for strong squeeze).
+        """
+        if not getattr(self.config, 'BB_SQUEEZE_ENABLED', False):
+            return 1.0
+
+        try:
+            period = getattr(self.config, 'BB_PERIOD', 20)
+            lookback = getattr(self.config, 'BB_SQUEEZE_LOOKBACK', 50)
+            klines = self.manager.binance_client.get_klines(
+                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
+                interval="1h", limit=period + lookback,
+            )
+            if not klines or len(klines) < period + 10:
+                return 1.0
+
+            closes = [float(k[4]) for k in klines]
+            is_squeeze, bandwidth, percentile = _detect_bb_squeeze(
+                closes, period=period, squeeze_lookback=lookback
+            )
+
+            if is_squeeze:
+                # Bonus: tighter squeeze = bigger bonus
+                bonus = 1.0 + (1.0 - percentile / 20.0) * 0.3
+                self.logger.info(
+                    f"BB squeeze detected for {coin_symbol} "
+                    f"(bandwidth: {bandwidth:.4f}, percentile: {percentile:.0f}%, "
+                    f"bonus: {bonus:.2f}x)"
+                )
+                return bonus
+            return 1.0
+        except Exception:
+            return 1.0
 
     # ─────────────────────────────────────────────────────────────────────────
     #  PHASE D: TRAILING STOP-LOSS
@@ -663,6 +768,58 @@ class Strategy(AutoTrader):
         del self._recently_held[coin_symbol]
         return False
 
+    def transaction_through_bridge(self, pair):
+        """Override with dynamic position sizing support.
+        
+        In bear/sideways mode, only deploy a fraction of bridge balance,
+        keeping the rest as dry powder for buying dips.
+        """
+        # Standard sell logic
+        balance = self.manager.get_currency_balance(pair.from_coin.symbol)
+        from_coin_price = self.manager.get_ticker_price(pair.from_coin + self.config.BRIDGE)
+
+        if not balance or not from_coin_price or balance * from_coin_price <= self.manager.get_min_notional(
+            pair.from_coin.symbol, self.config.BRIDGE.symbol
+        ):
+            self.logger.info("Skipping sell - not enough balance")
+            return None
+
+        if self.manager.sell_alt(pair.from_coin, self.config.BRIDGE) is None:
+            self.logger.info("Couldn't sell, going back to scouting mode...")
+            return None
+
+        # Feature 3: Dynamic position sizing
+        max_balance = None
+        if getattr(self.config, 'DYNAMIC_POSITION_ENABLED', False):
+            if self._market_regime == BEAR:
+                position_pct = getattr(self.config, 'BEAR_POSITION_SIZE', 0.7)
+            elif self._market_regime == SIDEWAYS:
+                position_pct = getattr(self.config, 'SIDEWAYS_POSITION_SIZE', 0.9)
+            else:
+                position_pct = 1.0  # Full position in bull mode
+
+            if position_pct < 1.0:
+                bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+                max_balance = bridge_balance * position_pct
+                reserve = bridge_balance - max_balance
+                if reserve >= 5.0:  # Only keep reserve if it's above min notional
+                    self.logger.info(
+                        f"Dynamic position sizing: deploying {position_pct*100:.0f}% "
+                        f"(${max_balance:.2f}), keeping ${reserve:.2f} as dry powder "
+                        f"(regime: {self._market_regime})"
+                    )
+                else:
+                    max_balance = None  # Reserve too small, go all in
+
+        result = self.manager.buy_alt(pair.to_coin, self.config.BRIDGE, max_target_balance=max_balance)
+        if result is not None:
+            self.db.set_current_coin(pair.to_coin)
+            self.update_trade_threshold(pair.to_coin, result.price)
+            return result
+
+        self.logger.info("Couldn't buy, going back to scouting mode...")
+        return None
+
     def _jump_to_best_coin(self, coin, coin_price):
         """Find the best coin to jump to, applying regime-specific logic."""
         # Get scores based on regime
@@ -723,11 +880,23 @@ class Strategy(AutoTrader):
             momentum_filtered[pair] = score
 
         if not momentum_filtered:
-            self.logger.info("All candidates filtered out by momentum filter")
+            self.logger.info("All candidates filtered out by momentum/RSI filter")
+            return
+
+        # Feature 4: Apply correlation penalty (reduce score for highly correlated coins)
+        # Feature 5: Apply BB squeeze bonus (boost score for coins about to break out)
+        adjusted = {}
+        for pair, score in momentum_filtered.items():
+            corr_penalty = self._get_correlation_penalty(coin.symbol, pair.to_coin_id)
+            bb_bonus = self._check_bb_squeeze_bonus(pair.to_coin_id)
+            adjusted_score = score * corr_penalty * bb_bonus
+            adjusted[pair] = adjusted_score
+
+        if not adjusted:
             return
 
         # Jump to best remaining candidate
-        best_pair = max(momentum_filtered, key=momentum_filtered.get)
+        best_pair = max(adjusted, key=adjusted.get)
         self.logger.info(
             f"Jumping from {coin} to {best_pair.to_coin_id} "
             f"(score: {momentum_filtered[best_pair]:.6f}, "

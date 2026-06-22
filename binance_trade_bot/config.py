@@ -196,3 +196,44 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.RSI_OVERBOUGHT = float(
             os.environ.get("RSI_OVERBOUGHT") or config.get(USER_CFG_SECTION, "rsi_overbought", fallback="68")
         )
+
+        # ── ROI Maximization features ─────────────────────────────────────────
+        # Maker orders: place limit orders at bid/ask for 0.025% fee (vs 0.075% taker)
+        self.USE_MAKER_ORDERS = (
+            os.environ.get("USE_MAKER_ORDERS") or config.get(USER_CFG_SECTION, "use_maker_orders", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+
+        # Dynamic position sizing: in bear mode, only trade a fraction of position
+        self.DYNAMIC_POSITION_ENABLED = (
+            os.environ.get("DYNAMIC_POSITION_ENABLED") or config.get(USER_CFG_SECTION, "dynamic_position_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.BEAR_POSITION_SIZE = float(
+            os.environ.get("BEAR_POSITION_SIZE") or config.get(USER_CFG_SECTION, "bear_position_size", fallback="0.7")
+        )
+        self.SIDEWAYS_POSITION_SIZE = float(
+            os.environ.get("SIDEWAYS_POSITION_SIZE") or config.get(USER_CFG_SECTION, "sideways_position_size", fallback="0.9")
+        )
+
+        # Bollinger Band squeeze detection
+        self.BB_SQUEEZE_ENABLED = (
+            os.environ.get("BB_SQUEEZE_ENABLED") or config.get(USER_CFG_SECTION, "bb_squeeze_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.BB_PERIOD = int(
+            os.environ.get("BB_PERIOD") or config.get(USER_CFG_SECTION, "bb_period", fallback="20")
+        )
+        self.BB_SQUEEZE_LOOKBACK = int(
+            os.environ.get("BB_SQUEEZE_LOOKBACK") or config.get(USER_CFG_SECTION, "bb_squeeze_lookback", fallback="50")
+        )
+
+        # Correlation-based coin selection
+        self.CORRELATION_FILTER_ENABLED = (
+            os.environ.get("CORRELATION_FILTER_ENABLED") or config.get(USER_CFG_SECTION, "correlation_filter_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.CORRELATION_THRESHOLD = float(
+            os.environ.get("CORRELATION_THRESHOLD") or config.get(USER_CFG_SECTION, "correlation_threshold", fallback="0.85")
+        )
+
+        # BTC correlation for regime detection
+        self.BTC_CORRELATION_ENABLED = (
+            os.environ.get("BTC_CORRELATION_ENABLED") or config.get(USER_CFG_SECTION, "btc_correlation_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")

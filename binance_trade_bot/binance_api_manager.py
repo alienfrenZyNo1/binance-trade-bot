@@ -161,6 +161,37 @@ class BinanceAPIManager:
     def get_min_notional(self, origin_symbol: str, target_symbol: str):
         return float(self.get_symbol_filter(origin_symbol, target_symbol, "NOTIONAL")["minNotional"])
 
+    def _get_order_book_price(self, symbol: str, side: str):
+        """Get the best maker price from the order book.
+        
+        For BUY: returns best bid (passive buy = maker fill)
+        For SELL: returns best ask (passive sell = maker fill)
+        Falls back to ticker price if order book unavailable.
+        """
+        try:
+            depth = self.binance_client.get_orderbook_ticker(symbol=symbol)
+            if side == "BUY":
+                price = float(depth.get("bidPrice", 0))
+            else:
+                price = float(depth.get("askPrice", 0))
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        return self.get_ticker_price(symbol)
+
+    def _get_tick_size(self, symbol: str):
+        """Get the price tick size for a symbol."""
+        try:
+            price_filter = self.get_symbol_filter(
+                symbol.replace(self.config.BRIDGE_SYMBOL, ""),
+                self.config.BRIDGE_SYMBOL,
+                "PRICE_FILTER"
+            )
+            return float(price_filter.get("tickSize", 0.0001))
+        except Exception:
+            return 0.0001
+
     def _wait_for_order(
         self, order_id, origin_symbol: str, target_symbol: str
     ) -> Optional[BinanceOrder]:  # pylint: disable=unsubscriptable-object
@@ -246,8 +277,8 @@ class BinanceAPIManager:
 
         return False
 
-    def buy_alt(self, origin_coin: Coin, target_coin: Coin) -> BinanceOrder:
-        return self.retry(self._buy_alt, origin_coin, target_coin)
+    def buy_alt(self, origin_coin: Coin, target_coin: Coin, max_target_balance: Optional[float] = None) -> BinanceOrder:
+        return self.retry(self._buy_alt, origin_coin, target_coin, max_target_balance)
 
     def _buy_quantity(
         self,
@@ -262,7 +293,7 @@ class BinanceAPIManager:
         origin_tick = self.get_alt_tick(origin_symbol, target_symbol)
         return math.floor(target_balance * 10**origin_tick / from_coin_price) / float(10**origin_tick)
 
-    def _buy_alt(self, origin_coin: Coin, target_coin: Coin):  # pylint: disable=too-many-locals
+    def _buy_alt(self, origin_coin: Coin, target_coin: Coin, max_target_balance: Optional[float] = None):  # pylint: disable=too-many-locals
         """
         Buy altcoin
         """
@@ -275,8 +306,19 @@ class BinanceAPIManager:
 
         origin_balance = self.get_currency_balance(origin_symbol)
         target_balance = self.get_currency_balance(target_symbol)
+        
+        # Dynamic position sizing: cap the amount deployed
+        if max_target_balance is not None:
+            target_balance = min(target_balance, max_target_balance)
         pair_info = self.binance_client.get_symbol_info(origin_symbol + target_symbol)
-        from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
+        
+        # Maker order support: use best bid for passive fill (0.025% fee vs 0.075%)
+        use_maker = getattr(self.config, 'USE_MAKER_ORDERS', False)
+        if use_maker:
+            from_coin_price = self._get_order_book_price(origin_symbol + target_symbol, "BUY")
+            self.logger.info(f"Using MAKER price for buy: {from_coin_price}")
+        else:
+            from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
         from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
 
         order_quantity = self._buy_quantity(origin_symbol, target_symbol, target_balance, from_coin_price)
@@ -357,7 +399,14 @@ class BinanceAPIManager:
         target_balance = self.get_currency_balance(target_symbol)
 
         pair_info = self.binance_client.get_symbol_info(origin_symbol + target_symbol)
-        from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
+        
+        # Maker order support: use best ask for passive fill (0.025% fee vs 0.075%)
+        use_maker = getattr(self.config, 'USE_MAKER_ORDERS', False)
+        if use_maker:
+            from_coin_price = self._get_order_book_price(origin_symbol + target_symbol, "SELL")
+            self.logger.info(f"Using MAKER price for sell: {from_coin_price}")
+        else:
+            from_coin_price = self.get_ticker_price(origin_symbol + target_symbol)
         from_coin_price_s = "{:0.0{}f}".format(from_coin_price, pair_info["quotePrecision"])
 
         order_quantity = self._sell_quantity(origin_symbol, target_symbol, origin_balance)
