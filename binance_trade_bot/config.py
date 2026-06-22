@@ -74,7 +74,10 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
 
         self.CURRENT_COIN_SYMBOL = os.environ.get("CURRENT_COIN_SYMBOL") or config.get(USER_CFG_SECTION, "current_coin")
 
-        self.STRATEGY = os.environ.get("STRATEGY") or config.get(USER_CFG_SECTION, "strategy")
+        # Strategy: user.cfg file takes priority over env var (allows switching
+        # strategies via persistent config without needing Coolify env changes)
+        cfg_strategy = config.get(USER_CFG_SECTION, "strategy", fallback="default")
+        self.STRATEGY = cfg_strategy if cfg_strategy and cfg_strategy != "default" else (os.environ.get("STRATEGY") or "default")
 
         self.SELL_TIMEOUT = os.environ.get("SELL_TIMEOUT") or config.get(USER_CFG_SECTION, "sell_timeout")
         self.BUY_TIMEOUT = os.environ.get("BUY_TIMEOUT") or config.get(USER_CFG_SECTION, "buy_timeout")
