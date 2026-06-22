@@ -9,7 +9,8 @@ RUN pip install --no-cache-dir -r /requirements.txt
 
 COPY . .
 
-# Create default user.cfg from example so env var fallbacks work
-COPY .user.cfg.example user.cfg
+# Create data directory for SQLite database
+RUN mkdir -p /app/data
+VOLUME /app/data
 
 CMD ["python", "-m", "binance_trade_bot"]
