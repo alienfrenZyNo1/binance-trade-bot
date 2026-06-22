@@ -425,6 +425,117 @@ def cmd_swap(args):
     return "\n".join(result) + f"\n💰 `{new}` price: ${price:.6f}"
 
 
+def cmd_hop():
+    """Show potential next hops from the current coin, ranked by profitability."""
+    current = get_current_coin()
+    conn = get_db()
+
+    # Get the latest scout entry per pair for the current coin
+    rows = conn.execute(
+        """SELECT p.from_coin_id, p.to_coin_id, p.ratio as target_ratio,
+                  sh.current_coin_price, sh.other_coin_price, sh.datetime
+           FROM scout_history sh
+           JOIN pairs p ON sh.pair_id = p.id
+           JOIN coins c_to ON p.to_coin_id = c_to.symbol
+           JOIN coins c_from ON p.from_coin_id = c_from.symbol
+           WHERE sh.id IN (
+               SELECT MAX(sh2.id) FROM scout_history sh2
+               JOIN pairs p2 ON sh2.pair_id = p2.id
+               JOIN coins cf ON p2.from_coin_id = cf.symbol
+               JOIN coins ct ON p2.to_coin_id = ct.symbol
+               WHERE cf.enabled = 1 AND ct.enabled = 1
+               AND p2.from_coin_id = ?
+               GROUP BY p2.id
+           )
+           AND p.from_coin_id = ?
+           AND c_from.enabled = 1 AND c_to.enabled = 1
+           ORDER BY sh.datetime DESC""",
+        (current, current),
+    ).fetchall()
+
+    if not rows:
+        conn.close()
+        return f"❌ No scout data yet for `{current}`. The bot needs a few minutes to build up ratios."
+
+    # Calculate jump scores (same formula as the trade bot)
+    # score = current_ratio * (1 - fee * multiplier) - target_ratio
+    # Use 0.001 fee (0.1% maker) and multiplier=3 (from user.cfg, env var might differ)
+    fee = 0.001
+    multiplier = 3.0  # scout_multiplier
+    transaction_fee = fee + fee - fee * fee  # ~0.001999
+
+    candidates = []
+    for r in rows:
+        to_coin = r["to_coin_id"]
+        target = r["target_ratio"]
+        cur_price = r["current_coin_price"]
+        other_price = r["other_coin_price"]
+        if not cur_price or not other_price or other_price == 0:
+            continue
+        current_ratio = cur_price / other_price
+        score = (current_ratio - transaction_fee * multiplier * current_ratio) - target
+        divergence_pct = ((current_ratio / target) - 1) * 100 if target > 0 else 0
+
+        candidates.append({
+            "to": to_coin,
+            "current_ratio": current_ratio,
+            "target_ratio": target,
+            "score": score,
+            "divergence": divergence_pct,
+            "last_scouted": r["datetime"],
+        })
+
+    conn.close()
+
+    if not candidates:
+        return f"❌ No viable pairs for `{current}`."
+
+    # Sort by score descending (best jump first)
+    candidates.sort(key=lambda x: x["score"], reverse=True)
+
+    # Get live prices for top candidates
+    price_map = {}
+    try:
+        r = requests.get(f"{API_BASE}/ticker/price", timeout=10)
+        if r.status_code == 200:
+            price_map = {p["symbol"]: float(p["price"]) for p in r.json()}
+    except Exception:
+        pass
+
+    lines = [f"🚀 **Potential Hops from `{current}`**\n"]
+    lines.append(f"Scout multiplier: `{multiplier}` | Fee: `0.2%` round trip")
+    lines.append(f"Pairs evaluated: {len(candidates)}\n")
+
+    # Show top 5
+    for i, c in enumerate(candidates[:5], 1):
+        emoji = "🔥" if c["score"] > 0 else "⏳"
+        status = "**READY**" if c["score"] > 0 else "waiting"
+        div_emoji = "📈" if c["divergence"] > 0 else "📉"
+        pair = f"{current}{BRIDGE_SYMBOL}"
+        price = price_map.get(f"{c['to']}{BRIDGE_SYMBOL}", 0)
+        price_str = f"${price:.4f}" if price else "?"
+        lines.append(
+            f"{emoji} #{i}: `{c['to']}` — {status}"
+        )
+        lines.append(f"   {div_emoji} Divergence: {c['divergence']:+.3f}% | Price: {price_str}")
+        lines.append(
+            f"   Score: {c['score']:.6f} | Ratio: {c['current_ratio']:.6f} vs {c['target_ratio']:.6f}"
+        )
+        if i < 5:
+            lines.append("")
+
+    # Summary
+    viable = sum(1 for c in candidates if c["score"] > 0)
+    if viable > 0:
+        best = candidates[0]
+        lines.append(f"\n🎯 **Bot would jump to: `{best['to']}`** (score: {best['score']:.6f})")
+    else:
+        lines.append(f"\n⏸ No profitable hop yet. Best candidate is `{candidates[0]['to']}` — needs {abs(candidates[0]['score']):.6f} more divergence.")
+        lines.append("The bot will trade once a pair hits 0.000000 score or higher.")
+
+    return "\n".join(lines)
+
+
 def cmd_help():
     """List available commands."""
     lines = ["🤖 **Available Commands**\n"]
@@ -435,6 +546,7 @@ def cmd_help():
     lines.append("/addcoin TICKER — Add a coin to the list")
     lines.append("/removecoin TICKER — Remove a coin from the list")
     lines.append("/swap OLD NEW — Replace one coin with another")
+    lines.append("/hop — Show potential next trade targets")
     lines.append("/help — This message")
     return "\n".join(lines)
 
@@ -454,6 +566,7 @@ COMMANDS = {
     "/trades": cmd_trades,
     "/coins": cmd_coins,
     "/price": cmd_price,
+    "/hop": cmd_hop,
 }
 
 
@@ -567,6 +680,7 @@ def main():
             {"command": "trades", "description": "Recent trade history"},
             {"command": "coins", "description": "List of monitored coins"},
             {"command": "price", "description": "Current coin live price"},
+            {"command": "hop", "description": "Show potential next trade"},
             {"command": "addcoin", "description": "Add a coin to trade list"},
             {"command": "removecoin", "description": "Remove a coin from list"},
             {"command": "swap", "description": "Swap one coin for another"},
