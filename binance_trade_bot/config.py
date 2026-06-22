@@ -125,3 +125,54 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.PROFIT_TAKING_INTERVAL = int(
             os.environ.get("PROFIT_TAKING_INTERVAL") or config.get(USER_CFG_SECTION, "profit_taking_interval", fallback="15")
         )
+
+        # ── Adaptive multi-regime strategy settings ──────────────────────────
+        # Phase A: Regime detection
+        self.ADX_PERIOD = int(
+            os.environ.get("ADX_PERIOD") or config.get(USER_CFG_SECTION, "adx_period", fallback="14")
+        )
+        self.ADX_TREND_THRESHOLD = float(
+            os.environ.get("ADX_TREND_THRESHOLD") or config.get(USER_CFG_SECTION, "adx_trend_threshold", fallback="25")
+        )
+        self.EMA_SHORT = int(
+            os.environ.get("EMA_SHORT") or config.get(USER_CFG_SECTION, "ema_short", fallback="20")
+        )
+        self.EMA_LONG = int(
+            os.environ.get("EMA_LONG") or config.get(USER_CFG_SECTION, "ema_long", fallback="50")
+        )
+        self.REGIME_CHECK_INTERVAL = int(
+            os.environ.get("REGIME_CHECK_INTERVAL") or config.get(USER_CFG_SECTION, "regime_check_interval", fallback="300")
+        )
+
+        # Phase B: Bull trend mode
+        self.BULL_ZSCORE_MULT = float(
+            os.environ.get("BULL_ZSCORE_MULT") or config.get(USER_CFG_SECTION, "bull_zscore_mult", fallback="0.67")
+        )
+        self.BULL_COOLDOWN = int(
+            os.environ.get("BULL_COOLDOWN") or config.get(USER_CFG_SECTION, "bull_cooldown", fallback="900")
+        )
+        self.BULL_PROFIT_TAKE_INTERVAL = int(
+            os.environ.get("BULL_PROFIT_TAKE_INTERVAL") or config.get(USER_CFG_SECTION, "bull_profit_take_interval", fallback="30")
+        )
+
+        # Phase C: Bear trend mode
+        self.BEAR_ZSCORE_MULT = float(
+            os.environ.get("BEAR_ZSCORE_MULT") or config.get(USER_CFG_SECTION, "bear_zscore_mult", fallback="2.0")
+        )
+        self.BEAR_COOLDOWN = int(
+            os.environ.get("BEAR_COOLDOWN") or config.get(USER_CFG_SECTION, "bear_cooldown", fallback="1800")
+        )
+        self.BEAR_PROFIT_TAKE_INTERVAL = int(
+            os.environ.get("BEAR_PROFIT_TAKE_INTERVAL") or config.get(USER_CFG_SECTION, "bear_profit_take_interval", fallback="5")
+        )
+        self.BEAR_MOMENTUM_MAX_DROP = float(
+            os.environ.get("BEAR_MOMENTUM_MAX_DROP") or config.get(USER_CFG_SECTION, "bear_momentum_max_drop", fallback="2.0")
+        )
+
+        # Phase D: Trailing stop-loss
+        self.TRAILING_STOP_ENABLED = (
+            os.environ.get("TRAILING_STOP_ENABLED") or config.get(USER_CFG_SECTION, "trailing_stop_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.TRAILING_STOP_PCT = float(
+            os.environ.get("TRAILING_STOP_PCT") or config.get(USER_CFG_SECTION, "trailing_stop_pct", fallback="8.0")
+        )

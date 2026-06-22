@@ -327,6 +327,54 @@ class Database:
                 return stat.ema_ratio, stat.std_ratio
             return None, None
 
+    def log_market_regime(self, regime, adx_value=None, avg_volatility=None,
+                          btc_correlation=None, ema_short=None, ema_long=None):
+        """Log a market regime classification."""
+        from .models import MarketRegimeLog
+        session: Session
+        with self.db_session() as session:
+            entry = MarketRegimeLog(
+                regime, adx_value, avg_volatility, btc_correlation, ema_short, ema_long
+            )
+            session.add(entry)
+
+    def get_latest_regime(self):
+        """Get the most recent regime log entry. Returns dict or None."""
+        from .models import MarketRegimeLog
+        session: Session
+        with self.db_session() as session:
+            entry = session.query(MarketRegimeLog).order_by(
+                MarketRegimeLog.datetime.desc()
+            ).first()
+            if entry:
+                return {
+                    "regime": entry.regime,
+                    "adx_value": entry.adx_value,
+                    "avg_volatility": entry.avg_volatility,
+                    "btc_correlation": entry.btc_correlation,
+                    "datetime": entry.datetime.isoformat() if entry.datetime else None,
+                }
+            return None
+
+    def get_regime_history(self, hours=24):
+        """Get regime history for the last N hours."""
+        from .models import MarketRegimeLog
+        time_diff = datetime.now() - timedelta(hours=hours)
+        session: Session
+        with self.db_session() as session:
+            entries = session.query(MarketRegimeLog).filter(
+                MarketRegimeLog.datetime >= time_diff
+            ).order_by(MarketRegimeLog.datetime.desc()).all()
+            return [
+                {
+                    "regime": e.regime,
+                    "adx": e.adx_value,
+                    "vol": e.avg_volatility,
+                    "datetime": e.datetime.isoformat() if e.datetime else None,
+                }
+                for e in entries
+            ]
+
     def start_trade_log(self, from_coin: Coin, to_coin: Coin, selling: bool):
         return TradeLog(self, from_coin, to_coin, selling)
 

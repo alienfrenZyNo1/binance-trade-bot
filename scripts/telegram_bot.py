@@ -790,6 +790,92 @@ def cmd_profit():
     return "\n".join(lines)
 
 
+def cmd_regime():
+    """Show current market regime and how the bot is adapting."""
+    conn = get_db()
+
+    # Get latest regime from DB
+    row = conn.execute(
+        """SELECT regime, adx_value, avg_volatility, btc_correlation, datetime
+           FROM market_regime_log ORDER BY id DESC LIMIT 1"""
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        # Fall back to live calculation
+        try:
+            r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+            if r.status_code == 200:
+                coins = conn.execute("SELECT symbol FROM coins WHERE enabled = 1").fetchall()
+                total_vol = 0
+                cnt = 0
+                for c in coins:
+                    pair = f"{c['symbol']}{BRIDGE_SYMBOL}"
+                    for t in r.json():
+                        if t["symbol"] == pair:
+                            total_vol += abs(float(t["priceChangePercent"]))
+                            cnt += 1
+                            break
+                avg_vol = total_vol / cnt if cnt > 0 else 0
+                regime = "stormy" if avg_vol > 8 else "sideways"
+                conn.close()
+                return f"🧠 **Market Regime** (estimated)\n\nStatus: `{regime}`\nAvg volatility: `{avg_vol:.1f}%`\n\n_Bot is collecting data for full regime detection..._"
+        except Exception:
+            pass
+        conn.close()
+        return "❌ No regime data yet. Bot needs a few minutes to classify the market."
+
+    regime = row["regime"]
+    adx = row["adx_value"] or 0
+    vol = row["avg_volatility"] or 0
+
+    emoji_map = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "stormy": "🟠"}
+    desc_map = {
+        "bull": "Momentum mode — buying strength, holding longer",
+        "bear": "Defense mode — preserving capital, banking gains fast",
+        "sideways": "Mean reversion — buying dips, selling rips",
+        "stormy": "Conservative — extreme thresholds only",
+    }
+
+    emoji = emoji_map.get(regime, "❓")
+    desc = desc_map.get(regime, "Unknown")
+
+    lines = [f"🧠 **Market Regime**\n"]
+    lines.append(f"Status: {emoji} **{regime.upper()}**")
+    lines.append(f"Strategy: {desc}\n")
+    lines.append(f"📊 ADX: `{adx:.1f}` (>25 = trending)")
+    lines.append(f"📉 Avg volatility: `{vol:.1f}%`")
+
+    # How long in this regime
+    regime_history = conn.execute(
+        """SELECT regime, datetime FROM market_regime_log
+           ORDER BY id DESC LIMIT 20"""
+    ).fetchall()
+    conn.close()
+
+    if regime_history:
+        current_since = None
+        for r in regime_history:
+            if r["regime"] == regime:
+                current_since = r["datetime"]
+            else:
+                break
+        if current_since:
+            lines.append(f"\nIn this regime since: `{str(current_since)[:19]}`")
+
+    # Regime distribution (last 24h)
+    if len(regime_history) >= 2:
+        from collections import Counter
+        counts = Counter(r["regime"] for r in regime_history)
+        total = sum(counts.values())
+        lines.append(f"\n**Recent distribution:**")
+        for r, c in counts.most_common():
+            pct = c / total * 100
+            lines.append(f"  {emoji_map.get(r, '❓')} {r}: {pct:.0f}%")
+
+    return "\n".join(lines)
+
+
 def cmd_help():
     """List available commands."""
     lines = ["🤖 **Available Commands**\n"]
@@ -798,6 +884,7 @@ def cmd_help():
     lines.append("/coins — List of monitored coins")
     lines.append("/price — Current coin live price")
     lines.append("/profit — Performance dashboard & P&L")
+    lines.append("/regime — Current market regime & strategy")
     lines.append("/addcoin TICKER — Add a coin to the list")
     lines.append("/removecoin TICKER — Remove a coin from the list")
     lines.append("/swap OLD NEW — Replace one coin with another")
@@ -822,6 +909,7 @@ COMMANDS = {
     "/coins": cmd_coins,
     "/price": cmd_price,
     "/profit": cmd_profit,
+    "/regime": cmd_regime,
     "/hop": cmd_hop,
 }
 
@@ -937,6 +1025,7 @@ def main():
             {"command": "coins", "description": "List of monitored coins"},
             {"command": "price", "description": "Current coin live price"},
             {"command": "profit", "description": "Performance dashboard & P&L"},
+            {"command": "regime", "description": "Market regime & strategy mode"},
             {"command": "hop", "description": "Show potential next trade"},
             {"command": "addcoin", "description": "Add a coin to trade list"},
             {"command": "removecoin", "description": "Remove a coin from list"},
