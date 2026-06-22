@@ -1,0 +1,10 @@
+services:
+  binance-trade-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - bot-data:/app/data
+volumes:
+  bot-data:
