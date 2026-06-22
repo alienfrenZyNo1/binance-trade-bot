@@ -53,8 +53,7 @@ def main():
     schedule.every(6).hours.do(db.prune_ratio_samples).tag("pruning ratio samples")
 
     logger.info(
-        f"Improved strategy active | "
-        f"Z-score threshold: {getattr(config, 'Z_SCORE_THRESHOLD', 1.5)} | "
+        f"Strategy '{config.STRATEGY}' active | "
         f"Cooldown: {getattr(config, 'TRADE_COOLDOWN_SECONDS', 300)}s | "
         f"Ratio sampling: every {sample_interval}min"
     )
