@@ -10,7 +10,7 @@ eventlet>=0.35.2
 python-socketio[client]==5.2.1
 cachetools==4.2.2
 sqlitedict==1.7.0
-unicorn-binance-websocket-api==2.10.1
+unicorn-binance-websocket-api==2.14.0
 unicorn-fy==0.17.2
 itsdangerous==2.1.2
 Werkzeug==2.3.8
