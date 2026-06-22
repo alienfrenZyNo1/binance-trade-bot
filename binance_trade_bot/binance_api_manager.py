@@ -284,10 +284,21 @@ class BinanceAPIManager:
 
         self.logger.info(f"BUY QTY {order_quantity}")
 
+        if order_quantity <= 0:
+            self.logger.error(
+                f"Buy quantity is 0 for {origin_symbol}/{target_symbol} "
+                f"(balance: {target_balance}, price: {from_coin_price}). "
+                f"Not enough funds to trade."
+            )
+            return None
+
         # Try to buy until successful
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
+        max_attempts = 5
+        attempts = 0
         while order is None:
+            attempts += 1
             try:
                 order = self.binance_client.order_limit_buy(
                     symbol=origin_symbol + target_symbol,
@@ -297,9 +308,16 @@ class BinanceAPIManager:
                 self.logger.info(order)
             except BinanceAPIException as e:
                 self.logger.info(e)
+                if attempts >= max_attempts:
+                    self.logger.error(
+                        f"Buy failed after {max_attempts} attempts. Giving up to avoid API spam."
+                    )
+                    return None
                 time.sleep(1)
             except Exception as e:  # pylint: disable=broad-except
                 self.logger.warning(f"Unexpected Error: {e}")
+                if attempts >= max_attempts:
+                    return None
 
         trade_log.set_ordered(origin_balance, target_balance, order_quantity)
 
@@ -346,16 +364,39 @@ class BinanceAPIManager:
         order_quantity_s = "{:0.0{}f}".format(order_quantity, pair_info["baseAssetPrecision"])
         self.logger.info(f"Selling {order_quantity} of {origin_symbol}")
 
+        if order_quantity <= 0:
+            self.logger.error(
+                f"Sell quantity is 0 for {origin_symbol}/{target_symbol} "
+                f"(balance: {origin_balance}). Not enough to sell."
+            )
+            return None
+
         self.logger.info(f"Balance is {origin_balance}")
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
+        max_attempts = 5
+        attempts = 0
         while order is None:
-            # Should sell at calculated price to avoid lost coin
-            order = self.binance_client.order_limit_sell(
-                symbol=origin_symbol + target_symbol,
-                quantity=(order_quantity_s),
-                price=from_coin_price_s,
-            )
+            attempts += 1
+            try:
+                # Should sell at calculated price to avoid lost coin
+                order = self.binance_client.order_limit_sell(
+                    symbol=origin_symbol + target_symbol,
+                    quantity=(order_quantity_s),
+                    price=from_coin_price_s,
+                )
+            except BinanceAPIException as e:
+                self.logger.info(e)
+                if attempts >= max_attempts:
+                    self.logger.error(
+                        f"Sell failed after {max_attempts} attempts. Giving up to avoid API spam."
+                    )
+                    return None
+                time.sleep(1)
+            except Exception as e:  # pylint: disable=broad-except
+                self.logger.warning(f"Unexpected Error: {e}")
+                if attempts >= max_attempts:
+                    return None
 
         self.logger.info("order")
         self.logger.info(order)
