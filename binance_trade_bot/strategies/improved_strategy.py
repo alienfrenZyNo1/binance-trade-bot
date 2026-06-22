@@ -62,12 +62,14 @@ class Strategy(AutoTrader):
 
         # Trade cooldown + profit-taking state
         self._last_trade_time = 0
-        self._trades_since_profit_take = self._count_completed_trades()
+        self._trades_since_profit_take = 0  # Start at 0, increment per trade
         self._awaiting_reentry = False
 
         # Trailing stop-loss state
         self._position_entry_price = {}  # coin_symbol -> entry price
         self._position_peak_price = {}   # coin_symbol -> peak price since entry
+        self._last_sold_coin = None      # Track what we just sold (avoid immediate buyback)
+        self._profit_take_time = 0       # When profit-taking happened (for re-entry delay)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  TECHNICAL INDICATORS (delegated to indicators.py)
@@ -463,8 +465,21 @@ class Strategy(AutoTrader):
             self.logger.info(f"Profit-taking: selling {current_coin} to {self.config.BRIDGE.symbol}")
             result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
             if result is not None:
+                # Verify the sell actually executed — check remaining balance
+                time.sleep(1)  # Brief pause for order to process
+                remaining = self.manager.get_currency_balance(current_coin.symbol)
+                if remaining and remaining * current_coin_price > self.manager.get_min_notional(
+                    current_coin.symbol, self.config.BRIDGE.symbol
+                ):
+                    self.logger.warning(
+                        f"Profit-taking: sell order placed but {remaining} {current_coin.symbol} "
+                        f"still held — order may not have filled. Aborting re-entry."
+                    )
+                    return False
                 self._awaiting_reentry = True
                 self._trades_since_profit_take = 0
+                self._last_sold_coin = current_coin.symbol
+                self._profit_take_time = time.time()
                 self._position_entry_price.pop(current_coin.symbol, None)
                 self._position_peak_price.pop(current_coin.symbol, None)
                 self.logger.info("Profit-taking complete, awaiting re-entry signal")
@@ -478,9 +493,24 @@ class Strategy(AutoTrader):
         """Find the best coin to buy back after profit-taking or stop-loss."""
         bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
 
-        if bridge_balance <= 0:
-            self._awaiting_reentry = False
+        # Use min_notional threshold, not just > 0
+        min_threshold = 5.0  # $5 conservative default
+        if bridge_balance < min_threshold:
+            if not hasattr(self, '_reentry_wait_logged') or not self._reentry_wait_logged:
+                self.logger.info(
+                    f"Re-entry: bridge balance {bridge_balance} {self.config.BRIDGE.symbol} "
+                    f"below ${min_threshold} threshold, waiting..."
+                )
+                self._reentry_wait_logged = True
             return
+        self._reentry_wait_logged = False
+
+        # Don't re-enter immediately — wait at least 2 minutes after profit-taking
+        # to avoid buying back the same coin at the same price (paying fees for nothing)
+        if self._profit_take_time > 0:
+            elapsed = time.time() - self._profit_take_time
+            if elapsed < 120:
+                return  # Silently wait
 
         self.logger.info(
             f"Re-entry scouting with {bridge_balance} {self.config.BRIDGE.symbol} "
@@ -491,6 +521,10 @@ class Strategy(AutoTrader):
         best_score = -float("inf")
 
         for coin in self.db.get_coins():
+            # Skip the coin we just sold — don't buy it back immediately
+            if self._last_sold_coin and coin.symbol == self._last_sold_coin:
+                continue
+
             coin_price = self.manager.get_ticker_price(coin + self.config.BRIDGE)
             if coin_price is None:
                 continue
@@ -614,7 +648,7 @@ class Strategy(AutoTrader):
         result = self.transaction_through_bridge(best_pair)
         if result is not None:
             self._last_trade_time = time.time()
-            self._trades_since_profit_take = self._count_completed_trades()
+            self._trades_since_profit_take += 1
             # Track new position for trailing stop
             new_price = self.manager.get_ticker_price(best_pair.to_coin + self.config.BRIDGE)
             if new_price:
@@ -629,6 +663,21 @@ class Strategy(AutoTrader):
 
         # Phase A: Update market regime (cached)
         self._update_market_regime()
+
+        # Auto-detect: if we're holding mostly USDC, we're in re-entry mode
+        # (handles container restarts where in-memory state is lost)
+        if not self._awaiting_reentry:
+            bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+            current_coin = self.db.get_current_coin()
+            if current_coin and bridge_bal > 5.0:
+                coin_bal = self.manager.get_currency_balance(current_coin.symbol)
+                if coin_bal is None or coin_bal < 0.001:
+                    self.logger.info(
+                        f"Detected USDC balance ({bridge_bal}) with no {current_coin.symbol} — "
+                        f"entering re-entry mode"
+                    )
+                    self._awaiting_reentry = True
+                    self._last_sold_coin = current_coin.symbol
 
         # Phase 6: Handle re-entry after profit-taking or stop-loss
         if self._awaiting_reentry:
