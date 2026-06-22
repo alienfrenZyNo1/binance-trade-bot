@@ -1,1 +1,25 @@
-SOL SUI XRP ADA DOGE NEAR LINK AAVE AVAX APT INJ TIA ENA PEPE JUP
+# Major pairs - core liquidity anchors, mean-reverting
+SOL
+
+# L1 alternatives - oscillate with BTC but different phase offsets
+AVAX
+NEAR
+APT
+ADA
+SUI
+
+# DeFi blue chips
+LINK
+INJ
+
+# High beta / memecoins with strong mean reversion
+DOGE
+PEPE
+
+# Infrastructure / ecosystem
+XRP
+
+# Ecosystem / high-beta L1s
+TIA
+ENA
+JUP

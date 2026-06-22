@@ -2,7 +2,10 @@
 .current_coin
 .current_coin_table
 *.pyc
-__pycache__
+.venv/
+backtest_cache.db
+data/backtest_cache.db
+__pycache__/
 nohup.out
 # user.cfg is committed (no secrets - API keys come from env vars)
 .idea/

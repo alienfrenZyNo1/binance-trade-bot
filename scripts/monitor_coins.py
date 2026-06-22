@@ -124,6 +124,19 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+def _get_currently_held_coin():
+    """Check the bot's DB for the currently held coin (to avoid disabling it)."""
+    import sqlite3
+    db_path = "REDACTED/crypto_trading.db"
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute("SELECT coin_id FROM current_coin_history ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 def main():
     actions = []
     coins = load_coins()
@@ -131,17 +144,37 @@ def main():
     state["last_run"] = datetime.utcnow().isoformat()
 
     exchange = ccxt.binance()
-    markets = exchange.load_markets()
+
+    # ── CIRCUIT BREAKER: abort if load_markets fails or returns too few markets ──
+    try:
+        markets = exchange.load_markets()
+    except Exception as e:
+        print(f"❌ ABORTED: Binance load_markets() failed: {e}")
+        print("No changes made — coin list preserved.")
+        print("COIN_LIST_OK")  # Don't trigger change handlers
+        return
+
+    if len(markets) < 500:
+        print(f"❌ ABORTED: load_markets() returned only {len(markets)} markets (expected 4000+). Likely API failure.")
+        print("No changes made — coin list preserved.")
+        print("COIN_LIST_OK")
+        return
 
     # Check each coin's USDC pair
     to_remove = []
     low_volume = []
+    held_coin = _get_currently_held_coin()
+    if held_coin:
+        print(f"📌 Currently held coin: {held_coin} (will not remove)")
 
     # Fetch tickers for all pairs
     active_pairs = {f"{c}/{BRIDGE}" for c in coins if f"{c}/{BRIDGE}" in markets and markets[f"{c}/{BRIDGE}"].get("active", False)}
     tickers = {}
     if active_pairs:
-        tickers = exchange.fetch_tickers(list(active_pairs))
+        try:
+            tickers = exchange.fetch_tickers(list(active_pairs))
+        except Exception as e:
+            print(f"⚠️ fetch_tickers() failed ({e}) — using volume from individual tickers as fallback")
 
     for coin in coins:
         pair = f"{coin}/{BRIDGE}"
@@ -156,9 +189,9 @@ def main():
             to_remove.append(coin)
             continue
 
-        # Check volume
+        # Check volume — ccxt quoteVolume is ALREADY in quote currency (USDC), do NOT multiply by last
         t = tickers.get(pair, {})
-        vol = (t.get("quoteVolume") or 0) * (t.get("last") or 0)
+        vol = t.get("quoteVolume") or 0
 
         if vol < VOLUME_REMOVE_THRESHOLD:
             actions.append(f"💀 REMOVED {coin}: Extremely low volume ${vol:,.0f}")
@@ -183,10 +216,27 @@ def main():
             # Volume is fine, reset streak
             state["low_volume_days"].pop(coin, None)
 
+    # ── CIRCUIT BREAKER: never remove more than 30% of coins in one run ──
+    # This prevents catastrophic nukes from transient API failures.
+    max_removals = max(2, int(len(coins) * 0.30))
+    if len(to_remove) > max_removals:
+        print(f"❌ ABORTED removals: {len(to_remove)} coins flagged for removal "
+              f"(max {max_removals}). This looks like an API failure, not real delisting.")
+        print("No changes made — coin list preserved.")
+        save_state(state)
+        print("COIN_LIST_OK")
+        return
+
+    # ── PROTECT currently held coin ──
+    if held_coin and held_coin in to_remove:
+        actions.append(f"⏸️ SKIPPED {held_coin}: currently held by bot (will remove after bot trades away)")
+        to_remove.remove(held_coin)
+        # Restore coin to list
+        if held_coin not in coins:
+            coins.append(held_coin)
+
     # Remove flagged coins
     if to_remove:
-        # Check if bot is currently holding any of these coins
-        # (We can't check the DB easily from here, so we just note it)
         coins = [c for c in coins if c not in to_remove]
 
     # Find replacements from candidate pool
