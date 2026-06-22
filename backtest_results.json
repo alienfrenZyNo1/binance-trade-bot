@@ -1,0 +1,207 @@
+[
+  {
+    "final_value": 102.49068189132892,
+    "pnl_pct": 65.3075514376273,
+    "trade_count": 48,
+    "total_fees": 8.49603745247205,
+    "fee_pct": 13.703286213664597,
+    "max_drawdown": 26.907312338008825,
+    "sharpe": 3.944183135726757,
+    "params": {
+      "momentum_lookback": 24,
+      "momentum_min_edge": 5.0,
+      "cooldown_hours": 4,
+      "anti_churn_hours": 12,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "momentum",
+    "train_pnl": -29.65820229211583,
+    "train_trades": 79,
+    "oos_pnl": 65.3075514376273
+  },
+  {
+    "final_value": 100.54146778594698,
+    "pnl_pct": 62.163657719269324,
+    "trade_count": 48,
+    "total_fees": 8.423169855352821,
+    "fee_pct": 13.585757831214226,
+    "max_drawdown": 26.907312338008825,
+    "sharpe": 3.849038066584614,
+    "params": {
+      "momentum_lookback": 24,
+      "momentum_min_edge": 5.0,
+      "cooldown_hours": 12,
+      "anti_churn_hours": 6,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "momentum",
+    "train_pnl": -29.65820229211583,
+    "train_trades": 79,
+    "oos_pnl": 62.163657719269324
+  },
+  {
+    "final_value": 100.54146778594698,
+    "pnl_pct": 62.163657719269324,
+    "trade_count": 48,
+    "total_fees": 8.423169855352821,
+    "fee_pct": 13.585757831214226,
+    "max_drawdown": 26.907312338008825,
+    "sharpe": 3.849038066584614,
+    "params": {
+      "momentum_lookback": 24,
+      "momentum_min_edge": 5.0,
+      "cooldown_hours": 4,
+      "anti_churn_hours": 6,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "momentum",
+    "train_pnl": -29.65820229211583,
+    "train_trades": 79,
+    "oos_pnl": 62.163657719269324
+  },
+  {
+    "final_value": 100.54146778594698,
+    "pnl_pct": 62.163657719269324,
+    "trade_count": 48,
+    "total_fees": 8.423169855352821,
+    "fee_pct": 13.585757831214226,
+    "max_drawdown": 26.907312338008825,
+    "sharpe": 3.849038066584614,
+    "params": {
+      "momentum_lookback": 24,
+      "momentum_min_edge": 5.0,
+      "cooldown_hours": 2,
+      "anti_churn_hours": 6,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "momentum",
+    "train_pnl": -29.65820229211583,
+    "train_trades": 79,
+    "oos_pnl": 62.163657719269324
+  },
+  {
+    "final_value": 100.43491659297105,
+    "pnl_pct": 61.99180095640491,
+    "trade_count": 46,
+    "total_fees": 8.404112087719014,
+    "fee_pct": 13.555019496320991,
+    "max_drawdown": 27.58391748695616,
+    "sharpe": 3.8519166660176305,
+    "params": {
+      "momentum_lookback": 24,
+      "momentum_min_edge": 5.0,
+      "cooldown_hours": 8,
+      "anti_churn_hours": 12,
+      "trailing_stop_pct": 20
+    },
+    "strategy": "momentum",
+    "train_pnl": -31.352644900152825,
+    "train_trades": 77,
+    "oos_pnl": 61.99180095640491
+  },
+  {
+    "final_value": 41.951693716774535,
+    "pnl_pct": -32.335977876170105,
+    "trade_count": 65,
+    "total_fees": 7.519710494280744,
+    "fee_pct": 12.12856531335604,
+    "max_drawdown": 35.023153038169625,
+    "sharpe": -0.5905640412007249,
+    "params": {
+      "scout_multiplier": 8,
+      "min_profit": 0.015,
+      "z_threshold": 2.0,
+      "momentum_lookback": 24,
+      "cooldown_hours": 4,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "hybrid",
+    "train_pnl": -5.733924402453805,
+    "train_trades": 107,
+    "oos_pnl": -32.335977876170105
+  },
+  {
+    "final_value": 35.545575365119554,
+    "pnl_pct": -42.66842683045233,
+    "trade_count": 55,
+    "total_fees": 6.107159140922318,
+    "fee_pct": 9.850256678906964,
+    "max_drawdown": 49.09378443701939,
+    "sharpe": -1.4206517137942307,
+    "params": {
+      "scout_multiplier": 8,
+      "min_profit": 0.02,
+      "z_threshold": 2.0,
+      "momentum_lookback": 24,
+      "cooldown_hours": 8,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "hybrid",
+    "train_pnl": -6.459865858809943,
+    "train_trades": 76,
+    "oos_pnl": -42.66842683045233
+  },
+  {
+    "final_value": 23.469757157394678,
+    "pnl_pct": -62.14555297194406,
+    "trade_count": 85,
+    "total_fees": 7.319438833495703,
+    "fee_pct": 11.80554650563823,
+    "max_drawdown": 62.14555297194406,
+    "sharpe": -5.0144091149572025,
+    "params": {
+      "scout_multiplier": 5,
+      "min_profit": 0.015,
+      "z_threshold": 2.0,
+      "momentum_lookback": 12,
+      "cooldown_hours": 4,
+      "trailing_stop_pct": 100
+    },
+    "strategy": "hybrid",
+    "train_pnl": 16.818133134824254,
+    "train_trades": 74,
+    "oos_pnl": -62.14555297194406
+  },
+  {
+    "final_value": 23.295140689958306,
+    "pnl_pct": -62.42719243555113,
+    "trade_count": 83,
+    "total_fees": 6.881580913971329,
+    "fee_pct": 11.099324054792467,
+    "max_drawdown": 64.81229149629841,
+    "sharpe": -4.830518232549525,
+    "params": {
+      "scout_multiplier": 3,
+      "min_profit": 0.015,
+      "z_threshold": 1.5,
+      "momentum_lookback": 12,
+      "cooldown_hours": 2,
+      "trailing_stop_pct": 100
+    },
+    "strategy": "hybrid",
+    "train_pnl": 0.39731229281769753,
+    "train_trades": 154,
+    "oos_pnl": -62.42719243555113
+  },
+  {
+    "final_value": 18.879935558586716,
+    "pnl_pct": -69.54849103453755,
+    "trade_count": 94,
+    "total_fees": 6.972810181581868,
+    "fee_pct": 11.246468034809464,
+    "max_drawdown": 69.87330685655041,
+    "sharpe": -6.44710128087133,
+    "params": {
+      "scout_multiplier": 5,
+      "min_profit": 0.015,
+      "z_threshold": 2.0,
+      "momentum_lookback": 12,
+      "cooldown_hours": 2,
+      "trailing_stop_pct": 15
+    },
+    "strategy": "hybrid",
+    "train_pnl": -4.493442376403756,
+    "train_trades": 110,
+    "oos_pnl": -69.54849103453755
+  }
+]

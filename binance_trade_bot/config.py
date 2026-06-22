@@ -255,3 +255,13 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.WIDE_SPREAD_THRESHOLD = float(
             os.environ.get("WIDE_SPREAD_THRESHOLD") or config.get(USER_CFG_SECTION, "wide_spread_threshold", fallback="0.15")
         )
+
+        # ── Momentum Rotation Strategy settings (backtest-optimized) ──────────
+        # Lookback window for performance measurement (in hours)
+        self.MOMENTUM_LOOKBACK_HOURS = int(
+            os.environ.get("MOMENTUM_LOOKBACK_HOURS") or config.get(USER_CFG_SECTION, "momentum_lookback_hours", fallback="18")
+        )
+        # Minimum outperformance edge required to trigger a trade (in %)
+        self.MOMENTUM_MIN_EDGE = float(
+            os.environ.get("MOMENTUM_MIN_EDGE") or config.get(USER_CFG_SECTION, "momentum_min_edge", fallback="8.0")
+        )

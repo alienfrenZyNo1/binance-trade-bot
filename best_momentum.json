@@ -1,0 +1,20 @@
+{
+  "params": {
+    "momentum_lookback": 18,
+    "momentum_min_edge": 8.0,
+    "cooldown_hours": 2,
+    "anti_churn_hours": 24,
+    "trailing_stop_pct": 15,
+    "use_regime_filter": true
+  },
+  "full_6mo": {
+    "pnl": 79.03877500571832,
+    "final": 111.00404050354535,
+    "trades": 46,
+    "fees": 7.078511473442207,
+    "max_dd": 48.20390995685764,
+    "coin": "ENA"
+  },
+  "train_pnl": 30.3674496601819,
+  "oos_pnl": 46.24172446332317
+}
