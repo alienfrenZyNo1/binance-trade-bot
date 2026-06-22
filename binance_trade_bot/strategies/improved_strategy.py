@@ -71,6 +71,11 @@ class Strategy(AutoTrader):
         self._last_sold_coin = None      # Track what we just sold (avoid immediate buyback)
         self._profit_take_time = 0       # When profit-taking happened (for re-entry delay)
 
+        # Anti-churn: track recently held coins with timestamps
+        # Prevents the bot from rapidly cycling TIA→ENA→TIA→ENA
+        self._recently_held = {}  # coin_symbol -> timestamp when sold
+        self._churn_block_seconds = getattr(self.config, 'CHURN_BLOCK_SECONDS', 14400)  # 4 hours
+
     # ─────────────────────────────────────────────────────────────────────────
     #  TECHNICAL INDICATORS (delegated to indicators.py)
     # ─────────────────────────────────────────────────────────────────────────
@@ -380,6 +385,57 @@ class Strategy(AutoTrader):
             self.logger.warning(f"Momentum check failed for {coin_symbol}: {e}")
             return True  # Fail open
 
+    def _get_rsi(self, coin_symbol, period=14):
+        """Calculate RSI for a coin. Returns 0-100, or None if insufficient data."""
+        try:
+            klines = self.manager.binance_client.get_klines(
+                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
+                interval="1h",
+                limit=period + 2,
+            )
+            if not klines or len(klines) < period + 1:
+                return None
+
+            closes = [float(k[4]) for k in klines]
+
+            gains = []
+            losses = []
+            for i in range(1, len(closes)):
+                change = closes[i] - closes[i - 1]
+                gains.append(max(change, 0))
+                losses.append(max(-change, 0))
+
+            # Use first 'period' changes for initial avg, then smooth
+            avg_gain = sum(gains[:period]) / period
+            avg_loss = sum(losses[:period]) / period
+
+            if avg_loss == 0:
+                return 100.0
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            return rsi
+        except Exception:
+            return None
+
+    def _check_rsi_filter(self, coin_symbol):
+        """RSI filter: only buy when RSI indicates the coin is oversold or fair-valued.
+        Returns True if OK to buy, False if coin is overbought (avoid buying at the top)."""
+        if not getattr(self.config, 'RSI_FILTER_ENABLED', False):
+            return True
+
+        rsi = self._get_rsi(coin_symbol)
+        if rsi is None:
+            return True  # Not enough data, allow
+
+        overbought = getattr(self.config, 'RSI_OVERBOUGHT', 70)
+        if rsi > overbought:
+            self.logger.info(
+                f"RSI filter: skipping {coin_symbol} "
+                f"(RSI: {rsi:.1f}, overbought threshold: {overbought})"
+            )
+            return False
+        return True
+
     # ─────────────────────────────────────────────────────────────────────────
     #  PHASE D: TRAILING STOP-LOSS
     # ─────────────────────────────────────────────────────────────────────────
@@ -525,6 +581,10 @@ class Strategy(AutoTrader):
             if self._last_sold_coin and coin.symbol == self._last_sold_coin:
                 continue
 
+            # Anti-churn: don't re-buy recently held coins
+            if self._is_churn_blocked(coin.symbol):
+                continue
+
             coin_price = self.manager.get_ticker_price(coin + self.config.BRIDGE)
             if coin_price is None:
                 continue
@@ -533,8 +593,10 @@ class Strategy(AutoTrader):
             if bridge_balance < min_notional:
                 continue
 
-            # Momentum filter
+            # Momentum filter + RSI filter
             if not self._check_momentum(coin.symbol):
+                continue
+            if not self._check_rsi_filter(coin.symbol):
                 continue
 
             if self._market_regime == BULL:
@@ -589,6 +651,18 @@ class Strategy(AutoTrader):
     #  MAIN JUMP LOGIC (regime-aware)
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _is_churn_blocked(self, coin_symbol):
+        """Check if a coin was recently held and shouldn't be re-bought yet."""
+        sold_time = self._recently_held.get(coin_symbol)
+        if sold_time is None:
+            return False
+        elapsed = time.time() - sold_time
+        if elapsed < self._churn_block_seconds:
+            return True
+        # Expired — clean up
+        del self._recently_held[coin_symbol]
+        return False
+
     def _jump_to_best_coin(self, coin, coin_price):
         """Find the best coin to jump to, applying regime-specific logic."""
         # Get scores based on regime
@@ -597,9 +671,22 @@ class Strategy(AutoTrader):
         else:
             ratio_dict = self._get_ratios(coin, coin_price)
 
-        # Phase 1: keep only positive scores
-        candidates = {k: v for k, v in ratio_dict.items() if v > 0}
+        # Phase 1: keep only positive scores ABOVE minimum profit threshold
+        min_profit = getattr(self.config, 'MIN_PROFIT_THRESHOLD', 0.01)
+        candidates = {k: v for k, v in ratio_dict.items() if v > min_profit}
         if not candidates:
+            return
+
+        # Anti-churn: filter out coins held recently
+        candidates = {
+            k: v for k, v in candidates.items()
+            if not self._is_churn_blocked(k.to_coin_id)
+        }
+        if not candidates:
+            self.logger.debug(
+                f"All candidates blocked by anti-churn rule "
+                f"(recently_held: {list(self._recently_held.keys())})"
+            )
             return
 
         # Phase 3: Z-score filter (regime-aware)
@@ -626,11 +713,14 @@ class Strategy(AutoTrader):
         if not candidates:
             return
 
-        # Phase 4: Momentum filter
+        # Phase 4: Momentum filter + RSI filter
         momentum_filtered = {}
         for pair, score in candidates.items():
-            if self._check_momentum(pair.to_coin_id):
-                momentum_filtered[pair] = score
+            if not self._check_momentum(pair.to_coin_id):
+                continue
+            if not self._check_rsi_filter(pair.to_coin_id):
+                continue
+            momentum_filtered[pair] = score
 
         if not momentum_filtered:
             self.logger.info("All candidates filtered out by momentum filter")
@@ -649,6 +739,8 @@ class Strategy(AutoTrader):
         if result is not None:
             self._last_trade_time = time.time()
             self._trades_since_profit_take += 1
+            # Anti-churn: record the coin we're leaving
+            self._recently_held[coin.symbol] = time.time()
             # Track new position for trailing stop
             new_price = self.manager.get_ticker_price(best_pair.to_coin + self.config.BRIDGE)
             if new_price:

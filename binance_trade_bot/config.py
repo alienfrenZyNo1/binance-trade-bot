@@ -176,3 +176,23 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.TRAILING_STOP_PCT = float(
             os.environ.get("TRAILING_STOP_PCT") or config.get(USER_CFG_SECTION, "trailing_stop_pct", fallback="8.0")
         )
+
+        # ── ROI Optimization settings ─────────────────────────────────────────
+        # Minimum profit threshold: don't trade unless expected gain exceeds this
+        # Prevents fee-bleeding from marginal trades
+        self.MIN_PROFIT_THRESHOLD = float(
+            os.environ.get("MIN_PROFIT_THRESHOLD") or config.get(USER_CFG_SECTION, "min_profit_threshold", fallback="0.01")
+        )
+
+        # Anti-churn: don't re-buy a coin held within this many seconds
+        self.CHURN_BLOCK_SECONDS = int(
+            os.environ.get("CHURN_BLOCK_SECONDS") or config.get(USER_CFG_SECTION, "churn_block_seconds", fallback="14400")
+        )
+
+        # RSI filter: skip buying overbought coins
+        self.RSI_FILTER_ENABLED = (
+            os.environ.get("RSI_FILTER_ENABLED") or config.get(USER_CFG_SECTION, "rsi_filter_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.RSI_OVERBOUGHT = float(
+            os.environ.get("RSI_OVERBOUGHT") or config.get(USER_CFG_SECTION, "rsi_overbought", fallback="68")
+        )
