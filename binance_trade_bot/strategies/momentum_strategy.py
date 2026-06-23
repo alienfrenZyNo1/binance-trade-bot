@@ -29,6 +29,7 @@ import random
 from datetime import datetime
 
 from binance_trade_bot.auto_trader import AutoTrader
+from binance_trade_bot.futures_manager import FuturesManager
 from binance_trade_bot.indicators import (
     compute_ema as _compute_ema_func,
     compute_adx as _compute_adx_func,
@@ -51,6 +52,7 @@ class Strategy(AutoTrader):
         self._market_regime = SIDEWAYS
         self._last_regime_check = 0
         self._regime_adx = 0.0
+        self._previous_regime = SIDEWAYS
 
         # Trade state
         self._last_trade_time = 0
@@ -66,6 +68,12 @@ class Strategy(AutoTrader):
         self._perf_cache = {}
         self._perf_cache_time = 0
         self._cache_ttl = getattr(self.config, 'INDICATOR_CACHE_TTL', 300)
+
+        # Futures manager for bear regime
+        self.futures_manager = FuturesManager(
+            self.manager.binance_client, self.logger, self.config
+        )
+        self.futures_manager.initialize()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  REGIME DETECTION
@@ -131,6 +139,8 @@ class Strategy(AutoTrader):
                     f"Market regime: {old.upper()} → {self._market_regime.upper()} "
                     f"(ADX: {adx:.1f}, +DI: {plus_di:.1f}, -DI: {minus_di:.1f})"
                 )
+                self._handle_regime_transition(old, self._market_regime)
+                self._previous_regime = self._market_regime
 
             # Log to DB
             try:
@@ -155,6 +165,34 @@ class Strategy(AutoTrader):
     @staticmethod
     def _compute_ema(values, period):
         return _compute_ema_func(values, period)
+
+    def _handle_regime_transition(self, old_regime: str, new_regime: str):
+        """Handle capital moves between spot and futures on regime changes."""
+        if new_regime == BEAR and old_regime != BEAR:
+            # Moving INTO bear: sell spot holdings to USDC, transfer to futures
+            self.logger.info("Regime → BEAR: preparing for short trading")
+            current_coin = self.db.get_current_coin()
+            if current_coin:
+                balance = self.manager.get_currency_balance(current_coin.symbol)
+                price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                if balance and price and balance * price > 5.0:
+                    self.logger.info(f"Selling {current_coin} to {self.config.BRIDGE} for futures margin")
+                    self.manager.sell_alt(current_coin, self.config.BRIDGE)
+
+            # Transfer USDC to futures wallet
+            bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+            if bridge_bal and bridge_bal > 5.0:
+                self.futures_manager.transfer_to_futures(bridge_bal)
+
+        elif old_regime == BEAR and new_regime != BEAR:
+            # Moving OUT OF bear: close shorts, transfer back to spot
+            self.logger.info("Regime ← BEAR: closing futures, returning to spot")
+            self.futures_manager.manage_exit()
+
+            # Transfer USDC back to spot wallet
+            futures_bal = self.futures_manager._get_futures_usdc_balance()
+            if futures_bal and futures_bal > 5.0:
+                self.futures_manager.transfer_to_spot(futures_bal)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  PERFORMANCE SCORING
@@ -355,8 +393,12 @@ class Strategy(AutoTrader):
         if self._check_trailing_stop(current_coin, current_price):
             return
 
-        # REGIME FILTER: skip all trading in bear market
+        # REGIME FILTER: in bear market, manage futures shorts
         if self._market_regime == BEAR:
+            performance = self._get_all_performance()
+            action = self.futures_manager.manage_bear(performance, self._market_regime)
+            if action in ('opened', 'closed'):
+                self.logger.info(f"Futures action during bear: {action}")
             return
 
         # Cooldown
