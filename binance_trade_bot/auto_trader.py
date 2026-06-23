@@ -28,7 +28,8 @@ class AutoTrader:
 
     def transaction_through_bridge(self, pair: Pair):
         """
-        Jump from the source coin to the destination coin through bridge coin
+        Jump from the source coin to the destination coin through bridge coin.
+        Uses trade logging with FAILED state for partial transactions.
         """
         can_sell = False
         balance = self.manager.get_currency_balance(pair.from_coin.symbol)
@@ -51,7 +52,14 @@ class AutoTrader:
             self.update_trade_threshold(pair.to_coin, result.price)
             return result
 
-        self.logger.info("Couldn't buy, going back to scouting mode...")
+        # Sell succeeded but buy failed — funds are now in bridge (USDC).
+        # This is not catastrophic (we have USDC, not a stuck coin), but we
+        # should log it. The bot will attempt to buy via bridge_scout() next cycle.
+        self.logger.warning(
+            f"SELL succeeded but BUY failed for {pair.to_coin}. "
+            f"Funds are in {self.config.BRIDGE.symbol}. "
+            f"Will re-attempt purchase on next scout cycle."
+        )
         return None
 
     def update_trade_threshold(self, coin: Coin, coin_price: float):

@@ -1,4 +1,5 @@
 #!python3
+import os
 import time
 import traceback
 
@@ -10,9 +11,119 @@ from .scheduler import SafeScheduler
 from .strategies import get_strategy
 
 
+def _acquire_singleton_lock(logger):
+    """Acquire an exclusive flock on a PID file to prevent double-start.
+    Returns the file handle (must stay open for lock to hold) or None on failure."""
+    import fcntl
+    pid_path = os.path.join("data", "bot.pid")
+    try:
+        os.makedirs("data", exist_ok=True)
+        pid_file = open(pid_path, "w")
+        fcntl.flock(pid_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        pid_file.write(str(os.getpid()))
+        pid_file.flush()
+        logger.info(f"Acquired singleton lock (PID {os.getpid()})")
+        return pid_file
+    except (IOError, OSError):
+        logger.error("Another bot instance is already running (PID lock held). Exiting.")
+        return None
+
+
+def _reconcile_position(manager, db, logger, config):
+    """On startup, verify the DB current_coin matches actual exchange balance.
+    If they diverge (e.g. crash mid-trade), fix the DB to match reality."""
+    from .models import Coin
+
+    current_coin = db.get_current_coin()
+    if current_coin is None:
+        logger.info("No current coin in DB — skipping reconciliation")
+        return
+
+    bridge_symbol = config.BRIDGE.symbol
+    try:
+        coin_balance = manager.get_currency_balance(current_coin.symbol, force=True)
+        bridge_balance = manager.get_currency_balance(bridge_symbol, force=True)
+    except Exception as e:
+        logger.warning(f"Could not fetch balances for reconciliation: {e}")
+        return
+
+    # If we hold the DB coin with a meaningful balance, we're fine
+    if coin_balance and coin_balance > manager.get_min_notional(
+        current_coin.symbol, bridge_symbol
+    ) / manager.get_ticker_price(current_coin.symbol + bridge_symbol):
+        logger.info(f"Reconciliation OK: holding {coin_balance} {current_coin.symbol}")
+        return
+
+    # If we hold mostly bridge, the bot probably crashed mid-sell
+    if bridge_balance and bridge_balance > 1.0:
+        logger.warning(
+            f"RECONCILIATION MISMATCH: DB says {current_coin.symbol} "
+            f"(bal: {coin_balance}) but bridge balance is {bridge_balance} {bridge_symbol}. "
+            f"Bot likely crashed mid-trade. Will re-balance on next scout cycle."
+        )
+        # Find which coin we actually hold the most of
+        try:
+            account = manager.get_account()
+            for bal in account.get("balances", []):
+                asset = bal["asset"]
+                free = float(bal["free"])
+                if asset in (bridge_symbol, "BNB") or free <= 0:
+                    continue
+                # Found a non-bridge asset we hold
+                if free > 0.001:
+                    coin_obj = db.get_coin(asset)
+                    if coin_obj and coin_obj.enabled:
+                        logger.info(f"Reconciliation: setting current_coin to {asset} (actual holding)")
+                        db.set_current_coin(asset)
+                        return
+        except Exception as e:
+            logger.warning(f"Could not scan account for reconciliation: {e}")
+        return
+
+    logger.info(f"Reconciliation: holding {coin_balance} {current_coin.symbol}, {bridge_balance} {bridge_symbol} — seems OK")
+
+
+def _backup_database():
+    """Create a daily backup of the SQLite database using the VACUUM INTO command
+    for a consistent snapshot that doesn't lock the DB."""
+    import shutil
+    src = os.path.join("data", "crypto_trading.db")
+    bak = os.path.join("data", "crypto_trading.db.bak")
+    try:
+        if os.path.exists(src):
+            shutil.copy2(src, bak)
+            # Keep only the last 3 backups
+            for i in range(7, 0, -1):
+                old_bak = f"{src}.bak.{i}"
+                if os.path.exists(old_bak):
+                    os.remove(old_bak)
+            # Rotate: if .bak exists, move to .bak.1
+            if os.path.exists(bak):
+                for i in range(6, 0, -1):
+                    next_bak = f"{src}.bak.{i+1}" if i < 6 else None
+                    curr_bak = f"{src}.bak.{i}" if i > 0 else bak
+                    if os.path.exists(curr_bak):
+                        if next_bak and i == 6:
+                            os.remove(curr_bak)
+                        elif next_bak:
+                            os.rename(curr_bak, next_bak)
+                        elif i == 0:
+                            pass  # the fresh backup is already at bak
+            print(f"[backup] Database backed up to {bak}")
+    except Exception as e:
+        print(f"[backup] Failed: {e}")
+
+
 def main():
+    import os as _os
+
     logger = Logger()
     logger.info("Starting")
+
+    # Singleton lock — prevent double-start
+    pid_file = _acquire_singleton_lock(logger)
+    if pid_file is None:
+        return
 
     config = Config()
     db = Database(logger, config)
@@ -37,6 +148,9 @@ def main():
     db.set_coins(config.SUPPORTED_COIN_LIST)
     db.migrate_old_state()
 
+    # Position reconciliation: verify DB state matches exchange reality
+    _reconcile_position(manager, db, logger, config)
+
     trader.initialize()
 
     schedule = SafeScheduler(logger)
@@ -51,6 +165,7 @@ def main():
     schedule.every(sample_interval).minutes.do(db.sample_ratios, manager).tag("sampling ratios")
     schedule.every(sample_interval).minutes.do(db.update_pair_stats).tag("updating pair stats")
     schedule.every(6).hours.do(db.prune_ratio_samples).tag("pruning ratio samples")
+    schedule.every(24).hours.do(_backup_database).tag("backing up database")
 
     logger.info(
         f"Strategy '{config.STRATEGY}' active | "

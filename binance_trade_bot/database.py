@@ -19,9 +19,27 @@ class Database:
     def __init__(self, logger: Logger, config: Config, uri="sqlite:///data/crypto_trading.db"):
         self.logger = logger
         self.config = config
-        self.engine = create_engine(uri)
+        # check_same_thread=False allows the API dashboard to read while the bot writes.
+        # WAL mode is set via event listener below for concurrent read/write safety.
+        self.engine = create_engine(
+            uri,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
         self.SessionMaker = sessionmaker(bind=self.engine)
         self.socketio_client = Client()
+
+        # Enable WAL mode for concurrent read/write safety (API dashboard + bot)
+        from sqlalchemy import event
+
+        @event.listens_for(self.engine, "connect")
+        def _set_sqlite_pragma(dbapi_conn, conn_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+            logger.debug("SQLite WAL mode enabled")
 
     def socketio_connect(self):
         if self.socketio_client.connected and self.socketio_client.namespaces:
@@ -454,6 +472,17 @@ class TradeLog:
             trade.crypto_trade_amount = crypto_trade_amount
             trade.state = TradeState.COMPLETE
             self.db.send_update(trade)
+
+    def set_failed(self, reason=""):
+        """Mark a trade as FAILED (e.g. sell succeeded but buy failed)."""
+        session: Session
+        with self.db.db_session() as session:
+            trade: Trade = session.merge(self.trade)
+            trade.state = TradeState.FAILED
+            self.db.send_update(trade)
+            # Log the failure reason
+            if reason:
+                self.db.logger.warning(f"Trade FAILED: {self.trade.alt_coin_id} -> {self.trade.crypto_coin_id}: {reason}")
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ class BinanceCache:  # pylint: disable=too-few-public-methods
 
 
 class OrderGuard:
-    def __init__(self, pending_orders: Set[Tuple[str, int]], mutex: threading.Lock):
+    def __init__(self, pending_orders: Set[Tuple[str, int]], mutex: threading.RLock):
         self.pending_orders = pending_orders
         self.mutex = mutex
         # lock immediately because OrderGuard
@@ -62,7 +62,11 @@ class OrderGuard:
             self.mutex.release()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.pending_orders.remove(self.tag)
+        if self.tag is not None:
+            try:
+                self.pending_orders.discard(self.tag)
+            except KeyError:
+                pass  # already removed
 
 
 class BinanceStreamManager:
@@ -97,7 +101,7 @@ class BinanceStreamManager:
         )
         self.binance_client = binance_client
         self.pending_orders: Set[Tuple[str, int]] = set()
-        self.pending_orders_mutex: threading.Lock = threading.Lock()
+        self.pending_orders_mutex: threading.RLock = threading.RLock()
         self._processorThread = threading.Thread(target=self._stream_processor)
         self._processorThread.start()
 
@@ -141,7 +145,8 @@ class BinanceStreamManager:
     def _stream_processor(self):
         while True:
             if self.bw_api_manager.is_manager_stopping():
-                sys.exit()
+                self.logger.info("Stream manager stopping, exiting processor thread gracefully")
+                return  # graceful exit instead of sys.exit()
 
             stream_signal = self.bw_api_manager.pop_stream_signal_from_stream_signal_buffer()
             stream_data = self.bw_api_manager.pop_stream_data_from_stream_buffer()

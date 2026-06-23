@@ -5,6 +5,7 @@ services:
     image: edeng23/binance-trade-bot
     container_name: binance_trader
     working_dir: /app
+    restart: unless-stopped
     volumes:
       - ./user.cfg:/app/user.cfg
       - ./supported_coin_list:/app/supported_coin_list
@@ -14,11 +15,18 @@ services:
     command: python -m binance_trade_bot
     environment:
       - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/crypto_trading.db').execute('SELECT 1')"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   api:
     image: edeng23/binance-trade-bot
     container_name: binance_trader_api
     working_dir: /app
+    restart: unless-stopped
     volumes:
       - ./user.cfg:/app/user.cfg
       - ./data:/app/data
