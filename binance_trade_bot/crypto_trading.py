@@ -87,8 +87,8 @@ def _backup_database():
     """Create a daily backup of the SQLite database using the VACUUM INTO command
     for a consistent snapshot that doesn't lock the DB."""
     import shutil
-    src = os.path.join("data", "crypto_trading.db")
-    bak = os.path.join("data", "crypto_trading.db.bak")
+    src = "/data/crypto_trading.db"
+    bak = "/data/crypto_trading.db.bak"
     try:
         if os.path.exists(src):
             shutil.copy2(src, bak)

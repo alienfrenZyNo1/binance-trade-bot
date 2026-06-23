@@ -743,27 +743,71 @@ def cmd_health():
     else:
         lines.append(f"  ❌ DB not found at `{DB_PATH}`")
 
-    # ── Bot Container ──
+    # ── Bot Process ──
     lines.append("\n**Bot Process:**")
+    bot_found = False
     try:
+        # Strategy 1: Check for any Docker container running crypto_trading.py
         result = subprocess.run(
-            ["docker", "ps", "--filter", f"name={CONTAINER_NAME}",
-             "--format", "{{.Names}} {{.Status}}"],
+            ["docker", "ps", "--format", "{{.Names}}|{{.Status}}|{{.Image}}"],
             capture_output=True, text=True, timeout=10,
         )
-        if result.stdout.strip():
-            for line in result.stdout.strip().split("\n"):
-                parts = line.split(None, 1)
-                name = parts[0] if parts else "?"
-                status = parts[1] if len(parts) > 1 else "?"
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split("|", 2)
+            name = parts[0] if len(parts) > 0 else "?"
+            status = parts[1] if len(parts) > 1 else "?"
+            image = parts[2] if len(parts) > 2 else "?"
+            # Match the trade bot by its Coolify image name or known patterns
+            if "REDACTED" in image or CONTAINER_NAME in name or "binance" in name.lower():
                 if "Up" in status:
-                    lines.append(f"  ✅ `{name}`: {status}")
+                    # Extract uptime from status like "Up 5 minutes"
+                    lines.append(f"  ✅ Running ({status.lower()})")
+                    bot_found = True
                 else:
-                    lines.append(f"  ⚠️ `{name}`: {status}")
-        else:
-            lines.append(f"  ❌ Container `{CONTAINER_NAME}` not running!")
-    except Exception as e:
-        # Try systemctl fallback (if bot runs as systemd)
+                    lines.append(f"  ⚠️ Container status: {status}")
+                    bot_found = True
+                break
+    except Exception:
+        pass
+
+    # Strategy 2: Check DB freshness — if last coin_value or regime log is recent, bot is alive
+    if not bot_found:
+        try:
+            conn2 = get_db()
+            # coin_value is written every minute, more reliable than regime log
+            last_cv = conn2.execute(
+                "SELECT datetime FROM coin_value WHERE interval = 'MINUTELY' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            check_dt = None
+            source = ""
+            if last_cv and last_cv["datetime"]:
+                check_dt = last_cv["datetime"]
+                source = "value snapshot"
+            else:
+                last_log = conn2.execute(
+                    "SELECT datetime FROM market_regime_log ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if last_log and last_log["datetime"]:
+                    check_dt = last_log["datetime"]
+                    source = "regime log"
+            conn2.close()
+
+            if check_dt:
+                log_dt = datetime.strptime(check_dt[:19], "%Y-%m-%d %H:%M:%S")
+                age_sec = (datetime.now() - log_dt).total_seconds()
+                if age_sec < 300:
+                    lines.append(f"  ✅ Running (DB active, {source} {int(age_sec)}s ago)")
+                    bot_found = True
+                elif age_sec < 600:
+                    lines.append(f"  ⚠️ Possibly stalled (last {source} {int(age_sec/60)}min ago)")
+                    bot_found = True
+        except Exception:
+            pass
+
+    if not bot_found:
+        # Strategy 3: systemctl fallback
         try:
             result2 = subprocess.run(
                 ["systemctl", "is-active", "binance-trade-bot"],
@@ -773,9 +817,9 @@ def cmd_health():
             if status2 == "active":
                 lines.append("  ✅ systemd service: active")
             else:
-                lines.append(f"  ❌ Bot not found (docker: {e}, systemd: {status2})")
+                lines.append("  ❌ Trade bot NOT detected!")
         except Exception:
-            lines.append(f"  ❌ Cannot check bot status: {e}")
+            lines.append("  ❌ Trade bot NOT detected (cannot check Docker or systemd)!")
 
     # ── PID Lock ──
     lines.append("\n**Instance Protection:**")
