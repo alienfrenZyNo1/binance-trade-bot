@@ -350,6 +350,28 @@ class Database:
                 return stat.ema_ratio, stat.std_ratio
             return None, None
 
+    def get_bot_state(self, key, default=None):
+        """Get a persisted strategy state value by key. Returns default if not found."""
+        from .models import BotState
+        session: Session
+        with self.db_session() as session:
+            entry = session.query(BotState).filter(BotState.key == key).first()
+            if entry:
+                return entry.value
+            return default
+
+    def set_bot_state(self, key, value):
+        """Persist a strategy state value. Creates or updates."""
+        from .models import BotState
+        session: Session
+        with self.db_session() as session:
+            entry = session.query(BotState).filter(BotState.key == key).first()
+            if entry:
+                entry.value = str(value)
+                entry.updated_at = datetime.utcnow()
+            else:
+                session.add(BotState(key, str(value)))
+
     def log_market_regime(self, regime, adx_value=None, avg_volatility=None,
                           btc_correlation=None, ema_short=None, ema_long=None):
         """Log a market regime classification."""

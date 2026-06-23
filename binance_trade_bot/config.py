@@ -192,6 +192,11 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             os.environ.get("CHURN_BLOCK_SECONDS") or config.get(USER_CFG_SECTION, "churn_block_seconds", fallback="14400")
         )
 
+        # Confirmation delay: require N consecutive scout cycles confirming the same rotation
+        self.CONFIRMATION_CYCLES = int(
+            os.environ.get("CONFIRMATION_CYCLES") or config.get(USER_CFG_SECTION, "confirmation_cycles", fallback="3")
+        )
+
         # RSI filter: skip buying overbought coins
         self.RSI_FILTER_ENABLED = (
             os.environ.get("RSI_FILTER_ENABLED") or config.get(USER_CFG_SECTION, "rsi_filter_enabled", fallback="yes")

@@ -54,15 +54,36 @@ class Strategy(AutoTrader):
         self._regime_adx = 0.0
         self._previous_regime = SIDEWAYS
 
-        # Trade state
-        self._last_trade_time = 0
-        self._awaiting_reentry = False
+        # Trade state — loaded from DB (persists across restarts)
+        saved_last_trade = self.db.get_bot_state("last_trade_time")
+        self._last_trade_time = float(saved_last_trade) if saved_last_trade else 0
+        saved_reentry = self.db.get_bot_state("awaiting_reentry")
+        self._awaiting_reentry = saved_reentry == "True" if saved_reentry else False
 
         # Trailing stop
         self._position_peak_price = {}
 
-        # Anti-churn
+        # Anti-churn — load recently held timestamps from DB
         self._recently_held = {}
+        import json as _json
+        saved_churn = self.db.get_bot_state("recently_held")
+        if saved_churn:
+            try:
+                self._recently_held = {k: float(v) for k, v in _json.loads(saved_churn).items()}
+            except Exception:
+                self._recently_held = {}
+
+        # Confirmation delay — require edge to persist N cycles before trading
+        self._pending_rotation = None  # (from_coin, to_coin, edge, first_seen_time)
+        self._confirmation_cycles = getattr(self.config, 'CONFIRMATION_CYCLES', 3)
+
+        if self._last_trade_time > 0:
+            from datetime import datetime as _dt
+            self.logger.info(
+                f"State restored: last_trade={_dt.utcfromtimestamp(self._last_trade_time).isoformat()}, "
+                f"awaiting_reentry={self._awaiting_reentry}, "
+                f"churn_blocklist={list(self._recently_held.keys())}"
+            )
 
         # Performance cache (avoid hitting API every cycle)
         self._perf_cache = {}
@@ -74,6 +95,17 @@ class Strategy(AutoTrader):
             self.manager.binance_client, self.logger, self.config
         )
         self.futures_manager.initialize()
+
+    def _persist_trade_state(self):
+        """Save trade state to DB so it survives container restarts."""
+        self.db.set_bot_state("last_trade_time", str(self._last_trade_time))
+        self.db.set_bot_state("awaiting_reentry", str(self._awaiting_reentry))
+        import json as _json
+        # Clean expired churn entries before saving
+        now = time.time()
+        churn_ttl = getattr(self.config, 'CHURN_BLOCK_SECONDS', 86400)
+        self._recently_held = {k: v for k, v in self._recently_held.items() if now - v < churn_ttl}
+        self.db.set_bot_state("recently_held", _json.dumps(self._recently_held))
 
     # ─────────────────────────────────────────────────────────────────────────
     #  REGIME DETECTION
@@ -299,6 +331,7 @@ class Strategy(AutoTrader):
                     self._awaiting_reentry = True
                     self._position_peak_price.pop(symbol, None)
                     self._recently_held[symbol] = time.time()
+                    self._persist_trade_state()
                     self.logger.warning(f"Trailing stop executed: sold {symbol} to {self.config.BRIDGE.symbol}")
                     return True
         return False
@@ -346,6 +379,7 @@ class Strategy(AutoTrader):
                     self.db.set_current_coin(best_coin)
                     self._awaiting_reentry = False
                     self._last_trade_time = time.time()
+                    self._persist_trade_state()
                     price = self.manager.get_ticker_price(best_coin + self.config.BRIDGE)
                     if price:
                         self._reset_position_tracking(best_coin.symbol, price)
@@ -375,6 +409,7 @@ class Strategy(AutoTrader):
                 if coin_bal is None or coin_bal < 0.001:
                     self._awaiting_reentry = True
                     self._recently_held[current_coin.symbol] = time.time()
+                    self._persist_trade_state()
                     return
 
         current_coin = self.db.get_current_coin()
@@ -440,18 +475,54 @@ class Strategy(AutoTrader):
                 best_edge = edge
                 best_coin = coin
 
-        # Execute trade
+        # Reset pending rotation if no signal this cycle
+        if best_coin is None:
+            self._pending_rotation = None
+
+        # Execute trade — only after confirmation delay
         if best_coin is not None:
-            self.logger.info(
-                f"Momentum rotation: {current_coin} → {best_coin} "
-                f"(edge: {best_edge:+.2f}%, {current_coin}: {cur_perf:+.2f}%, "
-                f"{best_coin}: {performance[best_coin.symbol]:+.2f}%, "
-                f"regime: {self._market_regime})"
-            )
+            # Confirmation delay: require the SAME rotation signal to persist
+            # across N consecutive scout cycles before executing. This filters
+            # out noise-driven false signals from intrabar price spikes.
+            pending = self._pending_rotation
+            if (pending and pending[0] == current_coin.symbol
+                    and pending[1] == best_coin.symbol):
+                # Same signal as last cycle — increment confirmation count
+                count = pending[3] + 1
+                self._pending_rotation = (
+                    current_coin.symbol, best_coin.symbol, best_edge, count
+                )
+                if count < self._confirmation_cycles:
+                    self.logger.info(
+                        f"Rotation signal confirmed ({count}/{self._confirmation_cycles}): "
+                        f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%)"
+                    )
+                    return
+                # Confirmed — execute
+                self.logger.info(
+                    f"Momentum rotation CONFIRMED ({self._confirmation_cycles}/{self._confirmation_cycles}): "
+                    f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%, "
+                    f"{current_coin}: {cur_perf:+.2f}%, "
+                    f"{best_coin}: {performance[best_coin.symbol]:+.2f}%, "
+                    f"regime: {self._market_regime})"
+                )
+            else:
+                # New signal — start confirmation countdown
+                self._pending_rotation = (
+                    current_coin.symbol, best_coin.symbol, best_edge, 1
+                )
+                self.logger.info(
+                    f"Rotation signal detected (1/{self._confirmation_cycles}): "
+                    f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%)"
+                )
+                return
+
             result = self.transaction_through_bridge_pair(current_coin, best_coin)
             if result is not None:
                 self._last_trade_time = time.time()
                 self._recently_held[current_coin.symbol] = time.time()
+                self._persist_trade_state()
+                self._pending_rotation = None
                 new_price = self.manager.get_ticker_price(best_coin + self.config.BRIDGE)
                 if new_price:
                     self._reset_position_tracking(best_coin.symbol, new_price)
