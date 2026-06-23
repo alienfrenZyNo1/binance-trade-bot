@@ -1593,23 +1593,50 @@ def send_message(chat_id, text):
 
 
 def poll():
-    """Long-poll Telegram for updates."""
+    """Long-poll Telegram for updates.
+
+    Handles 409 Conflict (another instance polling the same token) by
+    retrying with backoff instead of spamming errors.
+    """
     offset = 0
+    consecutive_409s = 0
     log.info("Telegram bot polling started")
+
+    # Use a dedicated session for polling
+    session = requests.Session()
 
     while True:
         try:
             params = {"timeout": 30, "offset": offset}
-            r = requests.get(
+            r = session.get(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
                 params=params,
                 timeout=35,
             )
 
+            if r.status_code == 409:
+                # Another service is polling the same bot token.
+                # Retry with increasing backoff instead of error-spamming.
+                consecutive_409s += 1
+                if consecutive_409s == 1:
+                    log.warning(
+                        "getUpdates 409: another instance is polling this bot token. "
+                        "Retrying with backoff..."
+                    )
+                backoff = min(5 * consecutive_409s, 30)
+                time.sleep(backoff)
+                continue
+
             if r.status_code != 200:
                 log.error(f"getUpdates failed: {r.status_code}")
+                consecutive_409s = 0
                 time.sleep(5)
                 continue
+
+            # Success — reset counter
+            if consecutive_409s > 0:
+                log.info(f"getUpdates recovered after {consecutive_409s} conflicts")
+            consecutive_409s = 0
 
             data = r.json()
             if not data.get("ok"):
