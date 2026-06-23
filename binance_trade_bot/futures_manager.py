@@ -456,10 +456,10 @@ class FuturesManager:
     def transfer_to_futures(self, amount: float) -> bool:
         """Transfer USDC from spot wallet to futures wallet."""
         try:
-            self.client.futures_transfer(
+            self.client.futures_account_transfer(
                 asset=self.bridge_symbol,
                 amount=amount,
-                type=1,  # 1 = spot to futures
+                type=1,  # 1 = spot to USDT-M/USDC-M futures
             )
             self.logger.info(f"Transferred {amount} {self.bridge_symbol} to futures")
             return True
@@ -470,10 +470,10 @@ class FuturesManager:
     def transfer_to_spot(self, amount: float) -> bool:
         """Transfer USDC from futures wallet to spot wallet."""
         try:
-            self.client.futures_transfer(
+            self.client.futures_account_transfer(
                 asset=self.bridge_symbol,
                 amount=amount,
-                type=2,  # 2 = futures to spot
+                type=2,  # 2 = USDT-M/USDC-M futures to spot
             )
             self.logger.info(f"Transferred {amount} {self.bridge_symbol} to spot")
             return True
