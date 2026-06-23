@@ -30,7 +30,7 @@ from collections import defaultdict
 import importlib.util
 
 _spec = importlib.util.spec_from_file_location(
-    "indicators", "REDACTED_PATHbinance_trade_bot/indicators.py"
+    "indicators", "binance_trade_bot/indicators.py"
 )
 _indicators_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_indicators_mod)
@@ -1439,7 +1439,7 @@ def main():
             print(f"  {coin:>4}: {bh:+.1f}%")
 
     # Save results
-    with open("REDACTED_PATHbacktest_results.json", "w") as f:
+    with open("backtest_results.json", "w") as f:
         json.dump([{k: v for k, v in r.items() if k != "trade_log"}
                     for r in all_oos_results[:20]], f, indent=2, default=str)
     print(f"\n  Results saved to backtest_results.json")

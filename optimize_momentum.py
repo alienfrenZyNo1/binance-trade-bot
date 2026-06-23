@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from collections import defaultdict
 import importlib.util
 
-_spec = importlib.util.spec_from_file_location("indicators", "REDACTED_PATHbinance_trade_bot/indicators.py")
+_spec = importlib.util.spec_from_file_location("indicators", "binance_trade_bot/indicators.py")
 _indicators_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_indicators_mod)
 _ema = _indicators_mod.compute_ema
@@ -293,6 +293,6 @@ for coin in ["TIA","SOL","BTC"]:
     if d: print(f"  {coin}: {((d[-1]['close']/d[0]['close'])-1)*100:+.1f}%")
 
 # Save best
-with open("REDACTED_PATHbest_momentum.json", "w") as f:
+with open("best_momentum.json", "w") as f:
     json.dump({"params": bt_p, "full_6mo": full, "train_pnl": best_oos["train_pnl"], "oos_pnl": best_oos["pnl"]}, f, indent=2)
 print("\nSaved to best_momentum.json")

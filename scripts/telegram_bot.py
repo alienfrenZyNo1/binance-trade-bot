@@ -39,7 +39,7 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_CHAT_IDS = set(
     int(x) for x in os.environ.get("TELEGRAM_CHAT_IDS", "REDACTED_CHAT_ID").split(",") if x.strip()
 )
-DB_PATH = os.environ.get("DB_PATH", "REDACTED/crypto_trading.db")
+DB_PATH = os.environ.get("DB_PATH", "data/crypto_trading.db")
 BRIDGE_SYMBOL = os.environ.get("BRIDGE_SYMBOL", "USDC")
 API_BASE = f"https://api.binance.com/api/v3"
 FAPI_BASE = f"https://fapi.binance.com/fapi/v2"
@@ -52,9 +52,9 @@ FUTURES_ELIGIBLE = {"SOL", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE", "AVAX",
                     "SUI", "TIA", "ENA"}
 
 # Config file path
-CONFIG_PATH = os.environ.get("CONFIG_PATH", "REDACTED/user.cfg")
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "data/config/user.cfg")
 if not os.path.exists(CONFIG_PATH):
-    CONFIG_PATH = "REDACTED_PATHuser.cfg"
+    CONFIG_PATH = "user.cfg"
 
 # Docker container name
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "binance-trade-bot")
@@ -760,7 +760,7 @@ def cmd_health():
             status = parts[1] if len(parts) > 1 else "?"
             image = parts[2] if len(parts) > 2 else "?"
             # Match the trade bot by its Coolify image name or known patterns
-            if "REDACTED" in image or CONTAINER_NAME in name or "binance" in name.lower():
+            if os.environ.get("DOCKER_IMAGE", "") in image or CONTAINER_NAME in name or "binance" in name.lower():
                 if "Up" in status:
                     # Extract uptime from status like "Up 5 minutes"
                     lines.append(f"  ✅ Running ({status.lower()})")

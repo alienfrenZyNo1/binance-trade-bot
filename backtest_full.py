@@ -32,7 +32,7 @@ import importlib.util
 
 # Load indicators.py directly (bypass package __init__ which pulls in socketio etc.)
 _spec = importlib.util.spec_from_file_location(
-    "indicators", "REDACTED_PATHbinance_trade_bot/indicators.py"
+    "indicators", "binance_trade_bot/indicators.py"
 )
 _indicators_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_indicators_mod)

@@ -222,7 +222,7 @@ The companion bot runs as a systemd service and connects directly to the trading
 ```ini
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_IDS=your_chat_id
-DB_PATH=REDACTED/crypto_trading.db
+DB_PATH=data/crypto_trading.db
 BRIDGE_SYMBOL=USDC
 BINANCE_API_KEY=your_key
 BINANCE_API_SECRET=your_secret
@@ -267,11 +267,11 @@ This bot is deployed via [Coolify](https://coolify.io) (self-hosted PaaS) on a V
 
 > **Note:** Coolify auto-build may fail. If so, build manually:
 > ```bash
-> sudo docker build --no-cache -t REDACTED:latest .
+> sudo docker build --no-cache -t trade-bot:latest .
 > sudo docker run -d --name <container_name> --restart unless-stopped \
->   -v REDACTED:/app/data \
->   --env-file REDACTED/applications/<app_id>/.env \
->   REDACTED:latest
+>   -v ./data:/app/data \
+>   --env-file /path/to/your/env-file \
+>   trade-bot:latest
 > ```
 
 ---

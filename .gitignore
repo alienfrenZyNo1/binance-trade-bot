@@ -17,3 +17,7 @@ apprise.yml
 .DS_Store
 .bot/.env.telegram
 .env.telegram
+.hermes/
+research/
+*.env
+config/apprise.yml.bak
