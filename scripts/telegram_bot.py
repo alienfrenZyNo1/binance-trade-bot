@@ -1,8 +1,24 @@
 #!/usr/bin/env python3
 """
 Telegram companion bot for binance-trade-bot.
-Listens for /status, /trades, /coins, /price, /help commands.
-Reads directly from the trade bot's SQLite DB.
+Listens for commands and reads directly from the trade bot's SQLite DB + Binance API.
+
+Commands:
+  /status   — Holdings, portfolio value (spot + futures)
+  /trades   — Recent trade history (including FAILED)
+  /coins    — Monitored coins (futures-eligible marked)
+  /price    — Current coin live price + 24h stats
+  /profit   — Performance dashboard & P&L
+  /regime   — Market regime + what the bot is doing
+  /futures  — Futures wallet balance, open shorts, P&L
+  /health   — System health: DB, backups, bot process
+  /config   — Current bot configuration
+  /kill     — Emergency: close all futures + transfer back
+  /hop      — Potential next trade targets with filters
+  /addcoin  — Add a coin to monitored list
+  /removecoin — Remove a coin
+  /swap     — Swap one coin for another
+  /help     — This message
 """
 
 import os
@@ -13,6 +29,7 @@ import sqlite3
 import logging
 import hashlib
 import hmac
+import subprocess
 import requests
 from datetime import datetime
 from urllib.parse import urlencode
@@ -25,8 +42,22 @@ ALLOWED_CHAT_IDS = set(
 DB_PATH = os.environ.get("DB_PATH", "REDACTED/crypto_trading.db")
 BRIDGE_SYMBOL = os.environ.get("BRIDGE_SYMBOL", "USDC")
 API_BASE = f"https://api.binance.com/api/v3"
+FAPI_BASE = f"https://fapi.binance.com/fapi/v2"
+FAPI_PUB = f"https://fapi.binance.com/fapi/v1"  # public market data (fundingRate, premiumIndex, ping)
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+
+# Coins with USDC-M perpetuals (matching futures_manager.py)
+FUTURES_ELIGIBLE = {"SOL", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE", "AVAX",
+                    "SUI", "TIA", "ENA"}
+
+# Config file path
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "REDACTED/user.cfg")
+if not os.path.exists(CONFIG_PATH):
+    CONFIG_PATH = "REDACTED_PATHuser.cfg"
+
+# Docker container name
+CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "binance-trade-bot")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,27 +94,34 @@ def _sign_request(params):
     return params
 
 
+def _signed_get(url, params=None):
+    """Signed GET request to Binance API."""
+    params = params or {}
+    params["recvWindow"] = 5000
+    params["timestamp"] = int(time.time() * 1000)
+    params = _sign_request(params)
+    return requests.get(
+        url, params=params,
+        headers={"X-MBX-APIKEY": BINANCE_API_KEY},
+        timeout=10,
+    )
+
+
+# ── Spot API Helpers ─────────────────────────────────────────────────────────
+
 def get_holdings():
-    """Get LIVE balances from Binance API."""
+    """Get LIVE balances from Binance spot API."""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         log.warning("No Binance API keys, falling back to DB")
         return _get_holdings_from_db()
 
     try:
-        params = {"recvWindow": 5000, "timestamp": int(time.time() * 1000)}
-        params = _sign_request(params)
-        r = requests.get(
-            f"{API_BASE}/account",
-            params=params,
-            headers={"X-MBX-APIKEY": BINANCE_API_KEY},
-            timeout=10,
-        )
+        r = _signed_get(f"{API_BASE}/account")
         if r.status_code != 200:
             log.error(f"Binance account API failed: {r.status_code} {r.text[:200]}")
             return _get_holdings_from_db()
 
         balances = r.json().get("balances", [])
-        # Filter out dust (< $0.01) and get prices for non-zero balances
         held = []
         for b in balances:
             asset = b["asset"]
@@ -97,11 +135,8 @@ def get_holdings():
             return []
 
         # Get prices for all held coins
-        # Build a list of symbols to fetch
         symbols = [h["coin_id"] for h in held]
         prices = {}
-
-        # Fetch all prices at once
         try:
             r2 = requests.get(f"{API_BASE}/ticker/price", timeout=10)
             if r2.status_code == 200:
@@ -119,7 +154,6 @@ def get_holdings():
             for h in held:
                 h["usd_price"] = 0.0
 
-        # Sort by value descending
         held.sort(key=lambda x: x["balance"] * x["usd_price"], reverse=True)
         return held
 
@@ -146,13 +180,12 @@ def _get_holdings_from_db():
 
 
 def get_trade_history(limit=10):
-    """Get completed trades."""
+    """Get recent trades (all states including FAILED)."""
     conn = get_db()
     rows = conn.execute(
         """SELECT alt_coin_id, crypto_coin_id, selling, state,
                   alt_trade_amount, crypto_trade_amount, datetime
            FROM trade_history
-           WHERE state = 'COMPLETE'
            ORDER BY id DESC LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -174,7 +207,10 @@ def get_portfolio_value(holdings):
     """Calculate total USD value of holdings."""
     total = 0.0
     for h in holdings:
-        total += h["balance"] * h["usd_price"]
+        if isinstance(h, dict):
+            total += h["balance"] * h.get("usd_price", 0)
+        else:
+            total += (h["balance"] or 0) * (h["usd_price"] or 0)
     return total
 
 
@@ -217,35 +253,190 @@ def get_24h_stats(symbol):
     return None
 
 
+# ── Futures API Helpers ──────────────────────────────────────────────────────
+
+def get_futures_balance():
+    """Get USDC balance in futures wallet."""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return None
+    try:
+        r = _signed_get(f"{FAPI_BASE}/balance")
+        if r.status_code != 200:
+            log.warning(f"Futures balance API: {r.status_code} {r.text[:150]}")
+            return None
+        for bal in r.json():
+            if bal.get("asset") == BRIDGE_SYMBOL:
+                # 'availableBalance' is unreliable (returns 0 with no positions)
+                # Use 'maxWithdrawAmount' for the available figure
+                return {
+                    "balance": float(bal.get("balance", 0)),
+                    "available": float(bal.get("maxWithdrawAmount", bal.get("balance", 0))),
+                    "pnl": float(bal.get("crossUnPnl", 0)),
+                }
+        return {"balance": 0.0, "available": 0.0, "pnl": 0.0}
+    except Exception as e:
+        log.warning(f"get_futures_balance failed: {e}")
+        return None
+
+
+def get_futures_positions():
+    """Get open futures positions (shorts have negative positionAmt)."""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return []
+    try:
+        r = _signed_get(f"{FAPI_BASE}/positionRisk")
+        if r.status_code != 200:
+            log.warning(f"Futures positions API: {r.status_code}")
+            return []
+        positions = []
+        for p in r.json():
+            amt = float(p.get("positionAmt", 0))
+            if amt != 0:
+                entry = float(p.get("entryPrice", 0))
+                mark = float(p.get("markPrice", 0))
+                leverage = p.get("leverage", "?")
+                direction = "SHORT" if amt < 0 else "LONG"
+                qty = abs(amt)
+                # PnL for shorts: (entry - mark) * qty
+                if direction == "SHORT" and entry > 0:
+                    pnl_pct = ((entry - mark) / entry) * 100
+                elif direction == "LONG" and entry > 0:
+                    pnl_pct = ((mark - entry) / entry) * 100
+                else:
+                    pnl_pct = 0.0
+                un_pnl = float(p.get("unRealizedProfit", 0))
+                positions.append({
+                    "symbol": p["symbol"],
+                    "direction": direction,
+                    "qty": qty,
+                    "entry": entry,
+                    "mark": mark,
+                    "leverage": leverage,
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": un_pnl,
+                })
+        return positions
+    except Exception as e:
+        log.warning(f"get_futures_positions failed: {e}")
+        return []
+
+
+def get_futures_funding(symbol):
+    """Get current funding rate for a futures symbol."""
+    try:
+        r = requests.get(
+            f"{FAPI_PUB}/fundingRate",
+            params={"symbol": symbol, "limit": 1},
+            timeout=10,
+        )
+        if r.status_code == 200 and r.json():
+            return float(r.json()[0].get("fundingRate", 0))
+    except Exception:
+        pass
+    return None
+
+
+def get_futures_mark_price(symbol):
+    """Get mark price for a futures symbol."""
+    try:
+        r = requests.get(
+            f"{FAPI_PUB}/premiumIndex",
+            params={"symbol": symbol},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return float(r.json().get("markPrice", 0))
+    except Exception:
+        pass
+    return None
+
+
+# ── Config Reader ────────────────────────────────────────────────────────────
+
+def load_config():
+    """Parse key=value from user.cfg, skipping comments."""
+    config = {}
+    try:
+        with open(CONFIG_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("["):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    config[k.strip()] = v.strip()
+    except Exception as e:
+        log.warning(f"Could not read config: {e}")
+    return config
+
+
 # ── Command Handlers ─────────────────────────────────────────────────────────
+
 def cmd_status():
-    """Current holdings and portfolio value."""
+    """Current holdings, portfolio value (spot + futures), regime."""
     current_coin = get_current_coin()
     holdings = get_holdings()
-    total_value = get_portfolio_value(holdings)
+    spot_value = get_portfolio_value(holdings)
+    fut_balance = get_futures_balance()
+    fut_positions = get_futures_positions()
+
+    # Current regime
+    conn = get_db()
+    regime_row = conn.execute(
+        "SELECT regime FROM market_regime_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    regime = regime_row["regime"] if regime_row else "?"
+
+    fut_value = fut_balance["balance"] if fut_balance else 0
+    total_value = spot_value + fut_value
 
     lines = [f"🤖 **Bot Status**\n"]
-    lines.append(f"📌 Current coin: `{current_coin}`")
-    lines.append(f"💰 Portfolio value: `${total_value:.2f}`\n")
-    lines.append("**Holdings:**")
+    lines.append(f"🧭 Regime: `{regime.upper()}`")
+    lines.append(f"📌 Holding: `{current_coin}`")
+    lines.append(f"💰 **Total: `${total_value:.2f}`**")
+    lines.append(f"   Spot: `${spot_value:.2f}` | Futures: `${fut_value:.2f}`\n")
 
+    # Spot holdings
+    lines.append("**📦 Spot Holdings:**")
     for h in holdings:
-        coin = h["coin_id"]
-        balance = h["balance"]
-        price = h["usd_price"]
-        value = balance * price
-        if value > 0.001:  # Skip dust
+        if isinstance(h, dict):
+            coin = h["coin_id"]
+            balance = h["balance"]
+            price = h.get("usd_price", 0)
+            value = balance * price
+        else:
+            coin = h["coin_id"]
+            balance = h["balance"] or 0
+            price = h["usd_price"] or 0
+            value = balance * price
+        if value > 0.01:
             lines.append(f"  `{coin}`: {balance:.4f} @ ${price:.4f} = `${value:.2f}`")
+
+    # Futures positions
+    if fut_positions:
+        lines.append(f"\n**🔻 Futures Positions ({len(fut_positions)}):**")
+        for p in fut_positions:
+            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+            lines.append(
+                f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
+                f"qty={p['qty']} entry=${p['entry']:.4f} "
+                f"mark=${p['mark']:.4f} "
+                f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
+            )
+
+    if fut_balance and fut_balance["available"] > 0 and not fut_positions:
+        lines.append(f"\n💤 Futures wallet: `${fut_balance['available']:.2f}` idle (no open positions)")
 
     return "\n".join(lines)
 
 
 def cmd_trades():
-    """Recent trade history."""
+    """Recent trade history including FAILED states."""
     trades = get_trade_history(10)
 
     if not trades:
-        return "📋 **No completed trades yet.**"
+        return "📋 **No trades yet.**"
 
     lines = ["📋 **Recent Trades**\n"]
 
@@ -254,30 +445,54 @@ def cmd_trades():
         coin = t["alt_coin_id"]
         amount = t["alt_trade_amount"] or 0
         cost = t["crypto_trade_amount"] or 0
-        dt = t["datetime"][:19]
+        dt = t["datetime"][:19] if t["datetime"] else "?"
+        state = t["state"] if t["state"] else "?"
 
-        if t["selling"]:
-            lines.append(f"🔴 `{dt}` Sold {amount:.2f} {coin} → {cost:.2f} {t['crypto_coin_id']}")
+        if state == "COMPLETE":
+            icon = "🔴" if t["selling"] else "🟢"
+            lines.append(f"{icon} `{dt}` {action} {amount:.2f} {coin} ↔ {cost:.2f} {t['crypto_coin_id']}")
+        elif state == "FAILED":
+            lines.append(f"⚠️ `{dt}` FAILED {action} {coin} — stuck in partial state!")
         else:
-            lines.append(f"🟢 `{dt}` Bought {amount:.2f} {coin} ← {cost:.2f} {t['crypto_coin_id']}")
+            lines.append(f"❓ `{dt}` {state} {action} {amount:.2f} {coin}")
+
+    # Count states
+    conn = get_db()
+    state_counts = conn.execute(
+        "SELECT state, COUNT(*) as cnt FROM trade_history GROUP BY state"
+    ).fetchall()
+    conn.close()
+    if state_counts:
+        summary_parts = [f"{r['state']}: {r['cnt']}" for r in state_counts]
+        lines.append(f"\n📊 `{' | '.join(summary_parts)}`")
 
     return "\n".join(lines)
 
 
 def cmd_coins():
-    """List monitored coins."""
+    """List monitored coins with futures eligibility."""
     coins = get_coins()
     current = get_current_coin()
+
+    fut_coins = [c for c in coins if c in FUTURES_ELIGIBLE]
+    spot_only = [c for c in coins if c not in FUTURES_ELIGIBLE]
 
     lines = [f"👁 **Monitored Coins** ({len(coins)} total)\n"]
     lines.append(f"Bridge: `{BRIDGE_SYMBOL}`")
     lines.append(f"Current: `{current}`\n")
 
-    # Group into rows of 5
-    for i in range(0, len(coins), 5):
-        batch = coins[i : i + 5]
+    lines.append(f"**🔻 Futures-eligible** ({len(fut_coins)}):")
+    for i in range(0, len(fut_coins), 5):
+        batch = fut_coins[i:i+5]
         row = "  ".join(f"`{c}`" for c in batch)
-        lines.append(row)
+        lines.append(f"  {row}")
+
+    if spot_only:
+        lines.append(f"\n**📦 Spot-only** ({len(spot_only)}):")
+        for i in range(0, len(spot_only), 5):
+            batch = spot_only[i:i+5]
+            row = "  ".join(f"`{c}`" for c in batch)
+            lines.append(f"  {row}")
 
     return "\n".join(lines)
 
@@ -317,13 +532,11 @@ def _enable_coin(symbol):
     symbol = symbol.strip().upper()
     conn = get_db()
 
-    # Check if already enabled
     row = conn.execute("SELECT symbol, enabled FROM coins WHERE symbol = ?", (symbol,)).fetchone()
     if row and row["enabled"]:
         conn.close()
         return f"`{symbol}` is already in the active list."
 
-    # Check if coin exists but disabled
     if row:
         conn.execute("UPDATE coins SET enabled = 1 WHERE symbol = ?", (symbol,))
         conn.commit()
@@ -331,10 +544,8 @@ def _enable_coin(symbol):
         conn.execute("INSERT OR IGNORE INTO coins (symbol, enabled) VALUES (?, 1)", (symbol,))
         conn.commit()
 
-    # Create pairs with all other enabled coins
     enabled = [r[0] for r in conn.execute("SELECT symbol FROM coins WHERE enabled = 1 AND symbol != ?", (symbol,)).fetchall()]
     for other in enabled:
-        # both directions
         for a, b in [(symbol, other), (other, symbol)]:
             exists = conn.execute("SELECT id FROM pairs WHERE from_coin_id = ? AND to_coin_id = ?", (a, b)).fetchone()
             if not exists:
@@ -345,7 +556,7 @@ def _enable_coin(symbol):
 
 
 def _disable_coin(symbol):
-    """Disable a coin in the DB. Will not remove if it's the current coin being held."""
+    """Disable a coin in the DB."""
     symbol = symbol.strip().upper()
     conn = get_db()
 
@@ -358,11 +569,10 @@ def _disable_coin(symbol):
         conn.close()
         return f"`{symbol}` is already disabled."
 
-    # Check if it's the current coin
     current = get_current_coin()
     if current == symbol:
         conn.close()
-        return f"⚠️ Cannot remove `{symbol}` — it's the coin the bot is currently holding! Wait for it to trade away first."
+        return f"⚠️ Cannot remove `{symbol}` — it's the coin the bot is currently holding!"
 
     conn.execute("UPDATE coins SET enabled = 0 WHERE symbol = ?", (symbol,))
     conn.commit()
@@ -371,12 +581,11 @@ def _disable_coin(symbol):
 
 
 def cmd_addcoin(args):
-    """Add a coin to the monitored list. Validates USDC pair first."""
+    """Add a coin to the monitored list."""
     if not args:
         return "Usage: `/addcoin TICKER`\nExample: `/addcoin LTC`"
     symbol = args.strip().upper()
 
-    # Verify USDC pair exists
     price, err = _verify_usdc_pair(symbol)
     if err:
         return f"❌ Cannot add `{symbol}`: {err}"
@@ -394,7 +603,8 @@ def cmd_addcoin(args):
         pass
 
     result = _enable_coin(symbol)
-    return f"{result}{vol_info}\n💰 Price: ${price:.6f}"
+    fut_note = " 🔻 Futures-eligible" if symbol in FUTURES_ELIGIBLE else ""
+    return f"{result}{vol_info}\n💰 Price: ${price:.6f}{fut_note}"
 
 
 def cmd_removecoin(args):
@@ -405,7 +615,7 @@ def cmd_removecoin(args):
 
 
 def cmd_swap(args):
-    """Swap one coin for another in one command."""
+    """Swap one coin for another."""
     if not args or " " not in args:
         return "Usage: `/swap OLD NEW`\nExample: `/swap TIA LTC`"
     parts = args.strip().upper().split()
@@ -414,7 +624,6 @@ def cmd_swap(args):
     if old == new:
         return "Same coin, nothing to do."
 
-    # Verify new coin has USDC pair
     price, err = _verify_usdc_pair(new)
     if err:
         return f"❌ Cannot add `{new}`: {err}"
@@ -425,18 +634,641 @@ def cmd_swap(args):
     return "\n".join(result) + f"\n💰 `{new}` price: ${price:.6f}"
 
 
+def cmd_futures():
+    """Futures wallet status: balance, open positions, P&L, funding rates."""
+    balance = get_futures_balance()
+    positions = get_futures_positions()
+
+    if balance is None and not positions:
+        return "❌ Cannot reach futures API. Check API keys."
+
+    lines = ["🔻 **Futures Dashboard**\n"]
+
+    # Wallet balance
+    if balance:
+        lines.append(f"💼 **Wallet Balance:** `${balance['balance']:.2f}`")
+        lines.append(f"   Available: `${balance['available']:.2f}`")
+        if balance["pnl"] != 0:
+            pnl_emoji = "🟢" if balance["pnl"] >= 0 else "🔴"
+            lines.append(f"   Unrealized P&L: {pnl_emoji} `${balance['pnl']:+.2f}`")
+        lines.append("")
+
+    # Open positions
+    if positions:
+        lines.append(f"**📊 Open Positions ({len(positions)}):**\n")
+        for p in positions:
+            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+            funding = get_futures_funding(p["symbol"])
+            funding_str = ""
+            if funding is not None:
+                if funding < 0:
+                    funding_str = f" | Funding: 🟢 {funding*100:.4f}% (shorts get paid)"
+                else:
+                    funding_str = f" | Funding: 🔴 {funding*100:.4f}% (shorts pay)"
+
+            lines.append(f"{pnl_emoji} **{p['symbol']}** — {p['direction']}")
+            lines.append(f"   Qty: `{p['qty']}` | Leverage: `{p['leverage']}x`")
+            lines.append(f"   Entry: `${p['entry']:.4f}` → Mark: `${p['mark']:.4f}`")
+            lines.append(
+                f"   P&L: **{p['pnl_pct']:+.1f}%** (${p['pnl_usd']:+.2f})"
+                f"{funding_str}"
+            )
+            lines.append("")
+    else:
+        lines.append("💤 No open positions")
+
+    # Quick check: what coins could be shorted right now?
+    # Show worst performers among futures-eligible coins
+    try:
+        r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+        if r.status_code == 200:
+            performers = []
+            for t in r.json():
+                sym = t["symbol"]
+                for coin in FUTURES_ELIGIBLE:
+                    if sym == f"{coin}{BRIDGE_SYMBOL}":
+                        performers.append((coin, float(t["priceChangePercent"])))
+                        break
+            performers.sort(key=lambda x: x[1])
+            if performers:
+                lines.append("**📉 Top short candidates** (24h perf):")
+                for coin, perf in performers[:3]:
+                    icon = "🔴" if perf < 0 else "🟢"
+                    lines.append(f"  {icon} `{coin}`: {perf:+.2f}%")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def cmd_health():
+    """System health check: DB, bot container, backups, WAL mode."""
+    lines = ["🏥 **System Health**\n"]
+
+    # ── Database ──
+    lines.append("**Database:**")
+    db_ok = os.path.exists(DB_PATH)
+    if db_ok:
+        db_size = os.path.getsize(DB_PATH) / 1024
+        lines.append(f"  ✅ DB exists ({db_size:.0f} KB)")
+
+        # Check WAL mode
+        try:
+            conn = get_db()
+            wal_row = conn.execute("PRAGMA journal_mode").fetchone()
+            wal_mode = wal_row[0] if wal_row else "?"
+            lines.append(f"  ✅ Journal mode: `{wal_mode}`")
+
+            # DB backup check
+            backup_dir = os.path.dirname(DB_PATH)
+            backups = sorted(
+                [f for f in os.listdir(backup_dir) if f.endswith(".db.bak")],
+                reverse=True,
+            ) if os.path.isdir(backup_dir) else []
+            if backups:
+                bak_path = os.path.join(backup_dir, backups[0])
+                bak_age = time.time() - os.path.getmtime(bak_path)
+                bak_age_str = f"{bak_age/3600:.1f}h ago" if bak_age < 86400 else f"{bak_age/86400:.1f}d ago"
+                lines.append(f"  ✅ Last backup: `{backups[0]}` ({bak_age_str})")
+            else:
+                lines.append("  ⚠️ No DB backups found")
+
+            # Row counts
+            trade_count = conn.execute("SELECT COUNT(*) FROM trade_history").fetchone()[0]
+            regime_count = conn.execute("SELECT COUNT(*) FROM market_regime_log").fetchone()[0]
+            conn.close()
+            lines.append(f"  📊 Trades: `{trade_count}` | Regime logs: `{regime_count}`")
+        except Exception as e:
+            lines.append(f"  ❌ DB error: {e}")
+    else:
+        lines.append(f"  ❌ DB not found at `{DB_PATH}`")
+
+    # ── Bot Container ──
+    lines.append("\n**Bot Process:**")
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", f"name={CONTAINER_NAME}",
+             "--format", "{{.Names}} {{.Status}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.stdout.strip():
+            for line in result.stdout.strip().split("\n"):
+                parts = line.split(None, 1)
+                name = parts[0] if parts else "?"
+                status = parts[1] if len(parts) > 1 else "?"
+                if "Up" in status:
+                    lines.append(f"  ✅ `{name}`: {status}")
+                else:
+                    lines.append(f"  ⚠️ `{name}`: {status}")
+        else:
+            lines.append(f"  ❌ Container `{CONTAINER_NAME}` not running!")
+    except Exception as e:
+        # Try systemctl fallback (if bot runs as systemd)
+        try:
+            result2 = subprocess.run(
+                ["systemctl", "is-active", "binance-trade-bot"],
+                capture_output=True, text=True, timeout=5,
+            )
+            status2 = result2.stdout.strip()
+            if status2 == "active":
+                lines.append("  ✅ systemd service: active")
+            else:
+                lines.append(f"  ❌ Bot not found (docker: {e}, systemd: {status2})")
+        except Exception:
+            lines.append(f"  ❌ Cannot check bot status: {e}")
+
+    # ── PID Lock ──
+    lines.append("\n**Instance Protection:**")
+    pid_file = os.path.join(os.path.dirname(DB_PATH), "bot.pid")
+    if os.path.exists(pid_file):
+        try:
+            with open(pid_file) as f:
+                pid = f.read().strip()
+            lines.append(f"  ✅ PID lock active (PID {pid})")
+        except Exception:
+            lines.append("  ⚠️ PID lock file exists but unreadable")
+    else:
+        lines.append("  ℹ️ No PID lock file (bot may use in-memory lock)")
+
+    # ── API Connectivity ──
+    lines.append("\n**Connectivity:**")
+    try:
+        r = requests.get(f"{API_BASE}/ping", timeout=5)
+        if r.status_code == 200:
+            lines.append("  ✅ Binance spot API: reachable")
+        else:
+            lines.append(f"  ⚠️ Binance spot API: status {r.status_code}")
+    except Exception:
+        lines.append("  ❌ Binance spot API: unreachable")
+
+    try:
+        r = requests.get(f"{FAPI_PUB}/ping", timeout=5)
+        if r.status_code == 200:
+            lines.append("  ✅ Binance futures API: reachable")
+        else:
+            lines.append(f"  ⚠️ Binance futures API: status {r.status_code}")
+    except Exception:
+        lines.append("  ❌ Binance futures API: unreachable")
+
+    return "\n".join(lines)
+
+
+def cmd_config():
+    """Show current bot configuration."""
+    config = load_config()
+
+    if not config:
+        return "❌ Could not read configuration file."
+
+    # Friendly labels
+    labels = {
+        "bridge": "Bridge Currency",
+        "scout_multiplier": "Scout Multiplier",
+        "buy_timeout": "Buy Timeout (s)",
+        "sell_timeout": "Sell Timeout (s)",
+        "trailing_stop_enabled": "Trailing Stop",
+        "trailing_stop_pct": "Trailing Stop %",
+        "futures_enabled": "Futures Enabled",
+        "futures_leverage": "Futures Leverage",
+        "futures_max_margin_pct": "Futures Max Margin %",
+        "futures_stop_loss_pct": "Futures Stop Loss %",
+        "futures_trailing_stop_pct": "Futures Trailing Stop %",
+        "futures_max_funding_rate": "Futures Max Funding Rate",
+        "futures_check_interval": "Futures Check Interval (s)",
+    }
+    # Hide sensitive keys
+    hidden = {"api_key", "api_secret_key", "key", "secret"}
+
+    lines = ["⚙️ **Bot Configuration**\n"]
+
+    # Trading settings
+    lines.append("**Trading:**")
+    for k in ["bridge", "scout_multiplier", "buy_timeout", "sell_timeout"]:
+        if k in config:
+            label = labels.get(k, k)
+            lines.append(f"  `{label}`: `{config[k]}`")
+
+    # Risk management
+    lines.append("\n**Risk Management:**")
+    for k in ["trailing_stop_enabled", "trailing_stop_pct"]:
+        if k in config:
+            label = labels.get(k, k)
+            lines.append(f"  `{label}`: `{config[k]}`")
+
+    # Futures settings
+    futures_keys = [k for k in config if k.startswith("futures")]
+    if futures_keys:
+        lines.append("\n**🔻 Futures:**")
+        for k in sorted(futures_keys):
+            if k in hidden:
+                continue
+            label = labels.get(k, k.replace("futures_", "").replace("_", " ").title())
+            val = config[k]
+            # Convert fractions to percentages for readability
+            if "margin_pct" in k:
+                try:
+                    val = f"{float(val)*100:.0f}%"
+                except Exception:
+                    pass
+            if "funding_rate" in k:
+                try:
+                    val = f"{float(val)*100:.4f}%"
+                except Exception:
+                    pass
+            lines.append(f"  `{label}`: `{val}`")
+
+    # Coin count
+    conn = get_db()
+    enabled_count = conn.execute("SELECT COUNT(*) FROM coins WHERE enabled = 1").fetchone()[0]
+    total_count = conn.execute("SELECT COUNT(*) FROM coins").fetchone()[0]
+    conn.close()
+    lines.append(f"\n**Coins:** `{enabled_count}` active / `{total_count}` total")
+
+    # Config file path
+    lines.append(f"\n_file: `{CONFIG_PATH}`_")
+
+    return "\n".join(lines)
+
+
+def cmd_kill(args=None):
+    """Emergency kill switch: close all futures positions + transfer back to spot.
+
+    Usage: /kill confirm
+    """
+    if args and args.strip().lower() == "confirm":
+        return _execute_kill()
+
+    # Show what would happen and ask for confirmation
+    positions = get_futures_positions()
+    balance = get_futures_balance()
+
+    lines = ["🚨 **EMERGENCY KILL SWITCH**\n"]
+    lines.append("This will:")
+    lines.append("  1. Close ALL open futures positions")
+    lines.append("  2. Transfer all USDC back to spot wallet")
+    lines.append("  3. Bot will NOT reopen futures until next bear regime cycle\n")
+
+    if positions:
+        lines.append(f"**{len(positions)} position(s) will be closed:**")
+        for p in positions:
+            lines.append(f"  `{p['symbol']}` {p['direction']} qty={p['qty']} P&L={p['pnl_pct']:+.1f}%")
+    else:
+        lines.append("No open positions to close.")
+
+    if balance and balance["balance"] > 0:
+        lines.append(f"\n`${balance['balance']:.2f}` will be transferred to spot.")
+
+    lines.append("\n⚠️ **To execute, send:** `/kill confirm`")
+    return "\n".join(lines)
+
+
+def _execute_kill():
+    """Execute the kill switch: close positions + transfer back."""
+    lines = ["🚨 **KILL SWITCH EXECUTING...**\n"]
+
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return "❌ No API keys available. Cannot execute kill switch."
+
+    positions = get_futures_positions()
+
+    # Step 1: Close all positions
+    if positions:
+        for p in positions:
+            try:
+                close_side = "BUY" if p["direction"] == "SHORT" else "SELL"
+                order_params = {
+                    "symbol": p["symbol"],
+                    "side": close_side,
+                    "type": "MARKET",
+                    "quantity": p["qty"],
+                    "reduceOnly": "true",
+                    "recvWindow": 5000,
+                    "timestamp": int(time.time() * 1000),
+                }
+                order_params = _sign_request(order_params)
+                r = requests.post(
+                    f"{FAPI_BASE}/order",
+                    params=order_params,
+                    headers={"X-MBX-APIKEY": BINANCE_API_KEY},
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    lines.append(f"✅ Closed {p['symbol']} {p['direction']} (qty {p['qty']})")
+                else:
+                    lines.append(f"❌ Failed to close {p['symbol']}: {r.status_code} {r.text[:100]}")
+            except Exception as e:
+                lines.append(f"❌ Error closing {p['symbol']}: {e}")
+    else:
+        lines.append("✅ No open positions to close")
+
+    # Step 2: Transfer all USDC back to spot
+    time.sleep(2)  # Wait for positions to settle
+    balance = get_futures_balance()
+    if balance and balance["balance"] > 0.01:
+        try:
+            transfer_params = {
+                "asset": BRIDGE_SYMBOL,
+                "amount": f"{balance['balance']:.8f}".rstrip("0").rstrip("."),
+                "type": 2,  # futures to spot
+                "recvWindow": 5000,
+                "timestamp": int(time.time() * 1000),
+            }
+            transfer_params = _sign_request(transfer_params)
+            r = requests.post(
+                "https://api.binance.com/sapi/v1/futures/transfer",
+                params=transfer_params,
+                headers={"X-MBX-APIKEY": BINANCE_API_KEY},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                lines.append(f"✅ Transferred ${balance['balance']:.2f} {BRIDGE_SYMBOL} back to spot")
+            else:
+                lines.append(f"❌ Transfer failed: {r.status_code} {r.text[:100]}")
+        except Exception as e:
+            lines.append(f"❌ Transfer error: {e}")
+    else:
+        lines.append("✅ No USDC in futures wallet to transfer")
+
+    lines.append("\n🏁 **Kill switch complete.** Bot is in spot-only mode.")
+    lines.append("_The trade bot may re-enter futures on the next bear regime cycle._")
+    return "\n".join(lines)
+
+
+def cmd_regime():
+    """Show current market regime and what the bot is doing about it."""
+    conn = get_db()
+
+    row = conn.execute(
+        """SELECT regime, adx_value, avg_volatility, btc_correlation, datetime
+           FROM market_regime_log ORDER BY id DESC LIMIT 1"""
+    ).fetchone()
+
+    if not row:
+        conn.close()
+        try:
+            r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+            if r.status_code == 200:
+                coins = conn.execute("SELECT symbol FROM coins WHERE enabled = 1").fetchall()
+                total_vol = 0
+                cnt = 0
+                for c in coins:
+                    pair = f"{c['symbol']}{BRIDGE_SYMBOL}"
+                    for t in r.json():
+                        if t["symbol"] == pair:
+                            total_vol += abs(float(t["priceChangePercent"]))
+                            cnt += 1
+                            break
+                avg_vol = total_vol / cnt if cnt > 0 else 0
+                regime = "stormy" if avg_vol > 8 else "sideways"
+                conn.close()
+                return f"🧠 **Market Regime** (estimated)\n\nStatus: `{regime}`\nAvg volatility: `{avg_vol:.1f}%`\n\n_Bot is collecting data for full regime detection..._"
+        except Exception:
+            pass
+        return "❌ No regime data yet. Bot needs a few minutes to classify the market."
+
+    regime = row["regime"]
+    adx = row["adx_value"] or 0
+    vol = row["avg_volatility"] or 0
+
+    emoji_map = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "stormy": "🟠"}
+    strategy_map = {
+        "bull": "🟢 **Bull** — Momentum mode\nBot is buying the strongest coins and riding trends. Spot long positions.",
+        "bear": "🔴 **Bear** — Defense mode\nBot has sold to USDC and may be **shorting via USDC-M futures**. Capital is being preserved/shorted.",
+        "sideways": "🟡 **Sideways** — Mean reversion mode\nBot is buying dips and selling rips on oscillating coins.",
+        "stormy": "🟠 **Stormy** — Conservative mode\nBot uses double z-score thresholds. Only high-conviction trades.",
+    }
+
+    emoji = emoji_map.get(regime, "❓")
+    strategy = strategy_map.get(regime, "Unknown regime")
+
+    lines = [f"🧠 **Market Regime**\n"]
+    lines.append(f"Status: {emoji} **{regime.upper()}**\n")
+    lines.append(strategy)
+    lines.append(f"\n📊 ADX: `{adx:.1f}` (>25 = trending)")
+
+    # ADX interpretation
+    if adx > 50:
+        lines.append("   → 🔥 Very strong trend")
+    elif adx > 25:
+        lines.append("   → 📈 Trending")
+    elif adx > 20:
+        lines.append("   → 📉 Weak trend forming")
+    else:
+        lines.append("   → 😴 Range-bound / choppy")
+
+    lines.append(f"📉 Avg volatility: `{vol:.1f}%`")
+
+    if row["btc_correlation"] is not None:
+        lines.append(f"🔗 BTC correlation: `{row['btc_correlation']:.2f}`")
+
+    # How long in this regime
+    regime_history = conn.execute(
+        """SELECT regime, datetime FROM market_regime_log
+           ORDER BY id DESC LIMIT 20"""
+    ).fetchall()
+    conn.close()
+
+    if regime_history:
+        current_since = None
+        for r in regime_history:
+            if r["regime"] == regime:
+                current_since = r["datetime"]
+            else:
+                break
+        if current_since:
+            try:
+                since_dt = datetime.strptime(current_since[:19], "%Y-%m-%d %H:%M:%S")
+                duration = datetime.now() - since_dt
+                hours = duration.total_seconds() / 3600
+                dur_str = f"{hours:.1f}h" if hours < 48 else f"{hours/24:.1f}d"
+                lines.append(f"\n⏱ In this regime for: `{dur_str}`")
+            except Exception:
+                lines.append(f"\nSince: `{str(current_since)[:19]}`")
+
+    # ── Futures context during bear ──
+    if regime == "bear":
+        lines.append("\n**🔻 Bear Mode Active:**")
+        fut_balance = get_futures_balance()
+        positions = get_futures_positions()
+        if fut_balance:
+            lines.append(f"💼 Futures wallet: `${fut_balance['balance']:.2f}`")
+        if positions:
+            for p in positions:
+                pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+                lines.append(
+                    f"  {pnl_emoji} Short `{p['symbol']}`: "
+                    f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
+                )
+        elif fut_balance and fut_balance["balance"] > 5:
+            lines.append("  💤 Scouting for short entry...")
+        else:
+            lines.append("  💤 Waiting for USDC transfer to futures wallet...")
+
+    # Regime distribution (last 20 samples)
+    if len(regime_history) >= 2:
+        from collections import Counter
+        counts = Counter(r["regime"] for r in regime_history)
+        total = sum(counts.values())
+        lines.append(f"\n**Recent distribution:** (last {total} samples)")
+        for r, c in counts.most_common():
+            pct = c / total * 100
+            lines.append(f"  {emoji_map.get(r, '❓')} {r}: {pct:.0f}%")
+
+    return "\n".join(lines)
+
+
+def cmd_profit():
+    """Performance dashboard: P&L, win rate, trade stats."""
+    conn = get_db()
+
+    row = conn.execute(
+        """SELECT MIN(id) as min_id FROM coin_value WHERE interval = 'MINUTELY'"""
+    ).fetchone()
+    starting_value = 0.0
+    start_time = None
+    if row and row["min_id"]:
+        snap = conn.execute(
+            """SELECT coin_id, balance, usd_price, datetime FROM coin_value
+               WHERE interval = 'MINUTELY' AND id = ?""",
+            (row["min_id"],),
+        ).fetchall()
+        start_time = snap[0]["datetime"] if snap else None
+        if snap:
+            ts = snap[0]["datetime"]
+            all_first = conn.execute(
+                """SELECT coin_id, balance, usd_price FROM coin_value
+                   WHERE interval = 'MINUTELY' AND datetime = ?""",
+                (ts,),
+            ).fetchall()
+            for s in all_first:
+                starting_value += (s["balance"] or 0) * (s["usd_price"] or 0)
+
+    # ── Current value (spot + futures) ──
+    holdings = get_holdings()
+    spot_value = get_portfolio_value(holdings)
+    fut_balance = get_futures_balance()
+    fut_value = fut_balance["balance"] if fut_balance else 0
+    current_value = spot_value + fut_value
+
+    # ── Trade stats ──
+    total_trades = conn.execute(
+        "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'COMPLETE'"
+    ).fetchone()["cnt"]
+    failed_trades = conn.execute(
+        "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'FAILED'"
+    ).fetchone()["cnt"]
+
+    all_trades = conn.execute(
+        """SELECT alt_coin_id, crypto_coin_id, selling, alt_trade_amount,
+                  crypto_trade_amount, datetime
+           FROM trade_history WHERE state = 'COMPLETE'
+           ORDER BY id ASC"""
+    ).fetchall()
+
+    round_trips = []
+    wins = 0
+    losses = 0
+    total_fees_paid = 0.0
+    best_trade = {"coin": "?", "pnl": -9999.0}
+    worst_trade = {"coin": "?", "pnl": 9999.0}
+
+    pending_sell = None
+    for t in all_trades:
+        if t["selling"]:
+            pending_sell = t
+        elif pending_sell:
+            sold_usdc = pending_sell["crypto_trade_amount"] or 0
+            bought_usdc = t["crypto_trade_amount"] or 0
+            coin = t["alt_coin_id"]
+            pnl = bought_usdc - sold_usdc
+            fee_est = sold_usdc * 0.002
+
+            round_trips.append({
+                "from_coin": pending_sell["alt_coin_id"],
+                "to_coin": coin,
+                "sold_usdc": sold_usdc,
+                "bought_usdc": bought_usdc,
+                "pnl": pnl,
+                "fee_est": fee_est,
+                "datetime": t["datetime"],
+            })
+            total_fees_paid += fee_est
+
+            if pnl >= 0:
+                wins += 1
+            else:
+                losses += 1
+
+            if pnl > best_trade["pnl"]:
+                best_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
+            if pnl < worst_trade["pnl"]:
+                worst_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
+
+            pending_sell = None
+
+    total_pnl = current_value - starting_value
+    pnl_pct = (total_pnl / starting_value * 100) if starting_value > 0 else 0
+
+    if start_time:
+        start_dt = datetime.strptime(start_time[:19], "%Y-%m-%d %H:%M:%S")
+        now_dt = datetime.now()
+        uptime_hours = (now_dt - start_dt).total_seconds() / 3600
+        uptime_str = f"{uptime_hours:.1f}h" if uptime_hours < 48 else f"{uptime_hours / 24:.1f}d"
+    else:
+        uptime_str = "?"
+        uptime_hours = 0
+
+    conn.close()
+
+    pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+    lines = [f"📊 **Performance Report**\n"]
+    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
+    lines.append(f"🏦 Starting: `${starting_value:.2f}` → Current: `${current_value:.2f}`")
+    lines.append(f"   (Spot: `${spot_value:.2f}` + Futures: `${fut_value:.2f}`)")
+    lines.append(f"⏱ Uptime: `{uptime_str}` | Trades: `{total_trades}`")
+    if failed_trades:
+        lines.append(f"⚠️ Failed: `{failed_trades}`\n")
+    else:
+        lines.append("")
+
+    if round_trips:
+        win_rate = wins / len(round_trips) * 100
+        wr_emoji = "✅" if win_rate >= 50 else "⚠️"
+        lines.append(f"**Round-trip Trades:** {len(round_trips)}")
+        lines.append(f"{wr_emoji} Win rate: `{win_rate:.0f}%` ({wins}W / {losses}L)")
+        lines.append(f"💸 Est. fees paid: `~${total_fees_paid:.2f}`\n")
+
+        lines.append("**Trade breakdown:**")
+        cumul_pnl = 0.0
+        for rt in round_trips[-10:]:  # Last 10
+            cumul_pnl += rt["pnl"]
+            emoji = "🟢" if rt["pnl"] >= 0 else "🔴"
+            lines.append(
+                f"  {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
+                f"${rt['sold_usdc']:.2f} → ${rt['bought_usdc']:.2f} "
+                f"({rt['pnl']:+.2f})"
+            )
+        if len(round_trips) > 10:
+            lines.append(f"  _...and {len(round_trips) - 10} earlier trades_")
+        lines.append(f"\n  Cumulative trade P&L: `${cumul_pnl:+.2f}`")
+
+    if best_trade["pnl"] > -9999:
+        lines.append(f"\n🏆 Best: `{best_trade['coin']}` ${best_trade['pnl']:+.2f}")
+        lines.append(f"📉 Worst: `{worst_trade['coin']}` ${worst_trade['pnl']:+.2f}")
+
+    return "\n".join(lines)
+
+
 def cmd_hop():
     """Show potential next hops with full strategy filter breakdown."""
     current = get_current_coin()
     conn = get_db()
 
-    # ── Strategy config (matching the improved strategy) ──
     ZSCORE_THRESHOLD = 1.5
-    MOMENTUM_CRASH_THRESHOLD = 5.0  # % drop in last hour = skip
-    VOLATILITY_REGIME_THRESHOLD = 8.0  # avg market vol % → double z-score
-    COOLDOWN_SECONDS = 300  # 5 min
+    MOMENTUM_CRASH_THRESHOLD = 5.0
+    VOLATILITY_REGIME_THRESHOLD = 8.0
+    COOLDOWN_SECONDS = 300
 
-    # ── Fetch last trade time (for cooldown) ──
     last_trade_row = conn.execute(
         "SELECT MAX(datetime) FROM trade_history WHERE state = 'COMPLETE'"
     ).fetchone()
@@ -450,7 +1282,6 @@ def cmd_hop():
             cooldown_active = True
             cooldown_remaining = f"{int(COOLDOWN_SECONDS - elapsed)}s"
 
-    # ── Market regime (avg 24h volatility across enabled coins) ──
     avg_volatility = 0.0
     vol_count = 0
     try:
@@ -458,13 +1289,10 @@ def cmd_hop():
         if r.status_code == 200:
             coins_rows = conn.execute("SELECT symbol FROM coins WHERE enabled = 1").fetchall()
             coin_syms = {cr["symbol"] for cr in coins_rows}
-            price_map = {}
             vol_map = {}
             for t in r.json():
                 sym = t["symbol"]
-                price_map[sym] = float(t["lastPrice"])
                 vol_map[sym] = float(t["priceChangePercent"])
-            # Average % change across all enabled coins
             for sym in coin_syms:
                 pair = f"{sym}{BRIDGE_SYMBOL}"
                 if pair in vol_map:
@@ -478,7 +1306,6 @@ def cmd_hop():
     regime = "stormy 🌩" if avg_volatility > VOLATILITY_REGIME_THRESHOLD else "normal ☀️"
     active_zscore_threshold = ZSCORE_THRESHOLD * 2 if avg_volatility > VOLATILITY_REGIME_THRESHOLD else ZSCORE_THRESHOLD
 
-    # ── Get latest scout per pair for current coin ──
     rows = conn.execute(
         """SELECT p.id as pair_id, p.from_coin_id, p.to_coin_id, p.ratio as target_ratio,
                   sh.current_coin_price, sh.other_coin_price, sh.datetime
@@ -509,9 +1336,7 @@ def cmd_hop():
     multiplier = 3.0
     transaction_fee = fee + fee - fee * fee
 
-    # ── Get live prices + 1h-ago prices for momentum ──
     price_map = {}
-    one_hour_ago_prices = {}
     try:
         r = requests.get(f"{API_BASE}/ticker/price", timeout=10)
         if r.status_code == 200:
@@ -532,19 +1357,17 @@ def cmd_hop():
         score = (current_ratio - transaction_fee * multiplier * current_ratio) - target
         divergence_pct = ((current_ratio / target) - 1) * 100 if target > 0 else 0
 
-        # ── Z-score from pair_stats ──
         ps = conn.execute(
             "SELECT ema_ratio, std_ratio, sample_count FROM pair_stats WHERE pair_id = ?",
             (pair_id,),
         ).fetchone()
         zscore = None
-        zscore_ok = None  # None = not enough data yet
+        zscore_ok = None
         if ps and ps["std_ratio"] and ps["std_ratio"] > 0 and ps["sample_count"] and ps["sample_count"] >= 5:
             zscore = abs((current_ratio - ps["ema_ratio"]) / ps["std_ratio"])
             zscore_ok = zscore >= active_zscore_threshold
 
-        # ── Momentum: check if target coin is crashing (>5% drop in last hour) ──
-        momentum_ok = True  # assume ok
+        momentum_ok = True
         target_pair = f"{to_coin}{BRIDGE_SYMBOL}"
         try:
             r24 = requests.get(
@@ -557,7 +1380,6 @@ def cmd_hop():
         except Exception:
             pass
 
-        # ── Would the bot actually trade? ──
         score_ok = score > 0
         all_clear = score_ok and zscore_ok is True and momentum_ok and not cooldown_active
 
@@ -571,6 +1393,7 @@ def cmd_hop():
             "score_ok": score_ok,
             "all_clear": all_clear,
             "price": price_map.get(target_pair, 0),
+            "futures": to_coin in FUTURES_ELIGIBLE,
         })
 
     conn.close()
@@ -580,44 +1403,37 @@ def cmd_hop():
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    # ── Header ──
     lines = [f"🚀 **Hops from `{current}`**\n"]
     lines.append(f"Market: `{regime}` (avg vol {avg_volatility:.1f}%)")
 
     cooldown_str = f"🔒 Cooldown active ({cooldown_remaining} left)" if cooldown_active else "✅ Cooldown clear"
-    lines.append(f"{cooldown_str}")
-    lines.append(f"Z-score threshold: `{active_zscore_threshold:.1f}` | Momentum guard: `skip if coin drops >{MOMENTUM_CRASH_THRESHOLD}%`\\n")
+    lines.append(cooldown_str)
+    lines.append(f"Z-score threshold: `{active_zscore_threshold:.1f}` | Momentum guard: `skip if coin drops >{MOMENTUM_CRASH_THRESHOLD}%`\n")
 
-    # ── Legend ──
     lines.append("Filter checklist per candidate:")
     lines.append("  ✅ = pass | ⏳ = building data | ❌ = blocked")
     lines.append("")
 
-    # ── Show top 5 ──
     for i, c in enumerate(candidates[:5], 1):
         price_str = f"${c['price']:.4f}" if c["price"] else "?"
+        fut_badge = " 🔻" if c["futures"] else ""
 
-        # Score line
         score_icon = "✅" if c["score_ok"] else "❌"
         score_detail = f"{c['score']:.6f}" if not c["score_ok"] else f"**{c['score']:.6f}**"
-        lines.append(f"**#{i}: `{c['to']}`** {price_str} | Divergence: {c['divergence']:+.2f}%")
+        lines.append(f"**#{i}: `{c['to']}`**{fut_badge} {price_str} | Divergence: {c['divergence']:+.2f}%")
 
-        # Filters
         filters = f"  {score_icon} Score: {score_detail}"
 
-        # Z-score
         if c["zscore"] is not None:
             zs_icon = "✅" if c["zscore_ok"] else "❌"
             filters += f"\n  {zs_icon} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed"
         else:
             filters += f"\n  ⏳ Z-score: collecting data..."
 
-        # Momentum
         mom_icon = "✅" if c["momentum_ok"] else "❌"
         mom_text = "stable" if c["momentum_ok"] else "CRASHING ⚠️"
         filters += f"\n  {mom_icon} Momentum: {mom_text}"
 
-        # Verdict
         if c["all_clear"]:
             filters += "\n  🟢 **TRADE READY**"
         elif cooldown_active and c["score_ok"] and c["zscore_ok"] is True and c["momentum_ok"]:
@@ -629,7 +1445,6 @@ def cmd_hop():
         if i < 5:
             lines.append("")
 
-    # ── Summary ──
     viable = [c for c in candidates if c["all_clear"]]
     close = [c for c in candidates if not c["all_clear"] and c["score_ok"]]
     if viable:
@@ -651,254 +1466,46 @@ def cmd_hop():
     return "\n".join(lines)
 
 
-def cmd_profit():
-    """Performance dashboard: P&L, win rate, trade stats."""
-    conn = get_db()
-
-    # ── Starting portfolio value (earliest coin_value snapshot) ──
-    row = conn.execute(
-        """SELECT MIN(id) as min_id FROM coin_value WHERE interval = 'MINUTELY'"""
-    ).fetchone()
-    starting_value = 0.0
-    start_time = None
-    if row and row["min_id"]:
-        snap = conn.execute(
-            """SELECT coin_id, balance, usd_price, datetime FROM coin_value
-               WHERE interval = 'MINUTELY' AND id = ?""",
-            (row["min_id"],),
-        ).fetchall()
-        start_time = snap[0]["datetime"] if snap else None
-        # Also get the full first snapshot set (all coins at that timestamp)
-        if snap:
-            ts = snap[0]["datetime"]
-            all_first = conn.execute(
-                """SELECT coin_id, balance, usd_price FROM coin_value
-                   WHERE interval = 'MINUTELY' AND datetime = ?""",
-                (ts,),
-            ).fetchall()
-            for s in all_first:
-                starting_value += (s["balance"] or 0) * (s["usd_price"] or 0)
-
-    # ── Current value via Binance API ──
-    holdings = get_holdings()
-    current_value = get_portfolio_value(holdings)
-
-    # ── Total trades ──
-    total_trades = conn.execute(
-        "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'COMPLETE'"
-    ).fetchone()["cnt"]
-
-    # ── Round-trip profit per coin hop ──
-    # Each hop = sell coin A → USDC, then buy coin B ← USDC
-    # Group trades in pairs: sell then buy
-    all_trades = conn.execute(
-        """SELECT alt_coin_id, crypto_coin_id, selling, alt_trade_amount,
-                  crypto_trade_amount, datetime
-           FROM trade_history WHERE state = 'COMPLETE'
-           ORDER BY id ASC"""
-    ).fetchall()
-
-    round_trips = []
-    wins = 0
-    losses = 0
-    total_fees_paid = 0.0  # rough estimate
-    best_trade = {"coin": "?", "pnl": -9999.0}
-    worst_trade = {"coin": "?", "pnl": 9999.0}
-
-    # Track sells to match with subsequent buys
-    pending_sell = None
-    for t in all_trades:
-        if t["selling"]:
-            pending_sell = t
-        elif pending_sell:
-            sold_usdc = pending_sell["crypto_trade_amount"] or 0
-            bought_usdc = t["crypto_trade_amount"] or 0
-            coin = t["alt_coin_id"]
-            pnl = bought_usdc - sold_usdc
-            fee_est = sold_usdc * 0.002  # 0.2% round trip
-
-            round_trips.append({
-                "from_coin": pending_sell["alt_coin_id"],
-                "to_coin": coin,
-                "sold_usdc": sold_usdc,
-                "bought_usdc": bought_usdc,
-                "pnl": pnl,
-                "fee_est": fee_est,
-                "datetime": t["datetime"],
-            })
-            total_fees_paid += fee_est
-
-            if pnl >= 0:
-                wins += 1
-            else:
-                losses += 1
-
-            if pnl > best_trade["pnl"]:
-                best_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
-            if pnl < worst_trade["pnl"]:
-                worst_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
-
-            pending_sell = None
-
-    total_pnl = current_value - starting_value
-    pnl_pct = (total_pnl / starting_value * 100) if starting_value > 0 else 0
-
-    # ── Uptime ──
-    if start_time:
-        start_dt = datetime.strptime(start_time[:19], "%Y-%m-%d %H:%M:%S")
-        now_dt = datetime.now()
-        uptime_hours = (now_dt - start_dt).total_seconds() / 3600
-        uptime_str = f"{uptime_hours:.1f}h" if uptime_hours < 48 else f"{uptime_hours / 24:.1f}d"
-    else:
-        uptime_str = "?"
-        uptime_hours = 0
-
-    conn.close()
-
-    # ── Build message ──
-    pnl_emoji = "📈" if total_pnl >= 0 else "📉"
-    lines = [f"📊 **Performance Report**\n"]
-    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
-    lines.append(f"🏦 Starting: `${starting_value:.2f}` → Current: `${current_value:.2f}`")
-    lines.append(f"⏱ Uptime: `{uptime_str}` | Trades: `{total_trades}`\n")
-
-    if round_trips:
-        win_rate = wins / len(round_trips) * 100
-        wr_emoji = "✅" if win_rate >= 50 else "⚠️"
-        lines.append(f"**Round-trip Trades:** {len(round_trips)}")
-        lines.append(f"{wr_emoji} Win rate: `{win_rate:.0f}%` ({wins}W / {losses}L)")
-        lines.append(f"💸 Est. fees paid: `~${total_fees_paid:.2f}`\n")
-
-        # Per-trade P&L
-        lines.append("**Trade breakdown:**")
-        cumul_pnl = 0.0
-        for rt in round_trips:
-            cumul_pnl += rt["pnl"]
-            emoji = "🟢" if rt["pnl"] >= 0 else "🔴"
-            lines.append(
-                f"  {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
-                f"${rt['sold_usdc']:.2f} → ${rt['bought_usdc']:.2f} "
-                f"({rt['pnl']:+.2f})"
-            )
-        lines.append(f"\n  Cumulative P&L from trades: `${cumul_pnl:+.2f}`")
-
-    # ── Best / Worst ──
-    if best_trade["pnl"] > -9999:
-        lines.append(f"\n🏆 Best: `{best_trade['coin']}` ${best_trade['pnl']:+.2f}")
-        lines.append(f"📉 Worst: `{worst_trade['coin']}` ${worst_trade['pnl']:+.2f}")
-
-    return "\n".join(lines)
-
-
-def cmd_regime():
-    """Show current market regime and how the bot is adapting."""
-    conn = get_db()
-
-    # Get latest regime from DB
-    row = conn.execute(
-        """SELECT regime, adx_value, avg_volatility, btc_correlation, datetime
-           FROM market_regime_log ORDER BY id DESC LIMIT 1"""
-    ).fetchone()
-
-    if not row:
-        conn.close()
-        # Fall back to live calculation
-        try:
-            r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
-            if r.status_code == 200:
-                coins = conn.execute("SELECT symbol FROM coins WHERE enabled = 1").fetchall()
-                total_vol = 0
-                cnt = 0
-                for c in coins:
-                    pair = f"{c['symbol']}{BRIDGE_SYMBOL}"
-                    for t in r.json():
-                        if t["symbol"] == pair:
-                            total_vol += abs(float(t["priceChangePercent"]))
-                            cnt += 1
-                            break
-                avg_vol = total_vol / cnt if cnt > 0 else 0
-                regime = "stormy" if avg_vol > 8 else "sideways"
-                conn.close()
-                return f"🧠 **Market Regime** (estimated)\n\nStatus: `{regime}`\nAvg volatility: `{avg_vol:.1f}%`\n\n_Bot is collecting data for full regime detection..._"
-        except Exception:
-            pass
-        conn.close()
-        return "❌ No regime data yet. Bot needs a few minutes to classify the market."
-
-    regime = row["regime"]
-    adx = row["adx_value"] or 0
-    vol = row["avg_volatility"] or 0
-
-    emoji_map = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "stormy": "🟠"}
-    desc_map = {
-        "bull": "Momentum mode — buying strength, holding longer",
-        "bear": "Defense mode — preserving capital, banking gains fast",
-        "sideways": "Mean reversion — buying dips, selling rips",
-        "stormy": "Conservative — extreme thresholds only",
-    }
-
-    emoji = emoji_map.get(regime, "❓")
-    desc = desc_map.get(regime, "Unknown")
-
-    lines = [f"🧠 **Market Regime**\n"]
-    lines.append(f"Status: {emoji} **{regime.upper()}**")
-    lines.append(f"Strategy: {desc}\n")
-    lines.append(f"📊 ADX: `{adx:.1f}` (>25 = trending)")
-    lines.append(f"📉 Avg volatility: `{vol:.1f}%`")
-
-    # How long in this regime
-    regime_history = conn.execute(
-        """SELECT regime, datetime FROM market_regime_log
-           ORDER BY id DESC LIMIT 20"""
-    ).fetchall()
-    conn.close()
-
-    if regime_history:
-        current_since = None
-        for r in regime_history:
-            if r["regime"] == regime:
-                current_since = r["datetime"]
-            else:
-                break
-        if current_since:
-            lines.append(f"\nIn this regime since: `{str(current_since)[:19]}`")
-
-    # Regime distribution (last 24h)
-    if len(regime_history) >= 2:
-        from collections import Counter
-        counts = Counter(r["regime"] for r in regime_history)
-        total = sum(counts.values())
-        lines.append(f"\n**Recent distribution:**")
-        for r, c in counts.most_common():
-            pct = c / total * 100
-            lines.append(f"  {emoji_map.get(r, '❓')} {r}: {pct:.0f}%")
-
-    return "\n".join(lines)
-
-
 def cmd_help():
     """List available commands."""
     lines = ["🤖 **Available Commands**\n"]
-    lines.append("/status — Current holdings and balance")
-    lines.append("/trades — Recent trade history")
-    lines.append("/coins — List of monitored coins")
-    lines.append("/price — Current coin live price")
-    lines.append("/profit — Performance dashboard & P&L")
-    lines.append("/regime — Current market regime & strategy")
-    lines.append("/addcoin TICKER — Add a coin to the list")
-    lines.append("/removecoin TICKER — Remove a coin from the list")
-    lines.append("/swap OLD NEW — Replace one coin with another")
-    lines.append("/hop — Show potential next trade targets")
-    lines.append("/help — This message")
+
+    lines.append("**📊 Monitoring:**")
+    lines.append("  /status — Holdings & total portfolio (spot + futures)")
+    lines.append("  /trades — Recent trades (incl. FAILED)")
+    lines.append("  /price — Current coin live price + 24h stats")
+    lines.append("  /hop — Potential next trade targets & filters")
+    lines.append("  /profit — P&L, win rate, fees, trade breakdown")
+
+    lines.append("\n**🧠 Market:**")
+    lines.append("  /regime — Market regime & what the bot is doing")
+    lines.append("  /coins — Monitored coins (futures-eligible marked)")
+
+    lines.append("\n**🔻 Futures:**")
+    lines.append("  /futures — Futures wallet, positions, P&L, funding")
+    lines.append("  /kill — ⚠️ Emergency: close all shorts + transfer back")
+
+    lines.append("\n**🔧 System:**")
+    lines.append("  /health — DB, backups, container, API connectivity")
+    lines.append("  /config — Current bot configuration & settings")
+
+    lines.append("\n**⚙️ Coin Management:**")
+    lines.append("  /addcoin TICKER — Add a coin")
+    lines.append("  /removecoin TICKER — Remove a coin")
+    lines.append("  /swap OLD NEW — Replace one coin with another")
+
+    lines.append("\n  /help — This message")
+
     return "\n".join(lines)
 
 
 # ── Telegram Bot Loop ────────────────────────────────────────────────────────
-# Commands that take arguments (coin ticker)
+# Commands that take arguments
 ARG_COMMANDS = {
     "/addcoin": cmd_addcoin,
     "/removecoin": cmd_removecoin,
     "/swap": cmd_swap,
+    "/kill": cmd_kill,
 }
 # Commands without arguments
 COMMANDS = {
@@ -910,6 +1517,9 @@ COMMANDS = {
     "/price": cmd_price,
     "/profit": cmd_profit,
     "/regime": cmd_regime,
+    "/futures": cmd_futures,
+    "/health": cmd_health,
+    "/config": cmd_config,
     "/hop": cmd_hop,
 }
 
@@ -1020,13 +1630,17 @@ def main():
     # Set bot commands menu
     try:
         commands_payload = [
-            {"command": "status", "description": "Current holdings and balance"},
-            {"command": "trades", "description": "Recent trade history"},
-            {"command": "coins", "description": "List of monitored coins"},
+            {"command": "status", "description": "Holdings & total portfolio"},
+            {"command": "trades", "description": "Recent trades (incl. FAILED)"},
+            {"command": "coins", "description": "Monitored coins"},
             {"command": "price", "description": "Current coin live price"},
             {"command": "profit", "description": "Performance dashboard & P&L"},
             {"command": "regime", "description": "Market regime & strategy mode"},
+            {"command": "futures", "description": "Futures wallet, positions, P&L"},
+            {"command": "health", "description": "System health check"},
+            {"command": "config", "description": "Bot configuration"},
             {"command": "hop", "description": "Show potential next trade"},
+            {"command": "kill", "description": "⚠️ Emergency: close all futures"},
             {"command": "addcoin", "description": "Add a coin to trade list"},
             {"command": "removecoin", "description": "Remove a coin from list"},
             {"command": "swap", "description": "Swap one coin for another"},

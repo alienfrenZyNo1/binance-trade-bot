@@ -415,14 +415,23 @@ class FuturesManager:
         return None
 
     def _get_futures_usdc_balance(self) -> float:
-        """Get available USDC balance in futures wallet."""
+        """Get available USDC balance in futures wallet.
+
+        NOTE: Binance API 'availableBalance' field can return 0.0 even when
+        funds are present (known quirk with no open positions). We use 'balance'
+        as the primary field and 'maxWithdrawAmount' as a cross-check.
+        """
         try:
             balances = self.client.futures_account_balance()
             for bal in balances:
                 if bal.get("asset") == self.bridge_symbol:
-                    return float(bal.get("availableBalance", 0))
-        except Exception:
-            pass
+                    # Use 'balance' — 'availableBalance' is unreliable
+                    balance = float(bal.get("balance", 0))
+                    max_wd = float(bal.get("maxWithdrawAmount", 0))
+                    # Return the more conservative of the two
+                    return min(balance, max_wd) if max_wd > 0 else balance
+        except Exception as e:
+            self.logger.warning(f"Futures balance check failed: {e}")
         return 0.0
 
     def _get_quantity_precision(self, symbol: str) -> int:
