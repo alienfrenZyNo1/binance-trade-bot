@@ -127,7 +127,7 @@ def save_state(state):
 def _get_currently_held_coin():
     """Check the bot's DB for the currently held coin (to avoid disabling it)."""
     import sqlite3
-    db_path = "os.environ.get("DB_PATH", "data/crypto_trading.db")"
+    db_path = os.environ.get("DB_PATH", "data/crypto_trading.db")
     try:
         conn = sqlite3.connect(db_path)
         row = conn.execute("SELECT coin_id FROM current_coin_history ORDER BY id DESC LIMIT 1").fetchone()

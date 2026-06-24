@@ -485,10 +485,9 @@ def cmd_status():
         lines.append(f"\n<b>🔻 Futures Positions ({len(fut_positions)}):</b>")
         pos_lines = []
         for p in fut_positions:
-            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             pos_lines.append(
-                f"{pnl_emoji} {p['symbol']:<12} {p['direction']:<5} "
-                f"qty={p['qty']}  entry=${p['entry']:.4f}  "
+                f"{p['symbol']:<12} {p['direction']:<5} "
+                f"qty={p['qty']:<10} entry=${p['entry']:.4f}  "
                 f"mark=${p['mark']:.4f}  "
                 f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
             )
@@ -519,12 +518,12 @@ def cmd_trades():
             state = t["state"] if t["state"] else "?"
 
             if state == "COMPLETE":
-                icon = "🔴" if t["selling"] else "🟢"
-                trade_lines.append(f"{icon} {dt}  {action} {amount:>9.2f} {coin:<6} ↔ {cost:>9.2f} {t['crypto_coin_id']}")
+                direction = "SELL" if t["selling"] else "BUY "
+                trade_lines.append(f"{direction} {dt}  {amount:>9.2f} {coin:<6} for {cost:>9.2f} {t['crypto_coin_id']}")
             elif state == "FAILED":
-                trade_lines.append(f"⚠️ {dt}  FAILED {action} {coin} — stuck in partial state!")
+                trade_lines.append(f"FAIL {dt}  FAILED {action} {coin} - stuck in partial state!")
             else:
-                trade_lines.append(f"❓ {dt}  {state} {action} {amount:.2f} {coin}")
+                trade_lines.append(f"{state:<4} {dt}  {action} {amount:.2f} {coin}")
         lines.append(f"<pre>{html_escape(chr(10).join(trade_lines))}</pre>")
 
         # Count states
@@ -545,15 +544,13 @@ def cmd_trades():
     if positions:
         pos_lines = []
         for p in positions:
-            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             funding = get_futures_funding(p["symbol"])
             funding_str = ""
             if funding is not None:
-                f_emoji = "🟢" if funding < 0 else "🔴"
-                funding_str = f" | Funding: {f_emoji}{funding*100:.4f}%"
+                funding_str = f"  |  Funding: {funding*100:.4f}%"
             pos_lines.append(
-                f"{pnl_emoji} {p['symbol']:<12} {p['direction']:<5} "
-                f"qty={p['qty']}  entry=${p['entry']:.4f}  "
+                f"{p['symbol']:<12} {p['direction']:<5} "
+                f"qty={p['qty']:<10} entry=${p['entry']:.4f}  "
                 f"mark=${p['mark']:.4f}  "
                 f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
                 f"{funding_str}"
@@ -615,10 +612,11 @@ def cmd_price():
         return f"❌ Could not fetch price for <code>{html_escape(current_coin)}</code>"
 
     change_emoji = "📈" if stats["change_pct"] >= 0 else "📉"
-    lines = [f"💲 <b>{html_escape(current_coin)}/{BRIDGE_SYMBOL}</b>\n"]
+    lines = [f"💲 <b>{html_escape(current_coin)}/{BRIDGE_SYMBOL}</b>"]
+    lines.append(f"24h change: {change_emoji} {stats['change_pct']:+.2f}%")
+    price_val = stats['price']
     price_lines = [
-        f"Price:   ${stats['price']:.6f}",
-        f"24h:     {change_emoji} {stats['change_pct']:+.2f}%",
+        f"Price:   ${price_val:.6f}",
         f"High:    ${stats['high']:.6f}",
         f"Low:     ${stats['low']:.6f}",
         f"Volume:  ${stats['volume']:,.0f}",
@@ -638,8 +636,8 @@ def cmd_price():
                 f"Basis:   {basis_pct:+.3f}% (spot vs mark)",
             ]
             if funding is not None:
-                f_emoji = "🟢 shorts get paid" if funding < 0 else "🔴 shorts pay"
-                fut_lines.append(f"Funding: {funding*100:.4f}% ({f_emoji})")
+                funding_desc = "shorts get paid" if funding < 0 else "shorts pay"
+                fut_lines.append(f"Funding: {funding*100:.4f}% ({funding_desc})")
             lines.append(f"<pre>{html_escape(chr(10).join(fut_lines))}</pre>")
         else:
             lines.append(f"\n🔻 Futures eligible (no mark price data)")
@@ -778,12 +776,11 @@ def cmd_futures():
     # Wallet balance
     if balance:
         bal_lines = [
-            f"💼 Wallet Balance:  ${balance['balance']:.2f}",
-            f"   Available:      ${balance['available']:.2f}",
+            f"Wallet Balance:  ${balance['balance']:.2f}",
+            f"Available:       ${balance['available']:.2f}",
         ]
         if balance["pnl"] != 0:
-            pnl_emoji = "🟢" if balance["pnl"] >= 0 else "🔴"
-            bal_lines.append(f"   Unrealized P&L: {pnl_emoji} ${balance['pnl']:+.2f}")
+            bal_lines.append(f"Unrealized P&L:  ${balance['pnl']:+.2f}")
         lines.append(f"<pre>{html_escape(chr(10).join(bal_lines))}</pre>")
 
     # Open positions
@@ -792,17 +789,14 @@ def cmd_futures():
         for p in positions:
             pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             funding = get_futures_funding(p["symbol"])
-            funding_str = ""
-            if funding is not None:
-                if funding < 0:
-                    funding_str = f"  |  Funding: 🟢 {funding*100:.4f}% (shorts get paid)"
-                else:
-                    funding_str = f"  |  Funding: 🔴 {funding*100:.4f}% (shorts pay)"
 
             lines.append(f"\n{pnl_emoji} <b>{p['symbol']}</b> — {p['direction']}")
+            funding_str = ""
+            if funding is not None:
+                funding_str = f"  |  Funding: {funding*100:.4f}%"
             pos_block = [
                 f"Qty: {p['qty']}  |  Leverage: {p['leverage']}x",
-                f"Entry: ${p['entry']:.4f}  →  Mark: ${p['mark']:.4f}",
+                f"Entry: ${p['entry']:.4f}  ->  Mark: ${p['mark']:.4f}",
                 f"P&L: {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
                 f"{funding_str}",
             ]
@@ -827,8 +821,7 @@ def cmd_futures():
                 lines.append("\n<b>📉 Top short candidates</b> (24h perf):")
                 cand_lines = []
                 for coin, perf in performers[:3]:
-                    icon = "🔴" if perf < 0 else "🟢"
-                    cand_lines.append(f"{icon} {coin:<6} {perf:+.2f}%")
+                    cand_lines.append(f"  {coin:<6} {perf:+.2f}%")
                 lines.append(f"<pre>{html_escape(chr(10).join(cand_lines))}</pre>")
     except Exception:
         pass
@@ -1290,9 +1283,8 @@ def cmd_regime():
         if positions:
             bear_pos_lines = []
             for p in positions:
-                pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
                 bear_pos_lines.append(
-                    f"{pnl_emoji} Short {p['symbol']:<12} {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
+                    f"Short {p['symbol']:<12} {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
                 )
             lines.append(f"<pre>{html_escape(chr(10).join(bear_pos_lines))}</pre>")
         elif fut_balance and fut_balance["balance"] > 5:
@@ -1309,7 +1301,7 @@ def cmd_regime():
         dist_lines = []
         for r, c in counts.most_common():
             pct = c / total * 100
-            dist_lines.append(f"{emoji_map.get(r, '❓')} {r:<10} {pct:.0f}%")
+            dist_lines.append(f"{r:<10} {pct:.0f}%")
         lines.append(f"<pre>{html_escape(chr(10).join(dist_lines))}</pre>")
 
     return "\n".join(lines)
@@ -1410,10 +1402,9 @@ def cmd_profit():
         lines.append("<b>🔻 Open Position</b>")
         pos_blocks = []
         for p in positions:
-            emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             pos_blocks.append(
-                f"{emoji} {p['symbol']} {p['direction']} {p['leverage']}x\n"
-                f"Entry: ${p['entry']:.4f}  →  Mark: ${p['mark']:.4f}\n"
+                f"{p['symbol']} {p['direction']} {p['leverage']}x\n"
+                f"Entry: ${p['entry']:.4f}  ->  Mark: ${p['mark']:.4f}\n"
                 f"${p['pnl_usd']:+.2f} ({p['pnl_pct']:+.1f}%)"
             )
         lines.append(f"<pre>{html_escape(chr(10).join(pos_blocks))}</pre>")
@@ -1425,11 +1416,10 @@ def cmd_profit():
         lines.append("<b>💰 Futures Realized</b>")
         fr_lines = []
         for sym, pnl in sorted(fut_realized["positions"].items()):
-            emoji = "🟢" if pnl >= 0 else "🔴"
-            fr_lines.append(f"{emoji} {sym:<12} ${pnl:+.2f}")
-        fr_lines.append(f"Funding  ${fut_realized['funding']:+.2f}")
-        fr_lines.append(f"Fees     ${fut_realized['commission']:+.2f}")
-        fr_lines.append(f"Net      ${fut_realized['net']:+.2f}")
+            fr_lines.append(f"{sym:<14} ${pnl:+.2f}")
+        fr_lines.append(f"Funding         ${fut_realized['funding']:+.2f}")
+        fr_lines.append(f"Fees            ${fut_realized['commission']:+.2f}")
+        fr_lines.append(f"Net             ${fut_realized['net']:+.2f}")
         lines.append(f"<pre>{html_escape(chr(10).join(fr_lines))}</pre>")
 
     # Section 3: Trading breakdown
@@ -1437,7 +1427,7 @@ def cmd_profit():
     eff = (wins / total_decisions * 100) if total_decisions > 0 else 0
     lines.append("<b>📈 Trading</b>")
     trade_summary = [
-        f"{wins}W / {losses}L / {flat} flat → {eff:.0f}%",
+        f"{wins}W / {losses}L / {flat} flat  ({eff:.0f}% efficiency)",
         f"Spot:     ${realized_from_hops:+.2f}",
     ]
     if fut_realized:
@@ -1452,16 +1442,15 @@ def cmd_profit():
         hop_lines = []
         for rt in round_trips[-8:]:
             if rt.get("phantom"):
-                emoji = "💰"
+                tag = " (deposit)"
             elif rt["pnl"] > 0.01:
-                emoji = "🟢"
+                tag = " WIN"
             elif rt["pnl"] < -0.01:
-                emoji = "🔴"
+                tag = " LOSS"
             else:
-                emoji = "⚪"
-            tag = " (deposit)" if rt.get("phantom") else ""
+                tag = ""
             hop_lines.append(
-                f"{emoji} {rt['from_coin']}→{rt['to_coin']}  ${rt['pnl']:+.2f}{tag}"
+                f"{rt['from_coin']}->{rt['to_coin']:<6} ${rt['pnl']:+.2f}{tag}"
             )
         if len(round_trips) > 8:
             hop_lines.append(f"...+{len(round_trips) - 8} earlier")
@@ -1477,9 +1466,9 @@ def cmd_hop():
     if positions:
         # BEAR mode — just show futures short candidates
         open_short = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
-        lines = [f"🔻 <b>Short Candidates</b> (currently shorting <code>{html_escape(open_short)}</code>)\\n"]
+        lines = [f"\n🔻 <b>Short Candidates</b> (currently shorting <code>{html_escape(open_short)}</code>)\n"]
         _append_futures_candidates(lines, positions)
-        return "\\n".join(lines)
+        return "\n".join(lines)
 
     current = get_current_coin()
     conn = get_db()
@@ -1813,9 +1802,9 @@ def cmd_deposit(args=""):
         lines = [f"📋 <b>Deposits</b> (total: <code>${total:.2f}</code>)\n"]
         dep_lines = []
         for r in rows:
-            note = f" — {r['note']}" if r["note"] else ""
+            note = f"  {r['note']}" if r["note"] else ""
             dep_lines.append(
-                f"💰 ${r['amount']:.2f} {r['currency']} ({r['source']}){note} — {r['datetime'][:16]}"
+                f"${r['amount']:.2f} {r['currency']} ({r['source']}){note}  {r['datetime'][:16]}"
             )
         lines.append(f"<pre>{html_escape(chr(10).join(dep_lines))}</pre>")
         return "\n".join(lines)
