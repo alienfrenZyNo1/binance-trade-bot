@@ -451,36 +451,17 @@ class FuturesManager:
         except Exception as e:
             self.logger.warning(f"Failed to place server stop-loss: {e}")
 
-        try:
-            # Trailing stop: activates only after price drops below entry
-            # (short is in profit). Without activationPrice, Binance activates
-            # immediately and the 1% callback would close at a tiny loss on
-            # the first bounce. We set activationPrice = entry * (1 - activation_pct/100)
-            # so the trail only kicks in when the short is profitable.
-            activation_pct = getattr(self.config, "FUTURES_TRAIL_ACTIVATION_PCT", 3.0)
-            callback_rate = int(getattr(self.config, "FUTURES_TRAILING_STOP_PCT", 10))
-            # Clamp callback to Binance range (0.1 - 5.0)
-            callback_rate = max(1, min(5, callback_rate))
-            activation_price = round(entry_price * (1 - activation_pct / 100), 6)
-            trailing = self.client.futures_create_order(
-                symbol=symbol,
-                side="BUY",
-                type="TRAILING_STOP_MARKET",
-                quantity=quantity,
-                callbackRate=str(callback_rate),
-                activationPrice=str(activation_price),
-                workingType="MARK_PRICE",
-                priceProtect="true",
-                reduceOnly="true",
-            )
-            self._trailing_order_id = trailing.get("algoId", trailing.get("orderId", 0))
-            self.logger.info(
-                f"Server trailing stop placed: {symbol} "
-                f"activation={activation_price} callback={callback_rate}% "
-                f"algoId={self._trailing_order_id}"
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to place server trailing stop: {e}")
+        # Do NOT place server-side TRAILING_STOP_MARKET for now.
+        # Live audit showed Binance/open_algo_orders activating the trail at
+        # essentially the entry price even when activationPrice was supplied,
+        # producing a trigger above entry and risking a loss-making close.
+        # Keep the hard server STOP_MARKET as crash/VPS protection; profit
+        # trailing remains handled by client-side _manage_open_position().
+        self._trailing_order_id = None
+        self.logger.info(
+            f"Server trailing stop skipped for {symbol}; using hard STOP_MARKET "
+            "plus client-side profit trailing"
+        )
 
     def _cancel_server_stops(self, symbol: str):
         """Cancel server-side stop orders when we close manually."""
