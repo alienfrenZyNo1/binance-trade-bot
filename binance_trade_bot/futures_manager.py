@@ -447,13 +447,15 @@ class FuturesManager:
             self.logger.warning(f"Failed to place server stop-loss: {e}")
 
         try:
-            # Trailing stop: Binance manages the trail on their side
+            # Trailing stop: 1% callback — tight enough to approximate
+            # client-side "10% of peak P&L" logic (which at typical +3-15%
+            # profit means 0.3-1.5% of entry price movement)
             trailing = self.client.futures_create_order(
                 symbol=symbol,
                 side="BUY",
                 type="TRAILING_STOP_MARKET",
                 quantity=quantity,
-                callbackRate=str(int(self.trailing_stop_pct)),
+                callbackRate="1",
                 workingType="MARK_PRICE",
                 priceProtect="true",
                 reduceOnly="true",
