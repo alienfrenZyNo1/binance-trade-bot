@@ -19,6 +19,7 @@ USES: python-binance futures methods (fapi.binance.com endpoint).
 
 import time
 from datetime import datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Dict, List, Optional, Tuple
 
 from binance.client import Client
@@ -73,6 +74,7 @@ class FuturesManager:
         self._last_check = 0
         self._last_entry_attempt = 0
         self._initialized = False
+        self._exchange_info_cache = None
 
     # ─────────────────────────────────────────────────────────────────────────
     #  INITIALIZATION
@@ -106,32 +108,65 @@ class FuturesManager:
 
         try:
             positions = self.client.futures_position_information()
+            shorts = []
             for pos in positions:
                 amt = float(pos.get("positionAmt", 0))
                 if amt < 0:  # negative = short
                     symbol = pos["symbol"]
                     entry = float(pos["entryPrice"])
                     qty = abs(amt)
-                    self._open_position = FuturesPosition(
-                        symbol=symbol,
-                        entry_price=entry,
-                        quantity=qty,
-                        order_id=0,
-                        opened_at=time.time(),
+                    shorts.append((symbol, qty, entry))
+
+            if not shorts:
+                return
+
+            # The strategy is intentionally single-position.  If Binance ever
+            # contains multiple shorts (manual trade, crash edge case), keep the
+            # largest notional as the managed position and immediately flatten
+            # the rest reduce-only.  If an orphan close fails, place a hard stop
+            # on it so it is not left naked.
+            shorts.sort(key=lambda x: x[1] * x[2], reverse=True)
+            symbol, qty, entry = shorts[0]
+            self._open_position = FuturesPosition(
+                symbol=symbol,
+                entry_price=entry,
+                quantity=qty,
+                order_id=0,
+                opened_at=time.time(),
+            )
+            self.logger.warning(
+                f"RECONCILED existing short: {symbol} "
+                f"qty={qty} entry={entry} "
+                f"(recovered from exchange state)"
+            )
+            self._cancel_server_stops(symbol)
+            if not self._place_server_stops(symbol, qty, entry):
+                self.logger.error(
+                    f"Recovered {symbol} short is unprotected — closing immediately"
+                )
+                self._close_position("unprotected after reconciliation")
+
+            for extra_symbol, extra_qty, extra_entry in shorts[1:]:
+                self.logger.error(
+                    f"Multiple futures shorts detected; closing unmanaged orphan "
+                    f"{extra_symbol} qty={extra_qty} entry={extra_entry}"
+                )
+                try:
+                    self.client.futures_create_order(
+                        symbol=extra_symbol,
+                        side="BUY",
+                        type="MARKET",
+                        quantity=extra_qty,
+                        reduceOnly="true",
                     )
-                    self.logger.warning(
-                        f"RECONCILED existing short: {symbol} "
-                        f"qty={qty} entry={entry} "
-                        f"(recovered from exchange state)"
+                    self._cancel_server_stops(extra_symbol)
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to close orphan short {extra_symbol}: {e}; placing hard stop"
                     )
-                    # Cancel any leftover stops first, then place a fresh hard stop
-                    self._cancel_server_stops(symbol)
-                    if not self._place_server_stops(symbol, qty, entry):
-                        self.logger.error(
-                            f"Recovered {symbol} short is unprotected — closing immediately"
-                        )
-                        self._close_position("unprotected after reconciliation")
-                    return
+                    self._cancel_server_stops(extra_symbol)
+                    self._place_server_stops(extra_symbol, extra_qty, extra_entry)
+            return
         except BinanceAPIException as e:
             self.logger.warning(f"Position reconciliation failed: {e}")
         except Exception as e:
@@ -325,9 +360,9 @@ class FuturesManager:
             notional = margin * self.leverage
             quantity = notional / price
 
-            # Round to exchange precision
-            qty_precision = self._get_quantity_precision(futures_symbol)
-            quantity = round(quantity, qty_precision)
+            # Floor to exchange step size. Never round up: rounding can create
+            # a quantity Binance rejects or a notional slightly above intended.
+            quantity = self._floor_quantity(futures_symbol, quantity)
 
             if quantity <= 0:
                 self.logger.warning(f"Futures: quantity rounds to 0 for {futures_symbol}")
@@ -470,7 +505,11 @@ class FuturesManager:
         """
         try:
             # Hard stop-loss: fires when price goes UP by stop_loss_pct (short loses)
-            stop_price = round(entry_price * (1 + self.stop_loss_pct / 100), 6)
+            stop_price = self._round_price_to_tick(
+                symbol,
+                entry_price * (1 + self.stop_loss_pct / 100),
+                rounding=ROUND_CEILING,
+            )
             stop = self.client.futures_create_order(
                 symbol=symbol,
                 side="BUY",
@@ -618,13 +657,61 @@ class FuturesManager:
             self.logger.warning(f"Futures balance check failed: {e}")
         return 0.0
 
+    def _get_symbol_info(self, symbol: str) -> Optional[dict]:
+        """Return cached futures exchangeInfo entry for a symbol."""
+        try:
+            if self._exchange_info_cache is None:
+                self._exchange_info_cache = self.client.futures_exchange_info()
+            for s in self._exchange_info_cache.get("symbols", []):
+                if s.get("symbol") == symbol:
+                    return s
+        except Exception as e:
+            self.logger.debug(f"Exchange info lookup failed for {symbol}: {e}")
+        return None
+
+    def _get_symbol_filter(self, symbol: str, filter_type: str) -> Optional[dict]:
+        info = self._get_symbol_info(symbol)
+        if not info:
+            return None
+        for f in info.get("filters", []):
+            if f.get("filterType") == filter_type:
+                return f
+        return None
+
+    @staticmethod
+    def _round_to_step(value: float, step: float, rounding=ROUND_DOWN) -> float:
+        """Round a value to a Binance step/tick using Decimal arithmetic."""
+        if step <= 0:
+            return value
+        d_value = Decimal(str(value))
+        d_step = Decimal(str(step))
+        units = (d_value / d_step).to_integral_value(rounding=rounding)
+        return float(units * d_step)
+
+    def _floor_quantity(self, symbol: str, quantity: float) -> float:
+        """Floor market quantity to Binance MARKET_LOT_SIZE/LOT_SIZE stepSize."""
+        f = self._get_symbol_filter(symbol, "MARKET_LOT_SIZE") or self._get_symbol_filter(symbol, "LOT_SIZE")
+        step = float(f.get("stepSize", 0)) if f else 0
+        if step <= 0:
+            # Fallback to old quantityPrecision when no stepSize is provided.
+            precision = self._get_quantity_precision(symbol)
+            return round(quantity, precision)
+        return self._round_to_step(quantity, step, ROUND_DOWN)
+
+    def _round_price_to_tick(self, symbol: str, price: float, rounding=ROUND_DOWN) -> float:
+        """Round a trigger/limit price to Binance PRICE_FILTER tickSize."""
+        f = self._get_symbol_filter(symbol, "PRICE_FILTER")
+        tick = float(f.get("tickSize", 0)) if f else 0
+        if tick <= 0:
+            return round(price, 6)
+        return self._round_to_step(price, tick, rounding)
+
     def _get_quantity_precision(self, symbol: str) -> int:
         """Get quantity precision for a futures symbol from exchange info."""
         try:
-            info = self.client.futures_exchange_info()
-            for s in info.get("symbols", []):
-                if s["symbol"] == symbol:
-                    return int(s.get("quantityPrecision", 2))
+            info = self._get_symbol_info(symbol)
+            if info:
+                return int(info.get("quantityPrecision", 2))
         except Exception:
             pass
         return 2  # safe default
@@ -632,12 +719,11 @@ class FuturesManager:
     def _get_min_notional(self, symbol: str) -> float:
         """Get minimum notional for a futures symbol."""
         try:
-            info = self.client.futures_exchange_info()
-            for s in info.get("symbols", []):
-                if s["symbol"] == symbol:
-                    for f in s.get("filters", []):
-                        if f["filterType"] == "MIN_NOTIONAL":
-                            return float(f.get("notional", 5))
+            info = self._get_symbol_info(symbol)
+            if info:
+                for f in info.get("filters", []):
+                    if f["filterType"] == "MIN_NOTIONAL":
+                        return float(f.get("notional", 5))
         except Exception:
             pass
         return 5.0

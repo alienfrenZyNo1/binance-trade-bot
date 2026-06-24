@@ -49,12 +49,25 @@ def _reconcile_position(manager, db, logger, config):
         logger.warning(f"Could not fetch balances for reconciliation: {e}")
         return
 
-    # If we hold the DB coin with a meaningful balance, we're fine
-    if coin_balance and coin_balance > manager.get_min_notional(
-        current_coin.symbol, bridge_symbol
-    ) / manager.get_ticker_price(current_coin.symbol + bridge_symbol):
-        logger.info(f"Reconciliation OK: holding {coin_balance} {current_coin.symbol}")
-        return
+    # If we hold the DB coin with a meaningful balance, we're fine.
+    # Fetch ticker separately; a transient ticker/API failure must not crash
+    # startup before futures reconciliation/stops are attached.
+    try:
+        current_price = manager.get_ticker_price(current_coin.symbol + bridge_symbol)
+    except Exception as e:
+        logger.warning(f"Could not fetch {current_coin.symbol}{bridge_symbol} price for reconciliation: {e}")
+        current_price = None
+
+    if coin_balance and current_price and current_price > 0:
+        min_coin_balance = manager.get_min_notional(current_coin.symbol, bridge_symbol) / current_price
+        if coin_balance > min_coin_balance:
+            logger.info(f"Reconciliation OK: holding {coin_balance} {current_coin.symbol}")
+            return
+    elif coin_balance:
+        logger.warning(
+            f"Reconciliation: holding {coin_balance} {current_coin.symbol} but price unavailable; "
+            "skipping spot-value validation this startup"
+        )
 
     # If we hold mostly bridge, the bot probably crashed mid-sell
     if bridge_balance and bridge_balance > 1.0:
