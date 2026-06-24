@@ -463,7 +463,7 @@ class FuturesManager:
             self._trailing_order_id = trailing.get("algoId", trailing.get("orderId", 0))
             self.logger.info(
                 f"Server trailing stop placed: {symbol} "
-                f"callback={self.trailing_stop_pct}% algoId={self._trailing_order_id}"
+                f"callback=1% algoId={self._trailing_order_id}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to place server trailing stop: {e}")
