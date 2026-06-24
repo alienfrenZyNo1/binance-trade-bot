@@ -432,39 +432,62 @@ def cmd_status():
 
 
 def cmd_trades():
-    """Recent trade history including FAILED states."""
+    """Recent trade history including FAILED states + futures positions."""
     trades = get_trade_history(10)
-
-    if not trades:
-        return "📋 **No trades yet.**"
 
     lines = ["📋 **Recent Trades**\n"]
 
-    for t in trades:
-        action = "Sold" if t["selling"] else "Bought"
-        coin = t["alt_coin_id"]
-        amount = t["alt_trade_amount"] or 0
-        cost = t["crypto_trade_amount"] or 0
-        dt = t["datetime"][:19] if t["datetime"] else "?"
-        state = t["state"] if t["state"] else "?"
+    if not trades:
+        lines.append("_No spot trades yet._")
+    else:
+        for t in trades:
+            action = "Sold" if t["selling"] else "Bought"
+            coin = t["alt_coin_id"]
+            amount = t["alt_trade_amount"] or 0
+            cost = t["crypto_trade_amount"] or 0
+            dt = t["datetime"][:19] if t["datetime"] else "?"
+            state = t["state"] if t["state"] else "?"
 
-        if state == "COMPLETE":
-            icon = "🔴" if t["selling"] else "🟢"
-            lines.append(f"{icon} `{dt}` {action} {amount:.2f} {coin} ↔ {cost:.2f} {t['crypto_coin_id']}")
-        elif state == "FAILED":
-            lines.append(f"⚠️ `{dt}` FAILED {action} {coin} — stuck in partial state!")
-        else:
-            lines.append(f"❓ `{dt}` {state} {action} {amount:.2f} {coin}")
+            if state == "COMPLETE":
+                icon = "🔴" if t["selling"] else "🟢"
+                lines.append(f"{icon} `{dt}` {action} {amount:.2f} {coin} ↔ {cost:.2f} {t['crypto_coin_id']}")
+            elif state == "FAILED":
+                lines.append(f"⚠️ `{dt}` FAILED {action} {coin} — stuck in partial state!")
+            else:
+                lines.append(f"❓ `{dt}` {state} {action} {amount:.2f} {coin}")
 
-    # Count states
-    conn = get_db()
-    state_counts = conn.execute(
-        "SELECT state, COUNT(*) as cnt FROM trade_history GROUP BY state"
-    ).fetchall()
-    conn.close()
-    if state_counts:
-        summary_parts = [f"{r['state']}: {r['cnt']}" for r in state_counts]
-        lines.append(f"\n📊 `{' | '.join(summary_parts)}`")
+        # Count states
+        conn = get_db()
+        state_counts = conn.execute(
+            "SELECT state, COUNT(*) as cnt FROM trade_history GROUP BY state"
+        ).fetchall()
+        conn.close()
+        if state_counts:
+            summary_parts = [f"{r['state']}: {r['cnt']}" for r in state_counts]
+            lines.append(f"\n📊 Spot trades: `{' | '.join(summary_parts)}`")
+
+    # ── Futures context ──
+    positions = get_futures_positions()
+    lines.append(f"\n{'─' * 20}")
+    lines.append("**🔻 Futures Positions**")
+
+    if positions:
+        for p in positions:
+            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+            funding = get_futures_funding(p["symbol"])
+            funding_str = ""
+            if funding is not None:
+                f_emoji = "🟢" if funding < 0 else "🔴"
+                funding_str = f" | Funding: {f_emoji}{funding*100:.4f}%"
+            lines.append(
+                f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
+                f"qty={p['qty']} entry=`${p['entry']:.4f}` "
+                f"mark=`${p['mark']:.4f}` "
+                f"P&L={p['pnl_pct']:+.1f}% (`${p['pnl_usd']:+.2f}`)"
+                f"{funding_str}"
+            )
+    else:
+        lines.append("  💤 No open futures positions")
 
     return "\n".join(lines)
 
@@ -498,7 +521,7 @@ def cmd_coins():
 
 
 def cmd_price():
-    """Live price of current coin."""
+    """Live price of current coin + futures context if eligible."""
     current_coin = get_current_coin()
     stats = get_24h_stats(current_coin)
 
@@ -512,6 +535,22 @@ def cmd_price():
     lines.append(f"High: `${stats['high']:.6f}`")
     lines.append(f"Low: `${stats['low']:.6f}`")
     lines.append(f"Volume: ${stats['volume']:,.0f}")
+
+    # Futures context for eligible coins
+    if current_coin in FUTURES_ELIGIBLE:
+        fut_symbol = f"{current_coin}{BRIDGE_SYMBOL}"
+        mark = get_futures_mark_price(fut_symbol)
+        funding = get_futures_funding(fut_symbol)
+        if mark is not None:
+            basis_pct = ((mark - stats["price"]) / stats["price"]) * 100 if stats["price"] > 0 else 0
+            lines.append(f"\n**🔻 Futures:**")
+            lines.append(f"Mark: `${mark:.6f}`")
+            lines.append(f"Basis: {basis_pct:+.3f}% (spot vs mark)")
+            if funding is not None:
+                f_emoji = "🟢 shorts get paid" if funding < 0 else "🔴 shorts pay"
+                lines.append(f"Funding: {funding*100:.4f}% ({f_emoji})")
+        else:
+            lines.append(f"\n🔻 Futures eligible (no mark price data)")
 
     return "\n".join(lines)
 
@@ -1300,6 +1339,24 @@ def cmd_profit():
         lines.append(f"\n🏆 Best: `{best_trade['coin']}` ${best_trade['pnl']:+.2f}")
         lines.append(f"📉 Worst: `{worst_trade['coin']}` ${worst_trade['pnl']:+.2f}")
 
+    # ── Futures P&L ──
+    positions = get_futures_positions()
+    fut_bal = get_futures_balance()
+    if positions or fut_bal:
+        lines.append(f"\n{'─' * 20}")
+        lines.append("**🔻 Futures**")
+        if fut_bal:
+            lines.append(f"💼 Wallet: `${fut_bal['balance']:.2f}` | Unrealized P&L: `${fut_bal['pnl']:+.2f}`")
+        if positions:
+            for p in positions:
+                pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+                lines.append(
+                    f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
+                    f"P&L: {p['pnl_pct']:+.1f}% (`${p['pnl_usd']:+.2f}`)"
+                )
+        if not positions and fut_bal:
+            lines.append("  💤 No open positions")
+
     return "\n".join(lines)
 
 
@@ -1374,7 +1431,48 @@ def cmd_hop():
 
     if not rows:
         conn.close()
-        return f"❌ No scout data yet for `{current}`. The bot needs a few minutes to build up ratios."
+        # Still show futures short candidates even without scout data
+        lines = [f"⏳ No scout data yet for `{current}` — bot needs a few minutes to build ratios.\n"]
+        lines.append("**🔻 Futures Short Candidates**\n")
+        positions = get_futures_positions()
+        has_open_short = any(p["direction"] == "SHORT" for p in positions)
+        try:
+            r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+            if r.status_code == 200:
+                short_candidates = []
+                for t in r.json():
+                    sym = t["symbol"]
+                    for coin in FUTURES_ELIGIBLE:
+                        if sym == f"{coin}{BRIDGE_SYMBOL}":
+                            perf_pct = float(t["priceChangePercent"])
+                            short_candidates.append({"coin": coin, "perf_pct": perf_pct, "fut_symbol": sym})
+                            break
+                falling = [c for c in short_candidates if c["perf_pct"] < 0]
+                falling.sort(key=lambda x: x["perf_pct"])
+                for c in falling[:5]:
+                    funding = get_futures_funding(c["fut_symbol"])
+                    mark = get_futures_mark_price(c["fut_symbol"])
+                    c["funding"] = funding
+                    c["mark_price"] = mark
+                if has_open_short:
+                    open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
+                    lines.append(f"🔒 Currently shorting: `{open_sym}`\n")
+                if falling:
+                    lines.append(f"**📉 Falling coins** ({len(falling)} of {len(FUTURES_ELIGIBLE)}):")
+                    for i, c in enumerate(falling[:5], 1):
+                        icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
+                        line = f"  {icon} #{i}: `{c['coin']}` {c['perf_pct']:+.2f}%"
+                        if c["funding"] is not None:
+                            f_emoji = "🟢" if c["funding"] < 0 else "🔴"
+                            line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
+                        if c["mark_price"]:
+                            line += f" | Mark: `${c['mark_price']:.4f}`"
+                        lines.append(line)
+                else:
+                    lines.append("  🟢 No futures-eligible coins falling — no short candidates")
+        except Exception:
+            pass
+        return "\n".join(lines)
 
     fee = 0.001
     multiplier = 3.0
@@ -1503,9 +1601,74 @@ def cmd_hop():
             blocked.append("momentum crash")
         if cooldown_active:
             blocked.append("cooldown")
-        lines.append(f"\n⏸ Closest: `{best['to']}` — score is green but blocked by: {', '.join(blocked)}")
+        lines.append(f"\n🎯 Closest: `{best['to']}` — blocked by: {', '.join(blocked)}")
     else:
         lines.append(f"\n⏸ Best: `{candidates[0]['to']}` — score needs {abs(candidates[0]['score']):.6f} more")
+
+    # ── Futures Short Candidates ──
+    positions = get_futures_positions()
+    has_open_short = any(p["direction"] == "SHORT" for p in positions)
+
+    lines.append(f"\n{'─' * 20}")
+    lines.append("**🔻 Futures Short Candidates**\n")
+
+    try:
+        r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
+        if r.status_code == 200:
+            short_candidates = []
+            for t in r.json():
+                sym = t["symbol"]
+                for coin in FUTURES_ELIGIBLE:
+                    if sym == f"{coin}{BRIDGE_SYMBOL}":
+                        perf_pct = float(t["priceChangePercent"])
+                        vol = float(t.get("quoteVolume", 0))
+                        price = float(t.get("lastPrice", 0))
+                        short_candidates.append({
+                            "coin": coin,
+                            "perf_pct": perf_pct,
+                            "volume": vol,
+                            "price": price,
+                            "fut_symbol": sym,
+                        })
+                        break
+
+            falling = [c for c in short_candidates if c["perf_pct"] < 0]
+            falling.sort(key=lambda x: x["perf_pct"])
+
+            for c in falling[:5]:
+                funding = get_futures_funding(c["fut_symbol"])
+                mark = get_futures_mark_price(c["fut_symbol"])
+                c["funding"] = funding
+                c["mark_price"] = mark
+
+            if has_open_short:
+                open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
+                lines.append(f"🔒 Currently shorting: `{open_sym}`")
+                lines.append("")
+
+            if falling:
+                lines.append(f"**📉 Falling coins** ({len(falling)} of {len(FUTURES_ELIGIBLE)} futures-eligible):")
+                for i, c in enumerate(falling[:5], 1):
+                    icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
+
+                    is_shorted = any(
+                        p["direction"] == "SHORT" and c["fut_symbol"] == p["symbol"]
+                        for p in positions
+                    )
+                    badge = " 🔒 SHORTING" if is_shorted else ""
+
+                    line = f"  {icon} #{i}: `{c['coin']}` {c['perf_pct']:+.2f}%{badge}"
+                    if c["funding"] is not None:
+                        f_emoji = "🟢" if c["funding"] < 0 else "🔴"
+                        line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
+                    if c["mark_price"]:
+                        line += f" | Mark: `${c['mark_price']:.4f}`"
+                    lines.append(line)
+            else:
+                lines.append("  🟢 No futures-eligible coins are falling — no short candidates")
+                lines.append(f"  (all {len(short_candidates)} futures-eligible coins are green)")
+    except Exception:
+        lines.append("  ❌ Could not fetch futures short candidates")
 
     return "\n".join(lines)
 
