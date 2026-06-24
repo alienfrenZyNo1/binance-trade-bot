@@ -183,8 +183,30 @@ class AutoTrader:
     def update_values(self):
         """
         Log current value state of all altcoin balances against BTC and USDT in DB.
+        Also auto-detect deposits (unexpected USDC balance increases).
         """
         now = datetime.now()
+
+        # ── Auto-detect deposits ──
+        bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+        if bridge_balance is not None:
+            try:
+                deposit_amount = self.db.detect_and_record_deposit(float(bridge_balance))
+                if deposit_amount > 0:
+                    self.logger.info(f"💰 Auto-recorded deposit: ${deposit_amount:.2f}")
+                    # Notify
+                    try:
+                        from .notifications import NotificationHandler
+                        nm = NotificationHandler()
+                        nm.send_notification(
+                            f"💰 **Deposit auto-detected**\n\n"
+                            f"${deposit_amount:.2f} {self.config.BRIDGE.symbol} deposited\n"
+                            f"Balance: ${bridge_balance:.2f}"
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.logger.warning(f"Deposit detection failed: {e}")
 
         session: Session
         with self.db.db_session() as session:

@@ -372,6 +372,51 @@ class Database:
             else:
                 session.add(BotState(key, str(value)))
 
+    def detect_and_record_deposit(self, current_usdc_balance: float):
+        """Detect unexpected USDC balance increases (deposits) and record them.
+
+        Compares current USDC balance against the last known balance stored in bot_state.
+        If current balance exceeds last known by more than a small tolerance (accounts
+        for rounding, tiny airdrops, etc.), the difference is recorded as a deposit.
+
+        Returns the deposit amount recorded (0 if none).
+        """
+        MIN_DEPOSIT_THRESHOLD = 1.0  # Ignore increases under $1
+
+        last_bal_str = self.get_bot_state("last_usdc_balance", "0")
+        try:
+            last_usdc_balance = float(last_bal_str)
+        except (ValueError, TypeError):
+            last_usdc_balance = 0.0
+
+        # Update stored balance for next cycle
+        self.set_bot_state("last_usdc_balance", str(current_usdc_balance))
+
+        if last_usdc_balance <= 0:
+            # First run — just record, don't flag as deposit
+            return 0.0
+
+        increase = current_usdc_balance - last_usdc_balance
+        if increase > MIN_DEPOSIT_THRESHOLD:
+            # Record the deposit
+            session: Session
+            with self.db_session() as session:
+                dep = Deposit(
+                    amount=increase,
+                    currency="USDC",
+                    source="auto",
+                    note=f"Auto-detected: balance increased from {last_usdc_balance:.2f} to {current_usdc_balance:.2f}",
+                    datetime=datetime.utcnow(),
+                )
+                session.add(dep)
+            self.logger.info(
+                f"💰 Deposit auto-detected: ${increase:.2f} USDC "
+                f"(balance {last_usdc_balance:.2f} → {current_usdc_balance:.2f})"
+            )
+            return increase
+
+        return 0.0
+
     def log_market_regime(self, regime, adx_value=None, avg_volatility=None,
                           btc_correlation=None, ema_short=None, ema_long=None):
         """Log a market regime classification."""
