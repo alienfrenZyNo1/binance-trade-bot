@@ -1283,11 +1283,20 @@ def cmd_profit():
             })
             pending_sell = None
 
-    # Classify hops: meaningful win/loss vs flat (near-zero change)
-    # Flat means just hopping with no real gain or loss
-    wins = sum(1 for rt in round_trips if rt["pnl"] > 0.01)
-    losses = sum(1 for rt in round_trips if rt["pnl"] < -0.01)
-    flat = sum(1 for rt in round_trips if abs(rt["pnl"]) <= 0.01)
+    # Filter out phantom hops caused by deposits/withdrawals
+    # A hop where buy/sell amounts differ by >25% is contaminated by
+    # an external deposit or withdrawal, not from trading
+    PHANTOM_RATIO = 0.25
+    for rt in round_trips:
+        sell = max(rt["sold_usdc"], 0.01)
+        diff = abs(rt["bought_usdc"] - rt["sold_usdc"]) / sell
+        rt["phantom"] = diff > PHANTOM_RATIO
+
+    # Classify hops (exclude phantom from efficiency stats)
+    real_trips = [rt for rt in round_trips if not rt.get("phantom")]
+    wins = sum(1 for rt in real_trips if rt["pnl"] > 0.01)
+    losses = sum(1 for rt in real_trips if rt["pnl"] < -0.01)
+    flat = sum(1 for rt in real_trips if abs(rt["pnl"]) <= 0.01)
 
     # ── Account-level P&L ──
     total_pnl = current_value - total_deposited
@@ -1337,7 +1346,8 @@ def cmd_profit():
         lines.append(f"   Spent (buys): `${total_usdc_spent:.2f}`")
         lines.append(f"   Received (sells): `${total_usdc_received:.2f}`")
         lines.append(f"   Fees (est. 0.1%/side): `~${est_fees:.2f}`")
-        lines.append(f"   Locked in position: `${total_usdc_spent - total_usdc_received:.2f}`")
+        net_flow = total_usdc_received - total_usdc_spent
+        lines.append(f"   Net flow: `${net_flow:+.2f}`")
         lines.append("")
 
     # ── Trade hops ──
@@ -1346,7 +1356,8 @@ def cmd_profit():
         win_rate = (wins / total_decisions * 100) if total_decisions > 0 else 0
         wr_emoji = "✅" if win_rate >= 50 else "⚠️"
 
-        lines.append(f"**Hops:** {len(round_trips)}")
+        phantom_count = sum(1 for rt in round_trips if rt.get("phantom"))
+        lines.append(f"**Hops:** {len(round_trips)}" + (f" ({phantom_count} deposit-inflated)" if phantom_count else ""))
         if flat:
             lines.append(f"   {wr_emoji} Efficiency: `{win_rate:.0f}%` ({wins} gained / {losses} lost / {flat} flat)")
         else:
@@ -1354,16 +1365,19 @@ def cmd_profit():
 
         lines.append("\n**Hop history:**")
         for rt in round_trips[-8:]:
-            if rt["pnl"] > 0.01:
+            if rt.get("phantom"):
+                emoji = "💰"  # deposit-inflated hop
+            elif rt["pnl"] > 0.01:
                 emoji = "🟢"
             elif rt["pnl"] < -0.01:
                 emoji = "🔴"
             else:
                 emoji = "⚪"
+            phantom_tag = " (deposit)" if rt.get("phantom") else ""
             lines.append(
                 f"  {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
                 f"${rt['sold_usdc']:.2f} → ${rt['bought_usdc']:.2f} "
-                f"({rt['pnl']:+.2f})"
+                f"({rt['pnl']:+.2f}){phantom_tag}"
             )
         if len(round_trips) > 8:
             lines.append(f"  _...+{len(round_trips) - 8} earlier_")
