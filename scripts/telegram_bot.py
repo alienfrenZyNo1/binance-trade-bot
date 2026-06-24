@@ -506,7 +506,12 @@ def cmd_trades():
 def cmd_coins():
     """List monitored coins with futures eligibility."""
     coins = get_coins()
-    current = get_current_coin()
+    # Regime-aware: show futures position if in BEAR, not stale spot coin
+    positions = get_futures_positions()
+    if positions:
+        current = f"{positions[0]['symbol'].replace(BRIDGE_SYMBOL, '')} (SHORT)"
+    else:
+        current = get_current_coin()
 
     fut_coins = [c for c in coins if c in FUTURES_ELIGIBLE]
     spot_only = [c for c in coins if c not in FUTURES_ELIGIBLE]
@@ -533,7 +538,12 @@ def cmd_coins():
 
 def cmd_price():
     """Live price of current coin + futures context if eligible."""
-    current_coin = get_current_coin()
+    # Regime-aware: in BEAR mode, show the shorted coin's price instead of stale spot coin
+    positions = get_futures_positions()
+    if positions:
+        current_coin = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
+    else:
+        current_coin = get_current_coin()
     stats = get_24h_stats(current_coin)
 
     if not stats:
@@ -1363,6 +1373,15 @@ def cmd_profit():
 
 def cmd_hop():
     """Show potential next hops with full strategy filter breakdown."""
+    # Regime-aware: in BEAR mode, skip spot hops (no spot position) and go straight to futures
+    positions = get_futures_positions()
+    if positions:
+        # BEAR mode — just show futures short candidates
+        open_short = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
+        lines = [f"🔻 **Short Candidates** (currently shorting `{open_short}`)\\n"]
+        _append_futures_candidates(lines, positions)
+        return "\\n".join(lines)
+
     current = get_current_coin()
     conn = get_db()
 
@@ -1608,11 +1627,17 @@ def cmd_hop():
 
     # ── Futures Short Candidates ──
     positions = get_futures_positions()
-    has_open_short = any(p["direction"] == "SHORT" for p in positions)
-
     lines.append(f"\n{'─' * 20}")
-    lines.append("**🔻 Futures Short Candidates**\n")
+    lines.append("**🔻 Futures Short Candidates**")
+    _append_futures_candidates(lines, positions)
 
+    return "\n".join(lines)
+
+
+def _append_futures_candidates(lines, positions):
+    """Append futures short candidates section to lines list."""
+    has_open_short = any(p["direction"] == "SHORT" for p in positions)
+    lines.append("")
     try:
         r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
         if r.status_code == 200:
@@ -1670,8 +1695,6 @@ def cmd_hop():
                 lines.append(f"  (all {len(short_candidates)} futures-eligible coins are green)")
     except Exception:
         lines.append("  ❌ Could not fetch futures short candidates")
-
-    return "\n".join(lines)
 
 
 def cmd_deposit(args=""):
