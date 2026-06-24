@@ -661,6 +661,11 @@ class FuturesManager:
                 or trailing.get("activationPrice")
                 or expected_activation
             )
+            # Binance reports a pre-activation triggerPrice based on current
+            # mark price for NEW trailing algos. That value can be above entry
+            # while the order is still inactive; it is not executable until
+            # activatePrice is reached. Safety is therefore verified from
+            # activatePrice + callbackRate math below, not this display field.
             trigger_raw = trailing.get("triggerPrice")
             trigger = float(trigger_raw) if trigger_raw not in (None, "", 0, "0") else 0.0
 
@@ -680,10 +685,10 @@ class FuturesManager:
                 return False
 
             if trigger and trigger >= max_allowed_trigger:
-                self.logger.warning(
-                    f"Unsafe Binance triggerPrice for {symbol}: {trigger} >= allowed {max_allowed_trigger:.8f}"
+                self.logger.info(
+                    f"Server trailing pre-activation trigger display for {symbol}: "
+                    f"{trigger} (ignored until activatePrice {activate} is reached)"
                 )
-                return False
 
             return True
         except Exception as e:
