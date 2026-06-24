@@ -1204,27 +1204,16 @@ def cmd_profit():
     """Performance dashboard: P&L, win rate, trade stats."""
     conn = get_db()
 
-    row = conn.execute(
-        """SELECT MIN(id) as min_id FROM coin_value WHERE interval = 'MINUTELY'"""
-    ).fetchone()
-    starting_value = 0.0
-    start_time = None
-    if row and row["min_id"]:
-        snap = conn.execute(
-            """SELECT coin_id, balance, usd_price, datetime FROM coin_value
-               WHERE interval = 'MINUTELY' AND id = ?""",
-            (row["min_id"],),
-        ).fetchall()
-        start_time = snap[0]["datetime"] if snap else None
-        if snap:
-            ts = snap[0]["datetime"]
-            all_first = conn.execute(
-                """SELECT coin_id, balance, usd_price FROM coin_value
-                   WHERE interval = 'MINUTELY' AND datetime = ?""",
-                (ts,),
-            ).fetchall()
-            for s in all_first:
-                starting_value += (s["balance"] or 0) * (s["usd_price"] or 0)
+    # ── Get total deposits ──
+    total_deposited = 0.0
+    deposit_count = 0
+    try:
+        dep_rows = conn.execute("SELECT amount FROM deposits").fetchall()
+        deposit_count = len(dep_rows)
+        for dr in dep_rows:
+            total_deposited += dr["amount"] or 0
+    except Exception:
+        pass  # deposits table may not exist yet
 
     # ── Current value (spot + futures) ──
     holdings = get_holdings()
@@ -1289,9 +1278,15 @@ def cmd_profit():
 
             pending_sell = None
 
-    total_pnl = current_value - starting_value
-    pnl_pct = (total_pnl / starting_value * 100) if starting_value > 0 else 0
+    # ── P&L based on deposits ──
+    total_pnl = current_value - total_deposited
+    pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
 
+    # ── Uptime from first trade ──
+    first_trade = conn.execute(
+        "SELECT MIN(datetime) as first_dt FROM trade_history"
+    ).fetchone()
+    start_time = first_trade["first_dt"] if first_trade else None
     if start_time:
         start_dt = datetime.strptime(start_time[:19], "%Y-%m-%d %H:%M:%S")
         now_dt = datetime.now()
@@ -1305,8 +1300,8 @@ def cmd_profit():
 
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
     lines = [f"📊 **Performance Report**\n"]
-    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
-    lines.append(f"🏦 Starting: `${starting_value:.2f}` → Current: `${current_value:.2f}`")
+    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}% of deposited)")
+    lines.append(f"🏦 Deposited: `${total_deposited:.2f}` → Current: `${current_value:.2f}`")
     lines.append(f"   (Spot: `${spot_value:.2f}` + Futures: `${fut_value:.2f}`)")
     lines.append(f"⏱ Uptime: `{uptime_str}` | Trades: `{total_trades}`")
     if failed_trades:
@@ -1673,6 +1668,53 @@ def cmd_hop():
     return "\n".join(lines)
 
 
+def cmd_deposit(args=""):
+    """Record a deposit. Usage: /deposit <amount> [note]"""
+    if not args or not args[0].strip():
+        # Show current deposits
+        conn = get_db()
+        try:
+            rows = conn.execute("SELECT id, amount, currency, source, note, datetime FROM deposits ORDER BY id ASC").fetchall()
+        except Exception:
+            return "❌ Deposits table not set up yet."
+        conn.close()
+
+        if not rows:
+            return "📋 **No deposits recorded.**\n\nUse `/deposit <amount>` to record a top-up."
+
+        total = sum(r["amount"] for r in rows)
+        lines = [f"📋 **Deposits** (total: `${total:.2f}`)\n"]
+        for r in rows:
+            note = f" — {r['note']}" if r["note"] else ""
+            lines.append(f"  💰 `${r['amount']:.2f}` {r['currency']} ({r['source']}){note} — `{r['datetime'][:16]}`")
+        return "\n".join(lines)
+
+    parts = args[0].strip().split(None, 1)
+    try:
+        amount = float(parts[0])
+        if amount <= 0:
+            return "❌ Amount must be positive."
+    except ValueError:
+        return "❌ Usage: `/deposit <amount> [note]`\nExample: `/deposit 50 topped up from main wallet`"
+
+    note = parts[1] if len(parts) > 1 else ""
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO deposits (amount, currency, source, note) VALUES (?, 'USDC', 'telegram', ?)",
+            (amount, note),
+        )
+        conn.commit()
+        total = conn.execute("SELECT SUM(amount) FROM deposits").fetchone()[0]
+        conn.close()
+    except Exception as e:
+        conn.close()
+        return f"❌ Failed to record deposit: {e}"
+
+    return f"✅ Deposited `${amount:.2f}` recorded (total: `${total:.2f}`)"
+
+
 def cmd_help():
     """List available commands."""
     lines = ["🤖 **Available Commands**\n"]
@@ -1695,6 +1737,7 @@ def cmd_help():
     lines.append("\n**🔧 System:**")
     lines.append("  /health — DB, backups, container, API connectivity")
     lines.append("  /config — Current bot configuration & settings")
+    lines.append("  /deposit — Record a top-up (`/deposit <amount> [note]`)")
 
     lines.append("\n**⚙️ Coin Management:**")
     lines.append("  /addcoin TICKER — Add a coin")
@@ -1713,6 +1756,7 @@ ARG_COMMANDS = {
     "/removecoin": cmd_removecoin,
     "/swap": cmd_swap,
     "/kill": cmd_kill,
+    "/deposit": cmd_deposit,
 }
 # Commands without arguments
 COMMANDS = {
@@ -1878,6 +1922,7 @@ def main():
             {"command": "addcoin", "description": "Add a coin to trade list"},
             {"command": "removecoin", "description": "Remove a coin from list"},
             {"command": "swap", "description": "Swap one coin for another"},
+            {"command": "deposit", "description": "Record a deposit/top-up"},
             {"command": "help", "description": "Available commands"},
         ]
         r = requests.post(
