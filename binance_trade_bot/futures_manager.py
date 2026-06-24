@@ -9,7 +9,9 @@ SAFETY:
 - 1x leverage only (no liquidation risk — margin equals position size)
 - Isolated margin (one bad position can't affect others)
 - Funding rate guard (skip entry if rate is too expensive)
-- Stop-loss at configurable threshold
+- Server-side STOP_MARKET orders (instant execution, survives crashes)
+- Server-side TRAILING_STOP_MARKET (Binance manages the trail)
+- Client-side polling as backup + funding rate monitoring
 - Position reconciliation on every cycle
 
 REQUIRES: Binance account with USDC-M futures access (verified for IE).
@@ -67,6 +69,8 @@ class FuturesManager:
 
         # State
         self._open_position: Optional[FuturesPosition] = None
+        self._stop_order_id: Optional[int] = None     # algo order ID for hard stop
+        self._trailing_order_id: Optional[int] = None  # algo order ID for trailing stop
         self._last_check = 0
         self._last_entry_attempt = 0
         self._initialized = False
@@ -104,18 +108,21 @@ class FuturesManager:
                 if amt < 0:  # negative = short
                     symbol = pos["symbol"]
                     entry = float(pos["entryPrice"])
+                    qty = abs(amt)
                     self._open_position = FuturesPosition(
                         symbol=symbol,
                         entry_price=entry,
-                        quantity=abs(amt),
+                        quantity=qty,
                         order_id=0,
                         opened_at=time.time(),
                     )
                     self.logger.warning(
                         f"RECONCILED existing short: {symbol} "
-                        f"qty={abs(amt)} entry={entry} "
+                        f"qty={qty} entry={entry} "
                         f"(recovered from exchange state)"
                     )
+                    # Place server-side stops on the recovered position
+                    self._place_server_stops(symbol, qty, entry)
                     return
         except BinanceAPIException as e:
             self.logger.warning(f"Position reconciliation failed: {e}")
@@ -174,6 +181,17 @@ class FuturesManager:
         """Check stop-loss, trailing stop, and funding on the open position."""
         pos = self._open_position
         try:
+            # Check if server-side stop already closed the position externally
+            if self._check_server_stopped():
+                self.logger.warning(
+                    f" Futures SHORT closed externally (server-side stop): {pos.symbol} "
+                    f"entry={pos.entry_price}"
+                )
+                self._open_position = None
+                self._stop_order_id = None
+                self._trailing_order_id = None
+                return 'closed'
+
             # Get current mark price
             mark_price = self._get_mark_price(pos.symbol)
             if mark_price is None:
@@ -337,6 +355,9 @@ class FuturesManager:
                 opened_at=time.time(),
             )
 
+            # Place server-side stop orders for instant protection
+            self._place_server_stops(futures_symbol, quantity, fill_price)
+
             self.logger.warning(
                 f" Futures SHORT opened: {futures_symbol} "
                 f"qty={quantity} entry={fill_price} "
@@ -359,6 +380,9 @@ class FuturesManager:
             return 'idle'
 
         try:
+            # Cancel server-side stops first (avoid double-close)
+            self._cancel_server_stops(pos.symbol)
+
             # BUY = close short (reduceOnly ensures we don't accidentally go long)
             self.client.futures_create_order(
                 symbol=pos.symbol,
@@ -391,6 +415,80 @@ class FuturesManager:
         except Exception as e:
             self.logger.error(f"Futures close error: {e}")
             return 'holding'
+
+    # ─────────────────────────────────────────────────────────────────────────
+    #  SERVER-SIDE STOP ORDERS (algo orders on Binance)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _place_server_stops(self, symbol: str, quantity: float, entry_price: float):
+        """Place server-side STOP_MARKET and TRAILING_STOP_MARKET orders.
+
+        These execute instantly on Binance's side — no polling delay.
+        Covers us even if the bot crashes or the VPS goes down.
+        """
+        try:
+            # Hard stop-loss: fires when price goes UP by stop_loss_pct (short loses)
+            stop_price = round(entry_price * (1 + self.stop_loss_pct / 100), 6)
+            stop = self.client.futures_create_order(
+                symbol=symbol,
+                side="BUY",
+                type="STOP_MARKET",
+                quantity=quantity,
+                stopPrice=str(stop_price),
+                workingType="MARK_PRICE",
+                reduceOnly="true",
+            )
+            self._stop_order_id = stop.get("algoId", stop.get("orderId", 0))
+            self.logger.info(
+                f"Server stop placed: {symbol} trigger={stop_price} "
+                f"(+{self.stop_loss_pct}%) algoId={self._stop_order_id}"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to place server stop-loss: {e}")
+
+        try:
+            # Trailing stop: Binance manages the trail on their side
+            trailing = self.client.futures_create_order(
+                symbol=symbol,
+                side="BUY",
+                type="TRAILING_STOP_MARKET",
+                quantity=quantity,
+                callbackRate=str(int(self.trailing_stop_pct)),
+                workingType="MARK_PRICE",
+                priceProtect="true",
+                reduceOnly="true",
+            )
+            self._trailing_order_id = trailing.get("algoId", trailing.get("orderId", 0))
+            self.logger.info(
+                f"Server trailing stop placed: {symbol} "
+                f"callback={self.trailing_stop_pct}% algoId={self._trailing_order_id}"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to place server trailing stop: {e}")
+
+    def _cancel_server_stops(self, symbol: str):
+        """Cancel server-side stop orders when we close manually."""
+        try:
+            result = self.client.futures_cancel_all_algo_open_orders(symbol=symbol)
+            self.logger.info(f"Cancelled server-side stop orders on {symbol}")
+        except Exception as e:
+            self.logger.warning(f"Failed to cancel server stops: {e}")
+        finally:
+            self._stop_order_id = None
+            self._trailing_order_id = None
+
+    def _check_server_stopped(self) -> bool:
+        """Check if server-side stops already closed our position (e.g. bot was down)."""
+        if self._open_position is None:
+            return False
+        try:
+            pos = self.client.futures_position_information(symbol=self._open_position.symbol)
+            amt = float(pos[0].get("positionAmt", 0))
+            if amt == 0:
+                return True  # position was closed externally (by server stop)
+        except Exception:
+            pass
+        return False
 
     # ─────────────────────────────────────────────────────────────────────────
     #  API HELPERS
