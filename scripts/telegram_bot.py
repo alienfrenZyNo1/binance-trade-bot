@@ -1341,68 +1341,68 @@ def cmd_profit():
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
     lines = [f"📊 **Performance Report**\n"]
 
-    # Section 1: Headline P&L
-    lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
-    lines.append(f"   In: `${total_deposited:.2f}` → Now: `${current_value:.2f}`")
-    lines.append(f"   Spot: `${spot_value:.2f}` | Futures: `${fut_wallet:.2f}`")
+    # Section 1: Wallet overview table
+    lines.append(f"| {pnl_emoji} P&L | {uptime_str} | {len(real_trips)} hops |")
+    lines.append(f"|---|---|---|")
+    lines.append(f"| **Deposited** | **Current** | **P&L** |")
+    lines.append(f"| ${total_deposited:.2f} | ${current_value:.2f} | **${total_pnl:+.2f}** ({pnl_pct:+.1f}%) |")
+    lines.append(f"| Spot ${spot_value:.2f} | Futures ${fut_wallet:.2f} | |")
     lines.append("")
 
     # Section 2: Open position
     fut_realized = get_futures_realized()
     if positions:
-        lines.append("**🔻 Open Position**")
+        lines.append("**🔻 Open Position**\n")
+        lines.append("| Symbol | Dir | Entry | Mark | Unrealized |")
+        lines.append("|---|---|---|---|---|")
         for p in positions:
             emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             lines.append(
-                f"   {emoji} `{p['symbol']}` {p['direction']} | {p['leverage']}x"
-            )
-            lines.append(
-                f"   Entry: `${p['entry']:.4f}` → Mark: `${p['mark']:.4f}`"
-            )
-            lines.append(
-                f"   Unrealized: `${p['pnl_usd']:+.2f}` ({p['pnl_pct']:+.1f}%)"
+                f"| {emoji} `{p['symbol']}` {p['leverage']}x | {p['direction']} "
+                f"| ${p['entry']:.4f} | ${p['mark']:.4f} "
+                f"| **${p['pnl_usd']:+.2f}** ({p['pnl_pct']:+.1f}%) |"
             )
         lines.append("")
-    elif fut_realized and fut_realized["realized"] != 0:
-        lines.append("**🔻 Futures:** 💤 No open positions\n")
     else:
-        lines.append("**🔻 Futures:** 💤 No open positions\n")
+        lines.append("**🔻** 💤 No open positions\n")
 
-    # Section 2b: Futures realized breakdown
+    # Section 2b: Futures realized table
     if fut_realized and fut_realized["realized"] != 0:
-        lines.append("**💰 Futures Realized**")
+        lines.append("**💰 Futures Realized**\n")
+        lines.append("| Position | P&L |")
+        lines.append("|---|---|")
         for sym, pnl in sorted(fut_realized["positions"].items()):
             emoji = "🟢" if pnl >= 0 else "🔴"
-            lines.append(f"   {emoji} `{sym}`: `${pnl:+.2f}`")
-        lines.append(f"   Funding: `${fut_realized['funding']:+.2f}`")
-        lines.append(f"   Fees: `${fut_realized['commission']:+.2f}`")
-        lines.append(f"   **Net: `${fut_realized['net']:+.2f}`**")
+            lines.append(f"| {emoji} `{sym}` | ${pnl:+.2f} |")
+        lines.append("|---|---|")
+        lines.append(f"| Funding | ${fut_realized['funding']:+.2f} |")
+        lines.append(f"| Fees | ${fut_realized['commission']:+.2f} |")
+        lines.append(f"| **Net** | **${fut_realized['net']:+.2f}** |")
         lines.append("")
 
-    # Section 3: Trading stats
-    lines.append("**📈 Trading**")
-    lines.append(f"   `{uptime_str}` uptime | {len(real_trips)} hops")
-    if failed_trades:
-        lines.append(f"   ⚠️ {failed_trades} failed orders")
-
+    # Section 3: Trading breakdown
     total_decisions = wins + losses
-    if total_decisions > 0:
-        eff = wins / total_decisions * 100
-    else:
-        eff = 0
-    lines.append(f"   {wins}W / {losses}L / {flat} flat → {eff:.0f}% efficiency")
-    lines.append(f"   Spot realized: `${realized_from_hops:+.2f}`")
+    eff = (wins / total_decisions * 100) if total_decisions > 0 else 0
+    lines.append("**📈 Trading Breakdown**\n")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---|")
+    lines.append(f"| Efficiency | {wins}W / {losses}L / {flat} flat → {eff:.0f}% |")
+    lines.append(f"| Spot realized | ${realized_from_hops:+.2f} |")
     if fut_realized:
-        lines.append(f"   Futures realized: `${fut_realized['net']:+.2f}`")
+        lines.append(f"| Futures realized | ${fut_realized['net']:+.2f} |")
+    if failed_trades:
+        lines.append(f"| Failed orders | ⚠️ {failed_trades} |")
     lines.append("")
 
-    # Section 4: Hop history (compact)
+    # Section 4: Hop history table
     if round_trips:
-        lines.append("**Hop History:**")
+        lines.append("**Hop History**\n")
+        lines.append("| Hop | P&L |")
+        lines.append("|---|---|")
         for rt in round_trips[-8:]:
             if rt.get("phantom"):
                 emoji = "💰"
-                tag = " (deposit)"
+                tag = " ⚠️deposit"
             elif rt["pnl"] > 0.01:
                 emoji = "🟢"
                 tag = ""
@@ -1413,11 +1413,11 @@ def cmd_profit():
                 emoji = "⚪"
                 tag = ""
             lines.append(
-                f"   {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
-                f"`${rt['pnl']:+.2f}`{tag}"
+                f"| {emoji} `{rt['from_coin']}→{rt['to_coin']}`{tag} "
+                f"| ${rt['pnl']:+.2f} |"
             )
         if len(round_trips) > 8:
-            lines.append(f"   _...+{len(round_trips) - 8} earlier_")
+            lines.append(f"| _...+{len(round_trips) - 8} earlier_ | |")
 
     return "\n".join(lines)
 
