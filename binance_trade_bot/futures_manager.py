@@ -64,6 +64,11 @@ class FuturesManager:
         self.stop_loss_pct = float(getattr(config, 'FUTURES_STOP_LOSS_PCT', 15.0))
         self.trailing_stop_pct = float(getattr(config, 'FUTURES_TRAILING_STOP_PCT', 10.0))
         self.trailing_activation_pct = float(getattr(config, 'FUTURES_TRAILING_ACTIVATION_PCT', 3.0))
+        self.server_trailing_enabled = bool(getattr(config, 'FUTURES_SERVER_TRAILING_ENABLED', True))
+        self.server_trailing_callback_rate = float(getattr(config, 'FUTURES_SERVER_TRAILING_CALLBACK_RATE', 1.0))
+        self.server_trailing_min_profit_buffer_pct = float(
+            getattr(config, 'FUTURES_SERVER_TRAILING_MIN_PROFIT_BUFFER_PCT', 0.5)
+        )
         self.max_funding_rate = float(getattr(config, 'FUTURES_MAX_FUNDING_RATE', 0.0001))
         self.funding_exit_multiplier = float(getattr(config, 'FUTURES_FUNDING_EXIT_MULTIPLIER', 3.0))
         self.position_check_interval = int(getattr(config, 'FUTURES_CHECK_INTERVAL', 60))
@@ -547,18 +552,152 @@ class FuturesManager:
             self.logger.warning(f"Failed to place server stop-loss: {e}")
             return False
 
-        # Do NOT place server-side TRAILING_STOP_MARKET for now.
-        # Live audit showed Binance/open_algo_orders activating the trail at
-        # essentially the entry price even when activationPrice was supplied,
-        # producing a trigger above entry and risking a loss-making close.
-        # Keep the hard server STOP_MARKET as crash/VPS protection; profit
-        # trailing remains handled by client-side _manage_open_position().
+        if not self._place_server_trailing_stop(symbol, quantity, entry_price):
+            self.logger.info(
+                f"Server trailing stop not active for {symbol}; hard STOP_MARKET remains live"
+            )
+        return True
+
+    def _place_server_trailing_stop(self, symbol: str, quantity: float, entry_price: float) -> bool:
+        """Place a verified server-side trailing stop for a short.
+
+        This is intentionally separate from the hard stop: if the trailing stop
+        is rejected or fails safety verification, the already-placed hard
+        STOP_MARKET remains live.
+
+        For a SHORT close, the trailing order is a BUY. It should activate only
+        after price falls below entry (short in profit). Binance callbackRate is
+        a percent of PRICE, not P&L, so callback must be smaller than the
+        activation profit or the worst-case trigger can be above entry.
+        """
         self._trailing_order_id = None
+        if not self.server_trailing_enabled:
+            self.logger.info(f"Server trailing disabled by config for {symbol}")
+            return False
+
+        activation_pct = max(0.1, self.trailing_activation_pct)
+        buffer_pct = max(0.0, self.server_trailing_min_profit_buffer_pct)
+        activation_price = entry_price * (1 - activation_pct / 100)
+
+        # Require worst-case trigger at activation to still close in profit.
+        # For BUY trailing on a short: worst_trigger = activation * (1 + callback/100)
+        max_safe_callback = ((1 - buffer_pct / 100) / (1 - activation_pct / 100) - 1) * 100
+        callback_rate = max(0.1, min(self.server_trailing_callback_rate, 5.0, max_safe_callback))
+        if callback_rate < 0.1 or max_safe_callback < 0.1:
+            self.logger.warning(
+                f"Server trailing skipped for {symbol}: activation={activation_pct}% "
+                f"buffer={buffer_pct}% leaves no safe Binance callbackRate"
+            )
+            return False
+        if callback_rate != self.server_trailing_callback_rate:
+            self.logger.warning(
+                f"Server trailing callback clamped for {symbol}: requested "
+                f"{self.server_trailing_callback_rate}% -> safe {callback_rate:.2f}%"
+            )
+
+        activation_price = self._round_price_to_tick(symbol, activation_price, rounding=ROUND_DOWN)
+        worst_trigger = activation_price * (1 + callback_rate / 100)
+        if worst_trigger >= entry_price * (1 - buffer_pct / 100):
+            self.logger.warning(
+                f"Server trailing skipped for {symbol}: worst trigger {worst_trigger:.8f} "
+                f"would not preserve {buffer_pct}% profit buffer vs entry {entry_price}"
+            )
+            return False
+
+        try:
+            trail = self.client.futures_create_order(
+                symbol=symbol,
+                side="BUY",
+                type="TRAILING_STOP_MARKET",
+                quantity=quantity,
+                activationPrice=str(activation_price),
+                callbackRate=str(round(callback_rate, 2)),
+                workingType="MARK_PRICE",
+                reduceOnly="true",
+            )
+            algo_id = trail.get("algoId", trail.get("orderId", 0))
+            if not algo_id:
+                self.logger.warning(f"Server trailing placement returned no algo ID for {symbol}")
+                return False
+            self._trailing_order_id = algo_id
+        except Exception as e:
+            self.logger.warning(f"Failed to place server trailing stop for {symbol}: {e}")
+            return False
+
+        if not self._verify_server_trailing_stop(symbol, entry_price, activation_price, callback_rate):
+            self.logger.warning(f"Server trailing verification failed for {symbol}; cancelling trailing only")
+            self._cancel_algo_order(symbol, self._trailing_order_id, "trailing stop")
+            self._trailing_order_id = None
+            return False
+
         self.logger.info(
-            f"Server trailing stop skipped for {symbol}; using hard STOP_MARKET "
-            "plus client-side profit trailing"
+            f"Server trailing stop placed: {symbol} activate={activation_price} "
+            f"callback={callback_rate:.2f}% algoId={self._trailing_order_id}"
         )
         return True
+
+    def _verify_server_trailing_stop(
+        self,
+        symbol: str,
+        entry_price: float,
+        expected_activation: float,
+        callback_rate: float,
+    ) -> bool:
+        """Verify Binance stored a safe trailing algo order for a short."""
+        try:
+            orders = self.client.futures_get_open_algo_orders(symbol=symbol)
+            trailing = None
+            for order in orders:
+                if int(order.get("algoId", order.get("orderId", 0)) or 0) == int(self._trailing_order_id or 0):
+                    trailing = order
+                    break
+            if not trailing:
+                self.logger.warning(f"Could not find trailing algo order for {symbol} after placement")
+                return False
+
+            activate = float(
+                trailing.get("activatePrice")
+                or trailing.get("activationPrice")
+                or expected_activation
+            )
+            trigger_raw = trailing.get("triggerPrice")
+            trigger = float(trigger_raw) if trigger_raw not in (None, "", 0, "0") else 0.0
+
+            if activate >= entry_price:
+                self.logger.warning(
+                    f"Unsafe trailing activatePrice for {symbol}: {activate} >= entry {entry_price}"
+                )
+                return False
+
+            expected_worst_trigger = activate * (1 + callback_rate / 100)
+            max_allowed_trigger = entry_price * (1 - self.server_trailing_min_profit_buffer_pct / 100)
+            if expected_worst_trigger >= max_allowed_trigger:
+                self.logger.warning(
+                    f"Unsafe trailing worst trigger for {symbol}: {expected_worst_trigger:.8f} "
+                    f">= allowed {max_allowed_trigger:.8f}"
+                )
+                return False
+
+            if trigger and trigger >= max_allowed_trigger:
+                self.logger.warning(
+                    f"Unsafe Binance triggerPrice for {symbol}: {trigger} >= allowed {max_allowed_trigger:.8f}"
+                )
+                return False
+
+            return True
+        except Exception as e:
+            self.logger.warning(f"Trailing stop verification error for {symbol}: {e}")
+            return False
+
+    def _cancel_algo_order(self, symbol: str, algo_id, label: str):
+        """Cancel one algo order by algoId without removing the hard stop."""
+        if not algo_id:
+            return
+        try:
+            self.client.futures_cancel_algo_order(symbol=symbol, algoId=int(algo_id))
+            self.logger.info(f"Cancelled {label} algo order on {symbol}: {algo_id}")
+        except Exception as e:
+            self.logger.warning(f"Failed to cancel {label} algo order {algo_id} on {symbol}: {e}")
 
     def _cancel_server_stops(self, symbol: str):
         """Cancel server-side stop orders when we close manually."""

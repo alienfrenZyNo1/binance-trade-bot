@@ -188,6 +188,15 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.FUTURES_TRAILING_ACTIVATION_PCT = float(
             os.environ.get("FUTURES_TRAILING_ACTIVATION_PCT") or config.get(USER_CFG_SECTION, "futures_trailing_activation_pct", fallback="3.0")
         )
+        self.FUTURES_SERVER_TRAILING_ENABLED = (
+            os.environ.get("FUTURES_SERVER_TRAILING_ENABLED") or config.get(USER_CFG_SECTION, "futures_server_trailing_enabled", fallback="yes")
+        ).lower() in ("yes", "true", "1")
+        self.FUTURES_SERVER_TRAILING_CALLBACK_RATE = float(
+            os.environ.get("FUTURES_SERVER_TRAILING_CALLBACK_RATE") or config.get(USER_CFG_SECTION, "futures_server_trailing_callback_rate", fallback="1.0")
+        )
+        self.FUTURES_SERVER_TRAILING_MIN_PROFIT_BUFFER_PCT = float(
+            os.environ.get("FUTURES_SERVER_TRAILING_MIN_PROFIT_BUFFER_PCT") or config.get(USER_CFG_SECTION, "futures_server_trailing_min_profit_buffer_pct", fallback="0.5")
+        )
         self.FUTURES_MAX_FUNDING_RATE = float(
             os.environ.get("FUTURES_MAX_FUNDING_RATE") or config.get(USER_CFG_SECTION, "futures_max_funding_rate", fallback="0.0001")
         )
