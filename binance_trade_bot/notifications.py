@@ -5,7 +5,10 @@ from os import path
 
 import apprise
 
-APPRISE_CONFIG_PATH = "config/apprise.yml"
+APPRISE_CONFIG_PATHS = [
+    "config/apprise.yml",
+    "data/apprise.yml",
+]
 
 
 class NotificationHandler:
@@ -13,14 +16,17 @@ class NotificationHandler:
         self.enabled = False
         self.apobj = apprise.Apprise()
 
-        # Try apprise.yml config file first
-        if enabled and path.exists(APPRISE_CONFIG_PATH):
-            config = apprise.AppriseConfig()
-            config.add(APPRISE_CONFIG_PATH)
-            self.apobj.add(config)
-            self.enabled = True
+        # Try apprise.yml config file(s) first
+        if enabled:
+            for cfg_path in APPRISE_CONFIG_PATHS:
+                if path.exists(cfg_path):
+                    config = apprise.AppriseConfig()
+                    config.add(cfg_path)
+                    self.apobj.add(config)
+                    self.enabled = True
+                    break
         # Fall back to APPRISE_URLS env var (supports multiple, space-separated)
-        elif enabled and os.environ.get("APPRISE_URLS"):
+        if not self.enabled and enabled and os.environ.get("APPRISE_URLS"):
             for url in os.environ["APPRISE_URLS"].split():
                 self.apobj.add(url)
             self.enabled = True
