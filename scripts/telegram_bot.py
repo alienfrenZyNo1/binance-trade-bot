@@ -77,6 +77,45 @@ def html_escape(text):
     return html.escape(str(text), quote=False)
 
 
+def format_table(headers, rows):
+    """Build a clean, aligned monospace table string.
+
+    Args:
+        headers: list of column header strings.
+        rows: list of lists; each inner list is one data row of cell values
+            (numbers are coerced to str automatically).
+
+    Returns:
+        A multi-line string with a header row, a '──' separator line, and
+        aligned data rows.  Column widths are computed from the actual data
+        so padding always fits.  The result is NOT html-escaped; the caller
+        must html_escape() it and wrap it in <pre>...</pre>.
+    """
+    ncols = len(headers)
+    # Normalise every cell to a string and pad short rows to ``ncols``.
+    str_rows = []
+    for row in rows:
+        cells = [str(c) for c in row]
+        while len(cells) < ncols:
+            cells.append("")
+        str_rows.append(cells[:ncols])
+
+    # Column widths from headers + data
+    widths = [len(h) for h in headers]
+    for row in str_rows:
+        for i in range(ncols):
+            widths[i] = max(widths[i], len(row[i]))
+
+    sep = "  "
+    header_line = sep.join(headers[i].ljust(widths[i]) for i in range(ncols))
+    divider_line = sep.join("\u2500" * widths[i] for i in range(ncols))
+    data_lines = [
+        sep.join(row[i].ljust(widths[i]) for i in range(ncols))
+        for row in str_rows
+    ]
+    return "\n".join([header_line, divider_line] + data_lines)
+
+
 # ── DB Helpers ───────────────────────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -463,7 +502,7 @@ def cmd_status():
 
     # Spot holdings
     lines.append("<b>📦 Spot Holdings</b>")
-    hold_lines = []
+    hold_rows = []
     for h in holdings:
         if isinstance(h, dict):
             coin = h["coin_id"]
@@ -476,22 +515,23 @@ def cmd_status():
             price = h["usd_price"] or 0
             value = balance * price
         if value > 0.01:
-            hold_lines.append(f"{coin:<8} {balance:>12.4f} @ ${price:<10.4f} = ${value:>10.2f}")
-    if hold_lines:
-        lines.append(f"<pre>{html_escape(chr(10).join(hold_lines))}</pre>")
+            hold_rows.append([coin, f"{balance:.4f}", f"${price:.4f}", f"${value:.2f}"])
+    if hold_rows:
+        table = format_table(["COIN", "BALANCE", "PRICE", "VALUE"], hold_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Futures positions
     if fut_positions:
         lines.append(f"\n<b>🔻 Futures Positions ({len(fut_positions)}):</b>")
-        pos_lines = []
+        pos_rows = []
         for p in fut_positions:
-            pos_lines.append(
-                f"{p['symbol']:<12} {p['direction']:<5} "
-                f"qty={p['qty']:<10} entry=${p['entry']:.4f}  "
-                f"mark=${p['mark']:.4f}  "
-                f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
-            )
-        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
+            pos_rows.append([
+                p["symbol"], p["direction"], f"{p['qty']}",
+                f"${p['entry']:.4f}", f"${p['mark']:.4f}",
+                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})",
+            ])
+        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L"], pos_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     if fut_balance and fut_balance["available"] > 0 and not fut_positions:
         lines.append(f"\n💤 Futures wallet: <code>${fut_balance['available']:.2f}</code> idle (no open positions)")
@@ -508,7 +548,7 @@ def cmd_trades():
     if not trades:
         lines.append("<i>No spot trades yet.</i>")
     else:
-        trade_lines = []
+        trade_rows = []
         for t in trades:
             action = "Sold" if t["selling"] else "Bought"
             coin = t["alt_coin_id"]
@@ -518,13 +558,14 @@ def cmd_trades():
             state = t["state"] if t["state"] else "?"
 
             if state == "COMPLETE":
-                direction = "SELL" if t["selling"] else "BUY "
-                trade_lines.append(f"{direction} {dt}  {amount:>9.2f} {coin:<6} for {cost:>9.2f} {t['crypto_coin_id']}")
+                direction = "SELL" if t["selling"] else "BUY"
+                trade_rows.append([dt, direction, f"{amount:.2f}", coin, f"{cost:.2f}", t["crypto_coin_id"]])
             elif state == "FAILED":
-                trade_lines.append(f"FAIL {dt}  FAILED {action} {coin} - stuck in partial state!")
+                trade_rows.append([dt, "FAIL", f"{amount:.2f}", coin, "-", "stuck!"])
             else:
-                trade_lines.append(f"{state:<4} {dt}  {action} {amount:.2f} {coin}")
-        lines.append(f"<pre>{html_escape(chr(10).join(trade_lines))}</pre>")
+                trade_rows.append([dt, state, f"{amount:.2f}", coin, "-", "-"])
+        table = format_table(["TIME", "ACTION", "AMOUNT", "COIN", "COST", "CURRENCY"], trade_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
         # Count states
         conn = get_db()
@@ -542,20 +583,15 @@ def cmd_trades():
     lines.append("<b>🔻 Futures Positions</b>")
 
     if positions:
-        pos_lines = []
+        pos_rows = []
         for p in positions:
-            funding = get_futures_funding(p["symbol"])
-            funding_str = ""
-            if funding is not None:
-                funding_str = f"  |  Funding: {funding*100:.4f}%"
-            pos_lines.append(
-                f"{p['symbol']:<12} {p['direction']:<5} "
-                f"qty={p['qty']:<10} entry=${p['entry']:.4f}  "
-                f"mark=${p['mark']:.4f}  "
-                f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
-                f"{funding_str}"
-            )
-        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
+            pos_rows.append([
+                p["symbol"], p["direction"], f"{p['qty']}",
+                f"${p['entry']:.4f}", f"${p['mark']:.4f}",
+                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})",
+            ])
+        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L"], pos_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("  💤 No open futures positions")
 
@@ -785,22 +821,21 @@ def cmd_futures():
 
     # Open positions
     if positions:
-        lines.append(f"\n<b>📊 Open Positions ({len(positions)}):</b>")
+        lines.append(f"\n📊 <b>Open Positions ({len(positions)}):</b>")
+        pos_rows = []
         for p in positions:
-            pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             funding = get_futures_funding(p["symbol"])
-
-            lines.append(f"\n{pnl_emoji} <b>{p['symbol']}</b> — {p['direction']}")
-            funding_str = ""
-            if funding is not None:
-                funding_str = f"  |  Funding: {funding*100:.4f}%"
-            pos_block = [
-                f"Qty: {p['qty']}  |  Leverage: {p['leverage']}x",
-                f"Entry: ${p['entry']:.4f}  ->  Mark: ${p['mark']:.4f}",
-                f"P&L: {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
-                f"{funding_str}",
-            ]
-            lines.append(f"<pre>{html_escape(chr(10).join(pos_block))}</pre>")
+            funding_str = f"{funding*100:.4f}%" if funding is not None else "-"
+            pos_rows.append([
+                p["symbol"], p["direction"], f"{p['qty']}",
+                f"{p['leverage']}x", f"${p['entry']:.4f}", f"${p['mark']:.4f}",
+                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})", funding_str,
+            ])
+        table = format_table(
+            ["SYMBOL", "DIR", "QTY", "LEV", "ENTRY", "MARK", "P&L", "FUNDING"],
+            pos_rows,
+        )
+        lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("💤 No open positions")
 
@@ -818,11 +853,10 @@ def cmd_futures():
                         break
             performers.sort(key=lambda x: x[1])
             if performers:
-                lines.append("\n<b>📉 Top short candidates</b> (24h perf):")
-                cand_lines = []
-                for coin, perf in performers[:3]:
-                    cand_lines.append(f"  {coin:<6} {perf:+.2f}%")
-                lines.append(f"<pre>{html_escape(chr(10).join(cand_lines))}</pre>")
+                lines.append("\n📉 <b>Top short candidates</b> (24h perf):")
+                cand_rows = [[coin, f"{perf:+.2f}%"] for coin, perf in performers[:3]]
+                table = format_table(["COIN", "24H%"], cand_rows)
+                lines.append(f"<pre>{html_escape(table)}</pre>")
     except Exception:
         pass
 
@@ -1019,9 +1053,10 @@ def cmd_config():
     for k in ["bridge", "scout_multiplier", "buy_timeout", "sell_timeout"]:
         if k in config:
             label = labels.get(k, k)
-            trade_rows.append(f"{label:<22} {config[k]}")
+            trade_rows.append([label, config[k]])
     if trade_rows:
-        lines.append(f"<pre>{html_escape(chr(10).join(trade_rows))}</pre>")
+        table = format_table(["SETTING", "VALUE"], trade_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Risk management
     lines.append("\n<b>Risk Management:</b>")
@@ -1029,9 +1064,10 @@ def cmd_config():
     for k in ["trailing_stop_enabled", "trailing_stop_pct"]:
         if k in config:
             label = labels.get(k, k)
-            risk_rows.append(f"{label:<22} {config[k]}")
+            risk_rows.append([label, config[k]])
     if risk_rows:
-        lines.append(f"<pre>{html_escape(chr(10).join(risk_rows))}</pre>")
+        table = format_table(["SETTING", "VALUE"], risk_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Futures settings
     futures_keys = [k for k in config if k.startswith("futures")]
@@ -1054,9 +1090,10 @@ def cmd_config():
                     val = f"{float(val)*100:.4f}%"
                 except Exception:
                     pass
-            fut_rows.append(f"{label:<24} {val}")
+            fut_rows.append([label, val])
         if fut_rows:
-            lines.append(f"<pre>{html_escape(chr(10).join(fut_rows))}</pre>")
+            table = format_table(["SETTING", "VALUE"], fut_rows)
+            lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Coin count
     conn = get_db()
@@ -1091,10 +1128,11 @@ def cmd_kill(args=None):
 
     if positions:
         lines.append(f"<b>{len(positions)} position(s) will be closed:</b>")
-        pos_lines = []
+        pos_rows = []
         for p in positions:
-            pos_lines.append(f"{p['symbol']:<12} {p['direction']:<5} qty={p['qty']}  P&L={p['pnl_pct']:+.1f}%")
-        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
+            pos_rows.append([p["symbol"], p["direction"], f"{p['qty']}", f"{p['pnl_pct']:+.1f}%"])
+        table = format_table(["SYMBOL", "DIR", "QTY", "P&L"], pos_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("No open positions to close.")
 
@@ -1281,12 +1319,11 @@ def cmd_regime():
         if fut_balance:
             lines.append(f"💼 Futures wallet: <code>${fut_balance['balance']:.2f}</code>")
         if positions:
-            bear_pos_lines = []
+            bear_pos_rows = []
             for p in positions:
-                bear_pos_lines.append(
-                    f"Short {p['symbol']:<12} {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
-                )
-            lines.append(f"<pre>{html_escape(chr(10).join(bear_pos_lines))}</pre>")
+                bear_pos_rows.append([p["symbol"], "SHORT", f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}"])
+            table = format_table(["SYMBOL", "DIR", "P&L%", "P&L$"], bear_pos_rows)
+            lines.append(f"<pre>{html_escape(table)}</pre>")
         elif fut_balance and fut_balance["balance"] > 5:
             lines.append("  💤 Scouting for short entry...")
         else:
@@ -1298,11 +1335,9 @@ def cmd_regime():
         counts = Counter(r["regime"] for r in regime_history)
         total = sum(counts.values())
         lines.append(f"\n<b>Recent distribution:</b> (last {total} samples)")
-        dist_lines = []
-        for r, c in counts.most_common():
-            pct = c / total * 100
-            dist_lines.append(f"{r:<10} {pct:.0f}%")
-        lines.append(f"<pre>{html_escape(chr(10).join(dist_lines))}</pre>")
+        dist_rows = [[r, str(c), f"{c / total * 100:.0f}%"] for r, c in counts.most_common()]
+        table = format_table(["REGIME", "COUNT", "PCT"], dist_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     return "\n".join(lines)
 
@@ -1400,32 +1435,34 @@ def cmd_profit():
     fut_realized = get_futures_realized()
     if positions:
         lines.append("<b>🔻 Open Position</b>")
-        pos_blocks = []
+        pos_rows = []
         for p in positions:
-            pos_blocks.append(
-                f"{p['symbol']} {p['direction']} {p['leverage']}x\n"
-                f"Entry: ${p['entry']:.4f}  ->  Mark: ${p['mark']:.4f}\n"
-                f"${p['pnl_usd']:+.2f} ({p['pnl_pct']:+.1f}%)"
-            )
-        lines.append(f"<pre>{html_escape(chr(10).join(pos_blocks))}</pre>")
+            pos_rows.append([
+                p["symbol"], p["direction"], f"{p['leverage']}x",
+                f"${p['entry']:.4f}", f"${p['mark']:.4f}",
+                f"${p['pnl_usd']:+.2f} ({p['pnl_pct']:+.1f}%)",
+            ])
+        table = format_table(["SYMBOL", "DIR", "LEV", "ENTRY", "MARK", "P&L"], pos_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("<b>🔻</b> 💤 No open positions\n")
 
     # Section 2b: Futures realized
     if fut_realized and fut_realized["realized"] != 0:
         lines.append("<b>💰 Futures Realized</b>")
-        fr_lines = []
-        for sym, pnl in sorted(fut_realized["positions"].items()):
-            fr_lines.append(f"{sym:<14} ${pnl:+.2f}")
-        fr_lines.append(f"Funding         ${fut_realized['funding']:+.2f}")
-        fr_lines.append(f"Fees            ${fut_realized['commission']:+.2f}")
-        fr_lines.append(f"Net             ${fut_realized['net']:+.2f}")
-        lines.append(f"<pre>{html_escape(chr(10).join(fr_lines))}</pre>")
+        fr_rows = [[sym, f"${pnl:+.2f}"] for sym, pnl in sorted(fut_realized["positions"].items())]
+        table = format_table(["SYMBOL", "P&L"], fr_rows)
+        fr_summary = (
+            f"\nFunding  ${fut_realized['funding']:+.2f}\n"
+            f"Fees     ${fut_realized['commission']:+.2f}\n"
+            f"Net      ${fut_realized['net']:+.2f}"
+        )
+        lines.append(f"<pre>{html_escape(table + fr_summary)}</pre>")
 
     # Section 3: Trading breakdown
     total_decisions = wins + losses
     eff = (wins / total_decisions * 100) if total_decisions > 0 else 0
-    lines.append("<b>📈 Trading</b>")
+    lines.append("📈 <b>Trading</b>")
     trade_summary = [
         f"{wins}W / {losses}L / {flat} flat  ({eff:.0f}% efficiency)",
         f"Spot:     ${realized_from_hops:+.2f}",
@@ -1433,28 +1470,27 @@ def cmd_profit():
     if fut_realized:
         trade_summary.append(f"Futures:  ${fut_realized['net']:+.2f}")
     if failed_trades:
-        trade_summary.append(f"⚠️ {failed_trades} failed orders")
+        trade_summary.append(f"{failed_trades} failed orders")
     lines.append(f"<pre>{html_escape(chr(10).join(trade_summary))}</pre>")
 
     # Section 4: Hop history
     if round_trips:
         lines.append("<b>Hop History</b>")
-        hop_lines = []
+        hop_rows = []
         for rt in round_trips[-8:]:
             if rt.get("phantom"):
-                tag = " (deposit)"
+                tag = "deposit"
             elif rt["pnl"] > 0.01:
-                tag = " WIN"
+                tag = "WIN"
             elif rt["pnl"] < -0.01:
-                tag = " LOSS"
+                tag = "LOSS"
             else:
-                tag = ""
-            hop_lines.append(
-                f"{rt['from_coin']}->{rt['to_coin']:<6} ${rt['pnl']:+.2f}{tag}"
-            )
+                tag = "-"
+            hop_rows.append([rt["from_coin"], rt["to_coin"], f"${rt['pnl']:+.2f}", tag])
         if len(round_trips) > 8:
-            hop_lines.append(f"...+{len(round_trips) - 8} earlier")
-        lines.append(f"<pre>{html_escape(chr(10).join(hop_lines))}</pre>")
+            hop_rows.append(["...", f"+{len(round_trips) - 8} earlier", "", ""])
+        table = format_table(["FROM", "TO", "P&L", "TAG"], hop_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     return "\n".join(lines)
 
@@ -1566,18 +1602,18 @@ def cmd_hop():
                     open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
                     lines.append(f"🔒 Currently shorting: <code>{html_escape(open_sym)}</code>\n")
                 if falling:
-                    lines.append(f"<b>📉 Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)}):")
-                    for i, c in enumerate(falling[:5], 1):
-                        icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
-                        line = f"  {icon} #{i}: <code>{c['coin']}</code> {c['perf_pct']:+.2f}%"
-                        if c["funding"] is not None:
-                            f_emoji = "🟢" if c["funding"] < 0 else "🔴"
-                            line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
-                        if c["mark_price"]:
-                            line += f" | Mark: <code>${c['mark_price']:.4f}</code>"
-                        lines.append(line)
+                    lines.append(f"📉 <b>Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)}):")
+                    shorted_syms = {p["symbol"] for p in positions if p["direction"] == "SHORT"}
+                    cand_rows = []
+                    for c in falling[:5]:
+                        badge = " [SHORTING]" if c["fut_symbol"] in shorted_syms else ""
+                        funding_str = f"{c['funding']*100:.4f}%" if c["funding"] is not None else "-"
+                        mark_str = f"${c['mark_price']:.4f}" if c["mark_price"] else "-"
+                        cand_rows.append([c["coin"] + badge, f"{c['perf_pct']:+.2f}%", funding_str, mark_str])
+                    table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows)
+                    lines.append(f"<pre>{html_escape(table)}</pre>")
                 else:
-                    lines.append("  🟢 No futures-eligible coins falling — no short candidates")
+                    lines.append("🟢 No futures-eligible coins falling — no short candidates")
         except Exception:
             pass
         return "\n".join(lines)
@@ -1661,36 +1697,37 @@ def cmd_hop():
     lines.append(f"Z-score threshold: <code>{active_zscore_threshold:.1f}</code> | Momentum guard: <code>skip if coin drops &gt;{MOMENTUM_CRASH_THRESHOLD}%</code>\n")
 
     lines.append("Filter checklist per candidate:")
-    lines.append("  ✅ = pass | ⏳ = building data | ❌ = blocked")
+    lines.append("Legend: [OK] = pass  |  [--] = building data  |  [NO] = blocked")
     lines.append("")
 
     for i, c in enumerate(candidates[:5], 1):
         price_str = f"${c['price']:.4f}" if c["price"] else "?"
         fut_badge = " 🔻" if c["futures"] else ""
 
-        score_icon = "✅" if c["score_ok"] else "❌"
+        score_mark = "[OK]" if c["score_ok"] else "[NO]"
         lines.append(f"<b>#{i}: <code>{c['to']}</code></b>{fut_badge}  {price_str}  |  Divergence: {c['divergence']:+.2f}%")
 
-        filters = f"{score_icon} Score: {c['score']:.6f}"
+        filter_lines = [f"{score_mark} Score: {c['score']:.6f}"]
 
         if c["zscore"] is not None:
-            zs_icon = "✅" if c["zscore_ok"] else "❌"
-            filters += f"\n{zs_icon} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed"
+            zs_mark = "[OK]" if c["zscore_ok"] else "[NO]"
+            filter_lines.append(f"{zs_mark} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed")
         else:
-            filters += f"\n⏳ Z-score: collecting data..."
+            filter_lines.append("[--] Z-score: collecting data...")
 
-        mom_icon = "✅" if c["momentum_ok"] else "❌"
-        mom_text = "stable" if c["momentum_ok"] else "CRASHING ⚠️"
-        filters += f"\n{mom_icon} Momentum: {mom_text}"
+        mom_mark = "[OK]" if c["momentum_ok"] else "[NO]"
+        mom_text = "stable" if c["momentum_ok"] else "CRASHING!"
+        filter_lines.append(f"{mom_mark} Momentum: {mom_text}")
+
+        lines.append(f"<pre>{html_escape(chr(10).join(filter_lines))}</pre>")
 
         if c["all_clear"]:
-            filters += "\n🟢 TRADE READY"
+            lines.append("🟢 <b>TRADE READY</b>")
         elif cooldown_active and c["score_ok"] and c["zscore_ok"] is True and c["momentum_ok"]:
-            filters += "\n🟡 waiting on cooldown"
+            lines.append("🟡 waiting on cooldown")
         else:
-            filters += "\n🔴 blocked"
+            lines.append("🔴 blocked")
 
-        lines.append(f"<pre>{html_escape(filters)}</pre>")
         if i < 5:
             lines.append("")
 
@@ -1757,31 +1794,28 @@ def _append_futures_candidates(lines, positions):
             if has_open_short:
                 open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
                 lines.append(f"🔒 Currently shorting: <code>{html_escape(open_sym)}</code>")
-                lines.append("")
 
             if falling:
-                lines.append(f"<b>📉 Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)} futures-eligible):")
-                for i, c in enumerate(falling[:5], 1):
-                    icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
-
-                    is_shorted = any(
-                        p["direction"] == "SHORT" and c["fut_symbol"] == p["symbol"]
-                        for p in positions
-                    )
-                    badge = " 🔒 SHORTING" if is_shorted else ""
-
-                    line = f"  {icon} #{i}: <code>{c['coin']}</code> {c['perf_pct']:+.2f}%{badge}"
-                    if c["funding"] is not None:
-                        f_emoji = "🟢" if c["funding"] < 0 else "🔴"
-                        line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
-                    if c["mark_price"]:
-                        line += f" | Mark: <code>${c['mark_price']:.4f}</code>"
-                    lines.append(line)
+                lines.append(f"\n📉 <b>Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)} futures-eligible):")
+                shorted_syms = {p["symbol"] for p in positions if p["direction"] == "SHORT"}
+                cand_rows = []
+                for c in falling[:5]:
+                    badge = " [SHORTING]" if c["fut_symbol"] in shorted_syms else ""
+                    funding_str = f"{c['funding']*100:.4f}%" if c["funding"] is not None else "-"
+                    mark_str = f"${c['mark_price']:.4f}" if c["mark_price"] else "-"
+                    cand_rows.append([
+                        c["coin"] + badge,
+                        f"{c['perf_pct']:+.2f}%",
+                        funding_str,
+                        mark_str,
+                    ])
+                table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows)
+                lines.append(f"<pre>{html_escape(table)}</pre>")
             else:
-                lines.append("  🟢 No futures-eligible coins are falling — no short candidates")
-                lines.append(f"  (all {len(short_candidates)} futures-eligible coins are green)")
+                lines.append("🟢 No futures-eligible coins are falling — no short candidates")
+                lines.append(f"(all {len(short_candidates)} futures-eligible coins are green)")
     except Exception:
-        lines.append("  ❌ Could not fetch futures short candidates")
+        lines.append("❌ Could not fetch futures short candidates")
 
 
 def cmd_deposit(args=""):
@@ -1800,13 +1834,14 @@ def cmd_deposit(args=""):
 
         total = sum(r["amount"] for r in rows)
         lines = [f"📋 <b>Deposits</b> (total: <code>${total:.2f}</code>)\n"]
-        dep_lines = []
+        dep_rows = []
         for r in rows:
-            note = f"  {r['note']}" if r["note"] else ""
-            dep_lines.append(
-                f"${r['amount']:.2f} {r['currency']} ({r['source']}){note}  {r['datetime'][:16]}"
-            )
-        lines.append(f"<pre>{html_escape(chr(10).join(dep_lines))}</pre>")
+            dep_rows.append([
+                f"${r['amount']:.2f}", r["currency"], r["source"],
+                r["note"] or "-", r["datetime"][:16],
+            ])
+        table = format_table(["AMOUNT", "CUR", "SOURCE", "NOTE", "DATE"], dep_rows)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
         return "\n".join(lines)
 
     parts = args[0].strip().split(None, 1)
