@@ -605,12 +605,13 @@ class FuturesManager:
             return False
 
         try:
-            trail = self.client.futures_create_order(
+            trail = self.client.futures_create_algo_order(
+                algoType="CONDITIONAL",
                 symbol=symbol,
                 side="BUY",
                 type="TRAILING_STOP_MARKET",
                 quantity=quantity,
-                activationPrice=str(activation_price),
+                activatePrice=str(activation_price),
                 callbackRate=str(round(callback_rate, 2)),
                 workingType="MARK_PRICE",
                 reduceOnly="true",
