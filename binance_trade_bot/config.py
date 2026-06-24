@@ -172,6 +172,32 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             os.environ.get("BEAR_MOMENTUM_MAX_DROP") or config.get(USER_CFG_SECTION, "bear_momentum_max_drop", fallback="2.0")
         )
 
+        # Futures bear-mode controls
+        self.FUTURES_LEVERAGE = int(
+            os.environ.get("FUTURES_LEVERAGE") or config.get(USER_CFG_SECTION, "futures_leverage", fallback="1")
+        )
+        self.FUTURES_MAX_MARGIN_PCT = float(
+            os.environ.get("FUTURES_MAX_MARGIN_PCT") or config.get(USER_CFG_SECTION, "futures_max_margin_pct", fallback="0.5")
+        )
+        self.FUTURES_STOP_LOSS_PCT = float(
+            os.environ.get("FUTURES_STOP_LOSS_PCT") or config.get(USER_CFG_SECTION, "futures_stop_loss_pct", fallback="15.0")
+        )
+        self.FUTURES_TRAILING_STOP_PCT = float(
+            os.environ.get("FUTURES_TRAILING_STOP_PCT") or config.get(USER_CFG_SECTION, "futures_trailing_stop_pct", fallback="10.0")
+        )
+        self.FUTURES_TRAILING_ACTIVATION_PCT = float(
+            os.environ.get("FUTURES_TRAILING_ACTIVATION_PCT") or config.get(USER_CFG_SECTION, "futures_trailing_activation_pct", fallback="3.0")
+        )
+        self.FUTURES_MAX_FUNDING_RATE = float(
+            os.environ.get("FUTURES_MAX_FUNDING_RATE") or config.get(USER_CFG_SECTION, "futures_max_funding_rate", fallback="0.0001")
+        )
+        self.FUTURES_FUNDING_EXIT_MULTIPLIER = float(
+            os.environ.get("FUTURES_FUNDING_EXIT_MULTIPLIER") or config.get(USER_CFG_SECTION, "futures_funding_exit_multiplier", fallback="3.0")
+        )
+        self.FUTURES_CHECK_INTERVAL = int(
+            os.environ.get("FUTURES_CHECK_INTERVAL") or config.get(USER_CFG_SECTION, "futures_check_interval", fallback="60")
+        )
+
         # Phase D: Trailing stop-loss
         self.TRAILING_STOP_ENABLED = (
             os.environ.get("TRAILING_STOP_ENABLED") or config.get(USER_CFG_SECTION, "trailing_stop_enabled", fallback="yes")

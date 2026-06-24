@@ -63,7 +63,9 @@ class FuturesManager:
         self.max_margin_pct = float(getattr(config, 'FUTURES_MAX_MARGIN_PCT', 0.5))
         self.stop_loss_pct = float(getattr(config, 'FUTURES_STOP_LOSS_PCT', 15.0))
         self.trailing_stop_pct = float(getattr(config, 'FUTURES_TRAILING_STOP_PCT', 10.0))
+        self.trailing_activation_pct = float(getattr(config, 'FUTURES_TRAILING_ACTIVATION_PCT', 3.0))
         self.max_funding_rate = float(getattr(config, 'FUTURES_MAX_FUNDING_RATE', 0.0001))
+        self.funding_exit_multiplier = float(getattr(config, 'FUTURES_FUNDING_EXIT_MULTIPLIER', 3.0))
         self.position_check_interval = int(getattr(config, 'FUTURES_CHECK_INTERVAL', 60))
         self.testnet = getattr(config, 'TESTNET', False)
 
@@ -249,7 +251,7 @@ class FuturesManager:
                 pos.peak_pnl_pct = pnl_pct
 
             # Trailing stop: if we were up X% but gave back Y%, close
-            if pos.peak_pnl_pct > 3.0:  # only trail after 3% profit
+            if pos.peak_pnl_pct > self.trailing_activation_pct:
                 giveback = pos.peak_pnl_pct - pnl_pct
                 if giveback >= self.trailing_stop_pct:
                     self.logger.info(
@@ -269,7 +271,7 @@ class FuturesManager:
             # Check funding rate on open position.
             # For shorts, NEGATIVE funding is adverse (shorts pay longs).
             funding = self._get_funding_rate(pos.symbol)
-            if funding is not None and funding < -(self.max_funding_rate * 3):
+            if funding is not None and funding < -(self.max_funding_rate * self.funding_exit_multiplier):
                 self.logger.warning(
                     f"Futures adverse funding rate: {pos.symbol} rate={funding*100:.4f}% "
                     f"— closing position to avoid bleed"
@@ -620,8 +622,8 @@ class FuturesManager:
             amt = float(pos[0].get("positionAmt", 0))
             if amt == 0:
                 return True  # position was closed externally (by server stop)
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning(f"Server stop status check failed for {self._open_position.symbol}: {e}")
         return False
 
     # ─────────────────────────────────────────────────────────────────────────

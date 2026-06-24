@@ -510,15 +510,50 @@ def get_futures_mark_price(symbol):
 
 
 def get_futures_realized():
-    """Get realized PnL, funding, and commissions from futures income history."""
+    """Get realized PnL, funding, and commissions from futures income history.
+
+    Paginate backwards from now to the first recorded deposit so `/profit`
+    doesn't silently miss older income once the account has more than one page
+    of futures entries.
+    """
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return None
     try:
-        r = _signed_get(f"{FAPI_PUB}/income")
-        if r.status_code != 200:
-            return None
+        start_ms = None
+        try:
+            conn = get_db()
+            row = conn.execute("SELECT MIN(datetime) AS dt FROM deposits").fetchone()
+            conn.close()
+            if row and row["dt"]:
+                start_ms = int(datetime.fromisoformat(row["dt"]).timestamp() * 1000)
+        except Exception:
+            # Fall back to Binance default window if deposits table/date parsing fails.
+            start_ms = None
 
-        income = r.json()
+        income = []
+        end_ms = int(time.time() * 1000)
+        pages = 0
+        while pages < 20:
+            params = {"limit": 1000, "endTime": end_ms}
+            if start_ms:
+                params["startTime"] = start_ms
+            r = _signed_get(f"{FAPI_PUB}/income", params=params)
+            if r.status_code != 200:
+                return None
+            batch = r.json()
+            if not batch:
+                break
+            income.extend(batch)
+            pages += 1
+            if len(batch) < 1000:
+                break
+            oldest = min(int(e.get("time", end_ms)) for e in batch)
+            if start_ms and oldest <= start_ms:
+                break
+            if oldest >= end_ms:
+                break
+            end_ms = oldest - 1
+
         realized = 0.0
         funding = 0.0
         commission = 0.0
