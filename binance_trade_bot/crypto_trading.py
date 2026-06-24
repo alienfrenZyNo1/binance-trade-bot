@@ -31,7 +31,9 @@ def _acquire_singleton_lock(logger):
 
 def _reconcile_position(manager, db, logger, config):
     """On startup, verify the DB current_coin matches actual exchange balance.
-    If they diverge (e.g. crash mid-trade), fix the DB to match reality."""
+    If they diverge (e.g. crash mid-trade), fix the DB to match reality.
+    Also checks futures wallet — if funds are in futures during BEAR regime,
+    that's a valid state, not an error."""
     from .models import Coin
 
     current_coin = db.get_current_coin()
@@ -79,6 +81,23 @@ def _reconcile_position(manager, db, logger, config):
         except Exception as e:
             logger.warning(f"Could not scan account for reconciliation: {e}")
         return
+
+    # Check futures wallet — if funds are there, that's OK during BEAR regime
+    try:
+        futures_balances = manager.binance_client.futures_account_balance()
+        futures_total = 0.0
+        for fb in futures_balances:
+            if fb.get("asset") == bridge_symbol:
+                futures_total = float(fb.get("balance", 0))
+                break
+        if futures_total > 5.0:
+            logger.info(
+                f"Reconciliation: spot empty (0 {current_coin.symbol}, {bridge_balance} {bridge_symbol}) "
+                f"but futures has {futures_total:.2f} {bridge_symbol} — funds in futures wallet (BEAR mode)"
+            )
+            return
+    except Exception:
+        pass
 
     logger.info(f"Reconciliation: holding {coin_balance} {current_coin.symbol}, {bridge_balance} {bridge_symbol} — seems OK")
 

@@ -59,6 +59,9 @@ class Strategy(AutoTrader):
         self._last_trade_time = float(saved_last_trade) if saved_last_trade else 0
         saved_reentry = self.db.get_bot_state("awaiting_reentry")
         self._awaiting_reentry = saved_reentry == "True" if saved_reentry else False
+        # Note: _awaiting_reentry may be cleared by first _update_market_regime()
+        # call if the regime is BEAR — we don't persist spot re-entry state in
+        # bear mode since funds are in the futures wallet.
 
         # Trailing stop
         self._position_peak_price = {}
@@ -215,6 +218,12 @@ class Strategy(AutoTrader):
             bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
             if bridge_bal and bridge_bal > 5.0:
                 self.futures_manager.transfer_to_futures(bridge_bal)
+
+            # Clear awaiting_reentry — we're in futures mode now, not waiting for spot re-entry
+            if self._awaiting_reentry:
+                self._awaiting_reentry = False
+                self._persist_trade_state()
+                self.logger.info("Cleared awaiting_reentry flag — entering futures mode")
 
         elif old_regime == BEAR and new_regime != BEAR:
             # Moving OUT OF bear: close shorts, transfer back to spot
@@ -395,7 +404,16 @@ class Strategy(AutoTrader):
         # Update regime
         self._update_market_regime()
 
-        # Handle re-entry after trailing stop
+        # REGIME FILTER: in bear market, manage futures shorts
+        # Skip spot re-entry logic entirely — funds are in futures wallet
+        if self._market_regime == BEAR:
+            performance = self._get_all_performance()
+            action = self.futures_manager.manage_bear(performance, self._market_regime)
+            if action in ('opened', 'closed'):
+                self.logger.info(f"Futures action during bear: {action}")
+            return
+
+        # Handle re-entry after trailing stop (spot mode only)
         if self._awaiting_reentry:
             self._reenter_from_bridge()
             return
