@@ -29,6 +29,8 @@ import sqlite3
 import logging
 import hashlib
 import hmac
+import html
+import re
 import subprocess
 import requests
 from datetime import datetime
@@ -64,6 +66,16 @@ logging.basicConfig(
     format="%(asctime)s - telegram-bot - %(levelname)s - %(message)s",
 )
 log = logging.getLogger(__name__)
+
+
+def html_escape(text):
+    """HTML-escape text for safe insertion into Telegram HTML messages.
+
+    Telegram's HTML parse_mode requires <, >, & to be escaped in text content
+    (including inside <pre>/<code> blocks).
+    """
+    return html.escape(str(text), quote=False)
+
 
 # ── DB Helpers ───────────────────────────────────────────────────────────────
 def get_db():
@@ -432,25 +444,26 @@ def cmd_status():
     fut_value = fut_balance["balance"] if fut_balance else 0
     total_value = spot_value + fut_value
 
-    lines = [f"🤖 **Bot Status**\n"]
-    lines.append(f"🧭 Regime: `{regime.upper()}`")
+    lines = [f"🤖 <b>Bot Status</b>\n"]
+    lines.append(f"🧭 Regime: <code>{html_escape(regime.upper())}</code>")
 
     # Regime-aware "Holding" line
     if regime == "bear" and fut_positions:
         pos_summary = " + ".join(
             f"{p['symbol'].replace('USDC','')} {p['direction']}" for p in fut_positions
         )
-        lines.append(f"📌 Holding: `{pos_summary}` (futures)")
+        lines.append(f"📌 Holding: <code>{html_escape(pos_summary)}</code> (futures)")
     elif regime == "bear":
-        lines.append(f"📌 Holding: `Cash (awaiting short signal)`")
+        lines.append("📌 Holding: <code>Cash (awaiting short signal)</code>")
     else:
-        lines.append(f"📌 Holding: `{current_coin}`")
+        lines.append(f"📌 Holding: <code>{html_escape(current_coin)}</code>")
 
-    lines.append(f"💰 **Total: `${total_value:.2f}`**")
-    lines.append(f"   Spot: `${spot_value:.2f}` | Futures: `${fut_value:.2f}`\n")
+    lines.append(f"💰 <b>Total: <code>${total_value:.2f}</code></b>")
+    lines.append(f"   Spot: <code>${spot_value:.2f}</code> | Futures: <code>${fut_value:.2f}</code>\n")
 
     # Spot holdings
-    lines.append("**📦 Spot Holdings:**")
+    lines.append("<b>📦 Spot Holdings</b>")
+    hold_lines = []
     for h in holdings:
         if isinstance(h, dict):
             coin = h["coin_id"]
@@ -463,22 +476,26 @@ def cmd_status():
             price = h["usd_price"] or 0
             value = balance * price
         if value > 0.01:
-            lines.append(f"  `{coin}`: {balance:.4f} @ ${price:.4f} = `${value:.2f}`")
+            hold_lines.append(f"{coin:<8} {balance:>12.4f} @ ${price:<10.4f} = ${value:>10.2f}")
+    if hold_lines:
+        lines.append(f"<pre>{html_escape(chr(10).join(hold_lines))}</pre>")
 
     # Futures positions
     if fut_positions:
-        lines.append(f"\n**🔻 Futures Positions ({len(fut_positions)}):**")
+        lines.append(f"\n<b>🔻 Futures Positions ({len(fut_positions)}):</b>")
+        pos_lines = []
         for p in fut_positions:
             pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
-            lines.append(
-                f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
-                f"qty={p['qty']} entry=${p['entry']:.4f} "
-                f"mark=${p['mark']:.4f} "
+            pos_lines.append(
+                f"{pnl_emoji} {p['symbol']:<12} {p['direction']:<5} "
+                f"qty={p['qty']}  entry=${p['entry']:.4f}  "
+                f"mark=${p['mark']:.4f}  "
                 f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
             )
+        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
 
     if fut_balance and fut_balance["available"] > 0 and not fut_positions:
-        lines.append(f"\n💤 Futures wallet: `${fut_balance['available']:.2f}` idle (no open positions)")
+        lines.append(f"\n💤 Futures wallet: <code>${fut_balance['available']:.2f}</code> idle (no open positions)")
 
     return "\n".join(lines)
 
@@ -487,11 +504,12 @@ def cmd_trades():
     """Recent trade history including FAILED states + futures positions."""
     trades = get_trade_history(10)
 
-    lines = ["📋 **Recent Trades**\n"]
+    lines = ["📋 <b>Recent Trades</b>\n"]
 
     if not trades:
-        lines.append("_No spot trades yet._")
+        lines.append("<i>No spot trades yet.</i>")
     else:
+        trade_lines = []
         for t in trades:
             action = "Sold" if t["selling"] else "Bought"
             coin = t["alt_coin_id"]
@@ -502,11 +520,12 @@ def cmd_trades():
 
             if state == "COMPLETE":
                 icon = "🔴" if t["selling"] else "🟢"
-                lines.append(f"{icon} `{dt}` {action} {amount:.2f} {coin} ↔ {cost:.2f} {t['crypto_coin_id']}")
+                trade_lines.append(f"{icon} {dt}  {action} {amount:>9.2f} {coin:<6} ↔ {cost:>9.2f} {t['crypto_coin_id']}")
             elif state == "FAILED":
-                lines.append(f"⚠️ `{dt}` FAILED {action} {coin} — stuck in partial state!")
+                trade_lines.append(f"⚠️ {dt}  FAILED {action} {coin} — stuck in partial state!")
             else:
-                lines.append(f"❓ `{dt}` {state} {action} {amount:.2f} {coin}")
+                trade_lines.append(f"❓ {dt}  {state} {action} {amount:.2f} {coin}")
+        lines.append(f"<pre>{html_escape(chr(10).join(trade_lines))}</pre>")
 
         # Count states
         conn = get_db()
@@ -516,14 +535,15 @@ def cmd_trades():
         conn.close()
         if state_counts:
             summary_parts = [f"{r['state']}: {r['cnt']}" for r in state_counts]
-            lines.append(f"\n📊 Spot trades: `{' | '.join(summary_parts)}`")
+            lines.append(f"\n📊 Spot trades: <code>{html_escape(' | '.join(summary_parts))}</code>")
 
     # ── Futures context ──
     positions = get_futures_positions()
     lines.append(f"\n{'─' * 20}")
-    lines.append("**🔻 Futures Positions**")
+    lines.append("<b>🔻 Futures Positions</b>")
 
     if positions:
+        pos_lines = []
         for p in positions:
             pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             funding = get_futures_funding(p["symbol"])
@@ -531,13 +551,14 @@ def cmd_trades():
             if funding is not None:
                 f_emoji = "🟢" if funding < 0 else "🔴"
                 funding_str = f" | Funding: {f_emoji}{funding*100:.4f}%"
-            lines.append(
-                f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
-                f"qty={p['qty']} entry=`${p['entry']:.4f}` "
-                f"mark=`${p['mark']:.4f}` "
-                f"P&L={p['pnl_pct']:+.1f}% (`${p['pnl_usd']:+.2f}`)"
+            pos_lines.append(
+                f"{pnl_emoji} {p['symbol']:<12} {p['direction']:<5} "
+                f"qty={p['qty']}  entry=${p['entry']:.4f}  "
+                f"mark=${p['mark']:.4f}  "
+                f"P&L={p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
                 f"{funding_str}"
             )
+        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
     else:
         lines.append("  💤 No open futures positions")
 
@@ -557,22 +578,25 @@ def cmd_coins():
     fut_coins = [c for c in coins if c in FUTURES_ELIGIBLE]
     spot_only = [c for c in coins if c not in FUTURES_ELIGIBLE]
 
-    lines = [f"👁 **Monitored Coins** ({len(coins)} total)\n"]
-    lines.append(f"Bridge: `{BRIDGE_SYMBOL}`")
-    lines.append(f"Current: `{current}`\n")
+    lines = [f"👁 <b>Monitored Coins</b> ({len(coins)} total)\n"]
+    lines.append(f"Bridge: <code>{BRIDGE_SYMBOL}</code>")
+    lines.append(f"Current: <code>{html_escape(current)}</code>\n")
 
-    lines.append(f"**🔻 Futures-eligible** ({len(fut_coins)}):")
+    lines.append(f"<b>🔻 Futures-eligible</b> ({len(fut_coins)}):")
+    fut_rows = []
     for i in range(0, len(fut_coins), 5):
         batch = fut_coins[i:i+5]
-        row = "  ".join(f"`{c}`" for c in batch)
-        lines.append(f"  {row}")
+        fut_rows.append("  ".join(batch))
+    if fut_rows:
+        lines.append(f"<pre>{html_escape(chr(10).join(fut_rows))}</pre>")
 
     if spot_only:
-        lines.append(f"\n**📦 Spot-only** ({len(spot_only)}):")
+        lines.append(f"\n<b>📦 Spot-only</b> ({len(spot_only)}):")
+        spot_rows = []
         for i in range(0, len(spot_only), 5):
             batch = spot_only[i:i+5]
-            row = "  ".join(f"`{c}`" for c in batch)
-            lines.append(f"  {row}")
+            spot_rows.append("  ".join(batch))
+        lines.append(f"<pre>{html_escape(chr(10).join(spot_rows))}</pre>")
 
     return "\n".join(lines)
 
@@ -588,15 +612,18 @@ def cmd_price():
     stats = get_24h_stats(current_coin)
 
     if not stats:
-        return f"❌ Could not fetch price for `{current_coin}`"
+        return f"❌ Could not fetch price for <code>{html_escape(current_coin)}</code>"
 
     change_emoji = "📈" if stats["change_pct"] >= 0 else "📉"
-    lines = [f"💲 **{current_coin}/{BRIDGE_SYMBOL}**\n"]
-    lines.append(f"Price: `${stats['price']:.6f}`")
-    lines.append(f"24h: {change_emoji} {stats['change_pct']:+.2f}%")
-    lines.append(f"High: `${stats['high']:.6f}`")
-    lines.append(f"Low: `${stats['low']:.6f}`")
-    lines.append(f"Volume: ${stats['volume']:,.0f}")
+    lines = [f"💲 <b>{html_escape(current_coin)}/{BRIDGE_SYMBOL}</b>\n"]
+    price_lines = [
+        f"Price:   ${stats['price']:.6f}",
+        f"24h:     {change_emoji} {stats['change_pct']:+.2f}%",
+        f"High:    ${stats['high']:.6f}",
+        f"Low:     ${stats['low']:.6f}",
+        f"Volume:  ${stats['volume']:,.0f}",
+    ]
+    lines.append(f"<pre>{html_escape(chr(10).join(price_lines))}</pre>")
 
     # Futures context for eligible coins
     if current_coin in FUTURES_ELIGIBLE:
@@ -605,12 +632,15 @@ def cmd_price():
         funding = get_futures_funding(fut_symbol)
         if mark is not None:
             basis_pct = ((mark - stats["price"]) / stats["price"]) * 100 if stats["price"] > 0 else 0
-            lines.append(f"\n**🔻 Futures:**")
-            lines.append(f"Mark: `${mark:.6f}`")
-            lines.append(f"Basis: {basis_pct:+.3f}% (spot vs mark)")
+            lines.append(f"\n<b>🔻 Futures:</b>")
+            fut_lines = [
+                f"Mark:    ${mark:.6f}",
+                f"Basis:   {basis_pct:+.3f}% (spot vs mark)",
+            ]
             if funding is not None:
                 f_emoji = "🟢 shorts get paid" if funding < 0 else "🔴 shorts pay"
-                lines.append(f"Funding: {funding*100:.4f}% ({f_emoji})")
+                fut_lines.append(f"Funding: {funding*100:.4f}% ({f_emoji})")
+            lines.append(f"<pre>{html_escape(chr(10).join(fut_lines))}</pre>")
         else:
             lines.append(f"\n🔻 Futures eligible (no mark price data)")
 
@@ -636,7 +666,7 @@ def _enable_coin(symbol):
     row = conn.execute("SELECT symbol, enabled FROM coins WHERE symbol = ?", (symbol,)).fetchone()
     if row and row["enabled"]:
         conn.close()
-        return f"`{symbol}` is already in the active list."
+        return f"<code>{symbol}</code> is already in the active list."
 
     if row:
         conn.execute("UPDATE coins SET enabled = 1 WHERE symbol = ?", (symbol,))
@@ -653,7 +683,7 @@ def _enable_coin(symbol):
                 conn.execute("INSERT INTO pairs (from_coin_id, to_coin_id, ratio) VALUES (?, ?, 1.0)", (a, b))
     conn.commit()
     conn.close()
-    return f"✅ Added `{symbol}` — trade bot will pick it up in ~3 seconds."
+    return f"✅ Added <code>{symbol}</code> — trade bot will pick it up in ~3 seconds."
 
 
 def _disable_coin(symbol):
@@ -664,32 +694,32 @@ def _disable_coin(symbol):
     row = conn.execute("SELECT symbol, enabled FROM coins WHERE symbol = ?", (symbol,)).fetchone()
     if not row:
         conn.close()
-        return f"`{symbol}` is not in the database."
+        return f"<code>{symbol}</code> is not in the database."
 
     if not row["enabled"]:
         conn.close()
-        return f"`{symbol}` is already disabled."
+        return f"<code>{symbol}</code> is already disabled."
 
     current = get_current_coin()
     if current == symbol:
         conn.close()
-        return f"⚠️ Cannot remove `{symbol}` — it's the coin the bot is currently holding!"
+        return f"⚠️ Cannot remove <code>{symbol}</code> — it's the coin the bot is currently holding!"
 
     conn.execute("UPDATE coins SET enabled = 0 WHERE symbol = ?", (symbol,))
     conn.commit()
     conn.close()
-    return f"❌ Removed `{symbol}` — trade bot will stop scouting it in ~3 seconds."
+    return f"❌ Removed <code>{symbol}</code> — trade bot will stop scouting it in ~3 seconds."
 
 
 def cmd_addcoin(args):
     """Add a coin to the monitored list."""
     if not args:
-        return "Usage: `/addcoin TICKER`\nExample: `/addcoin LTC`"
+        return "Usage: <code>/addcoin TICKER</code>\nExample: <code>/addcoin LTC</code>"
     symbol = args.strip().upper()
 
     price, err = _verify_usdc_pair(symbol)
     if err:
-        return f"❌ Cannot add `{symbol}`: {err}"
+        return f"❌ Cannot add <code>{html_escape(symbol)}</code>: {html_escape(err)}"
 
     vol_info = ""
     try:
@@ -705,20 +735,20 @@ def cmd_addcoin(args):
 
     result = _enable_coin(symbol)
     fut_note = " 🔻 Futures-eligible" if symbol in FUTURES_ELIGIBLE else ""
-    return f"{result}{vol_info}\n💰 Price: ${price:.6f}{fut_note}"
+    return f"{result}{vol_info}\n💰 Price: <code>${price:.6f}</code>{fut_note}"
 
 
 def cmd_removecoin(args):
     """Remove a coin from the monitored list."""
     if not args:
-        return "Usage: `/removecoin TICKER`\nExample: `/removecoin TIA`"
+        return "Usage: <code>/removecoin TICKER</code>\nExample: <code>/removecoin TIA</code>"
     return _disable_coin(args.strip().upper())
 
 
 def cmd_swap(args):
     """Swap one coin for another."""
     if not args or " " not in args:
-        return "Usage: `/swap OLD NEW`\nExample: `/swap TIA LTC`"
+        return "Usage: <code>/swap OLD NEW</code>\nExample: <code>/swap TIA LTC</code>"
     parts = args.strip().upper().split()
     old, new = parts[0], parts[1]
 
@@ -727,12 +757,12 @@ def cmd_swap(args):
 
     price, err = _verify_usdc_pair(new)
     if err:
-        return f"❌ Cannot add `{new}`: {err}"
+        return f"❌ Cannot add <code>{html_escape(new)}</code>: {html_escape(err)}"
 
     result = []
     result.append(_disable_coin(old))
     result.append(_enable_coin(new))
-    return "\n".join(result) + f"\n💰 `{new}` price: ${price:.6f}"
+    return "\n".join(result) + f"\n💰 <code>{new}</code> price: ${price:.6f}"
 
 
 def cmd_futures():
@@ -743,38 +773,40 @@ def cmd_futures():
     if balance is None and not positions:
         return "❌ Cannot reach futures API. Check API keys."
 
-    lines = ["🔻 **Futures Dashboard**\n"]
+    lines = ["🔻 <b>Futures Dashboard</b>\n"]
 
     # Wallet balance
     if balance:
-        lines.append(f"💼 **Wallet Balance:** `${balance['balance']:.2f}`")
-        lines.append(f"   Available: `${balance['available']:.2f}`")
+        bal_lines = [
+            f"💼 Wallet Balance:  ${balance['balance']:.2f}",
+            f"   Available:      ${balance['available']:.2f}",
+        ]
         if balance["pnl"] != 0:
             pnl_emoji = "🟢" if balance["pnl"] >= 0 else "🔴"
-            lines.append(f"   Unrealized P&L: {pnl_emoji} `${balance['pnl']:+.2f}`")
-        lines.append("")
+            bal_lines.append(f"   Unrealized P&L: {pnl_emoji} ${balance['pnl']:+.2f}")
+        lines.append(f"<pre>{html_escape(chr(10).join(bal_lines))}</pre>")
 
     # Open positions
     if positions:
-        lines.append(f"**📊 Open Positions ({len(positions)}):**\n")
+        lines.append(f"\n<b>📊 Open Positions ({len(positions)}):</b>")
         for p in positions:
             pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
             funding = get_futures_funding(p["symbol"])
             funding_str = ""
             if funding is not None:
                 if funding < 0:
-                    funding_str = f" | Funding: 🟢 {funding*100:.4f}% (shorts get paid)"
+                    funding_str = f"  |  Funding: 🟢 {funding*100:.4f}% (shorts get paid)"
                 else:
-                    funding_str = f" | Funding: 🔴 {funding*100:.4f}% (shorts pay)"
+                    funding_str = f"  |  Funding: 🔴 {funding*100:.4f}% (shorts pay)"
 
-            lines.append(f"{pnl_emoji} **{p['symbol']}** — {p['direction']}")
-            lines.append(f"   Qty: `{p['qty']}` | Leverage: `{p['leverage']}x`")
-            lines.append(f"   Entry: `${p['entry']:.4f}` → Mark: `${p['mark']:.4f}`")
-            lines.append(
-                f"   P&L: **{p['pnl_pct']:+.1f}%** (${p['pnl_usd']:+.2f})"
-                f"{funding_str}"
-            )
-            lines.append("")
+            lines.append(f"\n{pnl_emoji} <b>{p['symbol']}</b> — {p['direction']}")
+            pos_block = [
+                f"Qty: {p['qty']}  |  Leverage: {p['leverage']}x",
+                f"Entry: ${p['entry']:.4f}  →  Mark: ${p['mark']:.4f}",
+                f"P&L: {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
+                f"{funding_str}",
+            ]
+            lines.append(f"<pre>{html_escape(chr(10).join(pos_block))}</pre>")
     else:
         lines.append("💤 No open positions")
 
@@ -792,10 +824,12 @@ def cmd_futures():
                         break
             performers.sort(key=lambda x: x[1])
             if performers:
-                lines.append("**📉 Top short candidates** (24h perf):")
+                lines.append("\n<b>📉 Top short candidates</b> (24h perf):")
+                cand_lines = []
                 for coin, perf in performers[:3]:
                     icon = "🔴" if perf < 0 else "🟢"
-                    lines.append(f"  {icon} `{coin}`: {perf:+.2f}%")
+                    cand_lines.append(f"{icon} {coin:<6} {perf:+.2f}%")
+                lines.append(f"<pre>{html_escape(chr(10).join(cand_lines))}</pre>")
     except Exception:
         pass
 
@@ -804,10 +838,10 @@ def cmd_futures():
 
 def cmd_health():
     """System health check: DB, bot container, backups, WAL mode."""
-    lines = ["🏥 **System Health**\n"]
+    lines = ["🏥 <b>System Health</b>\n"]
 
     # ── Database ──
-    lines.append("**Database:**")
+    lines.append("<b>Database:</b>")
     db_ok = os.path.exists(DB_PATH)
     if db_ok:
         db_size = os.path.getsize(DB_PATH) / 1024
@@ -818,7 +852,7 @@ def cmd_health():
             conn = get_db()
             wal_row = conn.execute("PRAGMA journal_mode").fetchone()
             wal_mode = wal_row[0] if wal_row else "?"
-            lines.append(f"  ✅ Journal mode: `{wal_mode}`")
+            lines.append(f"  ✅ Journal mode: <code>{html_escape(wal_mode)}</code>")
 
             # DB backup check
             backup_dir = os.path.dirname(DB_PATH)
@@ -830,7 +864,7 @@ def cmd_health():
                 bak_path = os.path.join(backup_dir, backups[0])
                 bak_age = time.time() - os.path.getmtime(bak_path)
                 bak_age_str = f"{bak_age/3600:.1f}h ago" if bak_age < 86400 else f"{bak_age/86400:.1f}d ago"
-                lines.append(f"  ✅ Last backup: `{backups[0]}` ({bak_age_str})")
+                lines.append(f"  ✅ Last backup: <code>{html_escape(backups[0])}</code> ({bak_age_str})")
             else:
                 lines.append("  ⚠️ No DB backups found")
 
@@ -838,14 +872,14 @@ def cmd_health():
             trade_count = conn.execute("SELECT COUNT(*) FROM trade_history").fetchone()[0]
             regime_count = conn.execute("SELECT COUNT(*) FROM market_regime_log").fetchone()[0]
             conn.close()
-            lines.append(f"  📊 Trades: `{trade_count}` | Regime logs: `{regime_count}`")
+            lines.append(f"  📊 Trades: <code>{trade_count}</code> | Regime logs: <code>{regime_count}</code>")
         except Exception as e:
-            lines.append(f"  ❌ DB error: {e}")
+            lines.append(f"  ❌ DB error: {html_escape(e)}")
     else:
-        lines.append(f"  ❌ DB not found at `{DB_PATH}`")
+        lines.append(f"  ❌ DB not found at <code>{html_escape(DB_PATH)}</code>")
 
     # ── Bot Process ──
-    lines.append("\n**Bot Process:**")
+    lines.append("\n<b>Bot Process:</b>")
     bot_found = False
     try:
         # Strategy 1: Check for any Docker container running crypto_trading.py
@@ -864,10 +898,10 @@ def cmd_health():
             if os.environ.get("DOCKER_IMAGE", "") in image or CONTAINER_NAME in name or "binance" in name.lower():
                 if "Up" in status:
                     # Extract uptime from status like "Up 5 minutes"
-                    lines.append(f"  ✅ Running ({status.lower()})")
+                    lines.append(f"  ✅ Running ({html_escape(status.lower())})")
                     bot_found = True
                 else:
-                    lines.append(f"  ⚠️ Container status: {status}")
+                    lines.append(f"  ⚠️ Container status: {html_escape(status)}")
                     bot_found = True
                 break
     except Exception:
@@ -923,20 +957,20 @@ def cmd_health():
             lines.append("  ❌ Trade bot NOT detected (cannot check Docker or systemd)!")
 
     # ── PID Lock ──
-    lines.append("\n**Instance Protection:**")
+    lines.append("\n<b>Instance Protection:</b>")
     pid_file = os.path.join(os.path.dirname(DB_PATH), "bot.pid")
     if os.path.exists(pid_file):
         try:
             with open(pid_file) as f:
                 pid = f.read().strip()
-            lines.append(f"  ✅ PID lock active (PID {pid})")
+            lines.append(f"  ✅ PID lock active (PID {html_escape(pid)})")
         except Exception:
             lines.append("  ⚠️ PID lock file exists but unreadable")
     else:
         lines.append("  ℹ️ No PID lock file (bot may use in-memory lock)")
 
     # ── API Connectivity ──
-    lines.append("\n**Connectivity:**")
+    lines.append("\n<b>Connectivity:</b>")
     try:
         r = requests.get(f"{API_BASE}/ping", timeout=5)
         if r.status_code == 200:
@@ -984,26 +1018,33 @@ def cmd_config():
     # Hide sensitive keys
     hidden = {"api_key", "api_secret_key", "key", "secret"}
 
-    lines = ["⚙️ **Bot Configuration**\n"]
+    lines = ["⚙️ <b>Bot Configuration</b>\n"]
 
     # Trading settings
-    lines.append("**Trading:**")
+    lines.append("<b>Trading:</b>")
+    trade_rows = []
     for k in ["bridge", "scout_multiplier", "buy_timeout", "sell_timeout"]:
         if k in config:
             label = labels.get(k, k)
-            lines.append(f"  `{label}`: `{config[k]}`")
+            trade_rows.append(f"{label:<22} {config[k]}")
+    if trade_rows:
+        lines.append(f"<pre>{html_escape(chr(10).join(trade_rows))}</pre>")
 
     # Risk management
-    lines.append("\n**Risk Management:**")
+    lines.append("\n<b>Risk Management:</b>")
+    risk_rows = []
     for k in ["trailing_stop_enabled", "trailing_stop_pct"]:
         if k in config:
             label = labels.get(k, k)
-            lines.append(f"  `{label}`: `{config[k]}`")
+            risk_rows.append(f"{label:<22} {config[k]}")
+    if risk_rows:
+        lines.append(f"<pre>{html_escape(chr(10).join(risk_rows))}</pre>")
 
     # Futures settings
     futures_keys = [k for k in config if k.startswith("futures")]
     if futures_keys:
-        lines.append("\n**🔻 Futures:**")
+        lines.append("\n<b>🔻 Futures:</b>")
+        fut_rows = []
         for k in sorted(futures_keys):
             if k in hidden:
                 continue
@@ -1020,17 +1061,19 @@ def cmd_config():
                     val = f"{float(val)*100:.4f}%"
                 except Exception:
                     pass
-            lines.append(f"  `{label}`: `{val}`")
+            fut_rows.append(f"{label:<24} {val}")
+        if fut_rows:
+            lines.append(f"<pre>{html_escape(chr(10).join(fut_rows))}</pre>")
 
     # Coin count
     conn = get_db()
     enabled_count = conn.execute("SELECT COUNT(*) FROM coins WHERE enabled = 1").fetchone()[0]
     total_count = conn.execute("SELECT COUNT(*) FROM coins").fetchone()[0]
     conn.close()
-    lines.append(f"\n**Coins:** `{enabled_count}` active / `{total_count}` total")
+    lines.append(f"\n<b>Coins:</b> <code>{enabled_count}</code> active / <code>{total_count}</code> total")
 
     # Config file path
-    lines.append(f"\n_file: `{CONFIG_PATH}`_")
+    lines.append(f"\n<i>file: <code>{html_escape(CONFIG_PATH)}</code></i>")
 
     return "\n".join(lines)
 
@@ -1047,29 +1090,31 @@ def cmd_kill(args=None):
     positions = get_futures_positions()
     balance = get_futures_balance()
 
-    lines = ["🚨 **EMERGENCY KILL SWITCH**\n"]
+    lines = ["🚨 <b>EMERGENCY KILL SWITCH</b>\n"]
     lines.append("This will:")
     lines.append("  1. Close ALL open futures positions")
     lines.append("  2. Transfer all USDC back to spot wallet")
     lines.append("  3. Bot will NOT reopen futures until next bear regime cycle\n")
 
     if positions:
-        lines.append(f"**{len(positions)} position(s) will be closed:**")
+        lines.append(f"<b>{len(positions)} position(s) will be closed:</b>")
+        pos_lines = []
         for p in positions:
-            lines.append(f"  `{p['symbol']}` {p['direction']} qty={p['qty']} P&L={p['pnl_pct']:+.1f}%")
+            pos_lines.append(f"{p['symbol']:<12} {p['direction']:<5} qty={p['qty']}  P&L={p['pnl_pct']:+.1f}%")
+        lines.append(f"<pre>{html_escape(chr(10).join(pos_lines))}</pre>")
     else:
         lines.append("No open positions to close.")
 
     if balance and balance["balance"] > 0:
-        lines.append(f"\n`${balance['balance']:.2f}` will be transferred to spot.")
+        lines.append(f"\n<code>${balance['balance']:.2f}</code> will be transferred to spot.")
 
-    lines.append("\n⚠️ **To execute, send:** `/kill confirm`")
+    lines.append("\n⚠️ <b>To execute, send:</b> <code>/kill confirm</code>")
     return "\n".join(lines)
 
 
 def _execute_kill():
     """Execute the kill switch: close positions + transfer back."""
-    lines = ["🚨 **KILL SWITCH EXECUTING...**\n"]
+    lines = ["🚨 <b>KILL SWITCH EXECUTING...</b>\n"]
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return "❌ No API keys available. Cannot execute kill switch."
@@ -1100,9 +1145,9 @@ def _execute_kill():
                 if r.status_code == 200:
                     lines.append(f"✅ Closed {p['symbol']} {p['direction']} (qty {p['qty']})")
                 else:
-                    lines.append(f"❌ Failed to close {p['symbol']}: {r.status_code} {r.text[:100]}")
+                    lines.append(f"❌ Failed to close {p['symbol']}: {r.status_code} {html_escape(r.text[:100])}")
             except Exception as e:
-                lines.append(f"❌ Error closing {p['symbol']}: {e}")
+                lines.append(f"❌ Error closing {p['symbol']}: {html_escape(e)}")
     else:
         lines.append("✅ No open positions to close")
 
@@ -1128,14 +1173,14 @@ def _execute_kill():
             if r.status_code == 200:
                 lines.append(f"✅ Transferred ${balance['balance']:.2f} {BRIDGE_SYMBOL} back to spot")
             else:
-                lines.append(f"❌ Transfer failed: {r.status_code} {r.text[:100]}")
+                lines.append(f"❌ Transfer failed: {r.status_code} {html_escape(r.text[:100])}")
         except Exception as e:
-            lines.append(f"❌ Transfer error: {e}")
+            lines.append(f"❌ Transfer error: {html_escape(e)}")
     else:
         lines.append("✅ No USDC in futures wallet to transfer")
 
-    lines.append("\n🏁 **Kill switch complete.** Bot is in spot-only mode.")
-    lines.append("_The trade bot may re-enter futures on the next bear regime cycle._")
+    lines.append("\n🏁 <b>Kill switch complete.</b> Bot is in spot-only mode.")
+    lines.append("<i>The trade bot may re-enter futures on the next bear regime cycle.</i>")
     return "\n".join(lines)
 
 
@@ -1166,7 +1211,12 @@ def cmd_regime():
                 avg_vol = total_vol / cnt if cnt > 0 else 0
                 regime = "stormy" if avg_vol > 8 else "sideways"
                 conn.close()
-                return f"🧠 **Market Regime** (estimated)\n\nStatus: `{regime}`\nAvg volatility: `{avg_vol:.1f}%`\n\n_Bot is collecting data for full regime detection..._"
+                return (
+                    f"🧠 <b>Market Regime</b> (estimated)\n\n"
+                    f"Status: <code>{html_escape(regime)}</code>\n"
+                    f"Avg volatility: <code>{avg_vol:.1f}%</code>\n\n"
+                    f"<i>Bot is collecting data for full regime detection...</i>"
+                )
         except Exception:
             pass
         return "❌ No regime data yet. Bot needs a few minutes to classify the market."
@@ -1177,19 +1227,19 @@ def cmd_regime():
 
     emoji_map = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "stormy": "🟠"}
     strategy_map = {
-        "bull": "🟢 **Bull** — Momentum mode\nBot is buying the strongest coins and riding trends. Spot long positions.",
-        "bear": "🔴 **Bear** — Defense mode\nBot has sold to USDC and may be **shorting via USDC-M futures**. Capital is being preserved/shorted.",
-        "sideways": "🟡 **Sideways** — Mean reversion mode\nBot is buying dips and selling rips on oscillating coins.",
-        "stormy": "🟠 **Stormy** — Conservative mode\nBot uses double z-score thresholds. Only high-conviction trades.",
+        "bull": "🟢 <b>Bull</b> — Momentum mode\nBot is buying the strongest coins and riding trends. Spot long positions.",
+        "bear": "🔴 <b>Bear</b> — Defense mode\nBot has sold to USDC and may be <b>shorting via USDC-M futures</b>. Capital is being preserved/shorted.",
+        "sideways": "🟡 <b>Sideways</b> — Mean reversion mode\nBot is buying dips and selling rips on oscillating coins.",
+        "stormy": "🟠 <b>Stormy</b> — Conservative mode\nBot uses double z-score thresholds. Only high-conviction trades.",
     }
 
     emoji = emoji_map.get(regime, "❓")
     strategy = strategy_map.get(regime, "Unknown regime")
 
-    lines = [f"🧠 **Market Regime**\n"]
-    lines.append(f"Status: {emoji} **{regime.upper()}**\n")
+    lines = [f"🧠 <b>Market Regime</b>\n"]
+    lines.append(f"Status: {emoji} <b>{html_escape(regime.upper())}</b>\n")
     lines.append(strategy)
-    lines.append(f"\n📊 ADX: `{adx:.1f}` (>25 = trending)")
+    lines.append(f"\n📊 ADX: <code>{adx:.1f}</code> (&gt;25 = trending)")
 
     # ADX interpretation
     if adx > 50:
@@ -1201,10 +1251,10 @@ def cmd_regime():
     else:
         lines.append("   → 😴 Range-bound / choppy")
 
-    lines.append(f"📉 Avg volatility: `{vol:.1f}%`")
+    lines.append(f"📉 Avg volatility: <code>{vol:.1f}%</code>")
 
     if row["btc_correlation"] is not None:
-        lines.append(f"🔗 BTC correlation: `{row['btc_correlation']:.2f}`")
+        lines.append(f"🔗 BTC correlation: <code>{row['btc_correlation']:.2f}</code>")
 
     # How long in this regime
     regime_history = conn.execute(
@@ -1226,24 +1276,25 @@ def cmd_regime():
                 duration = datetime.now() - since_dt
                 hours = duration.total_seconds() / 3600
                 dur_str = f"{hours:.1f}h" if hours < 48 else f"{hours/24:.1f}d"
-                lines.append(f"\n⏱ In this regime for: `{dur_str}`")
+                lines.append(f"\n⏱ In this regime for: <code>{html_escape(dur_str)}</code>")
             except Exception:
-                lines.append(f"\nSince: `{str(current_since)[:19]}`")
+                lines.append(f"\nSince: <code>{html_escape(str(current_since)[:19])}</code>")
 
     # ── Futures context during bear ──
     if regime == "bear":
-        lines.append("\n**🔻 Bear Mode Active:**")
+        lines.append("\n<b>🔻 Bear Mode Active:</b>")
         fut_balance = get_futures_balance()
         positions = get_futures_positions()
         if fut_balance:
-            lines.append(f"💼 Futures wallet: `${fut_balance['balance']:.2f}`")
+            lines.append(f"💼 Futures wallet: <code>${fut_balance['balance']:.2f}</code>")
         if positions:
+            bear_pos_lines = []
             for p in positions:
                 pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
-                lines.append(
-                    f"  {pnl_emoji} Short `{p['symbol']}`: "
-                    f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})"
+                bear_pos_lines.append(
+                    f"{pnl_emoji} Short {p['symbol']:<12} {p['pnl_pct']:+.1f}%  (${p['pnl_usd']:+.2f})"
                 )
+            lines.append(f"<pre>{html_escape(chr(10).join(bear_pos_lines))}</pre>")
         elif fut_balance and fut_balance["balance"] > 5:
             lines.append("  💤 Scouting for short entry...")
         else:
@@ -1254,10 +1305,12 @@ def cmd_regime():
         from collections import Counter
         counts = Counter(r["regime"] for r in regime_history)
         total = sum(counts.values())
-        lines.append(f"\n**Recent distribution:** (last {total} samples)")
+        lines.append(f"\n<b>Recent distribution:</b> (last {total} samples)")
+        dist_lines = []
         for r, c in counts.most_common():
             pct = c / total * 100
-            lines.append(f"  {emoji_map.get(r, '❓')} {r}: {pct:.0f}%")
+            dist_lines.append(f"{emoji_map.get(r, '❓')} {r:<10} {pct:.0f}%")
+        lines.append(f"<pre>{html_escape(chr(10).join(dist_lines))}</pre>")
 
     return "\n".join(lines)
 
@@ -1339,57 +1392,64 @@ def cmd_profit():
 
     # ── Build output ──
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
-    lines = [f"📊 **Performance Report**\n"]
+    lines = [f"📊 <b>Performance Report</b>\n"]
 
     # Section 1: Wallet summary
-    lines.append(f"{pnl_emoji} **${total_pnl:+.2f}** ({pnl_pct:+.1f}%)")
-    lines.append(f"   Deposited: `${total_deposited:.2f}`")
-    lines.append(f"   Current:   `${current_value:.2f}`")
-    lines.append(f"   `Spot ${spot_value:.2f}  |  Futures ${fut_wallet:.2f}`")
-    lines.append(f"   `{uptime_str} uptime  |  {len(real_trips)} hops`")
-    lines.append("")
+    lines.append(f"{pnl_emoji} <b>${total_pnl:+.2f}</b> ({pnl_pct:+.1f}%)")
+    wallet_lines = [
+        f"Deposited: ${total_deposited:.2f}",
+        f"Current:   ${current_value:.2f}",
+        f"Spot ${spot_value:.2f}  |  Futures ${fut_wallet:.2f}",
+        f"{uptime_str} uptime  |  {len(real_trips)} hops",
+    ]
+    lines.append(f"<pre>{html_escape(chr(10).join(wallet_lines))}</pre>")
 
     # Section 2: Open position
     fut_realized = get_futures_realized()
     if positions:
-        lines.append("**🔻 Open Position**")
+        lines.append("<b>🔻 Open Position</b>")
+        pos_blocks = []
         for p in positions:
             emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
-            lines.append(
-                f"   {emoji} `{p['symbol']}` {p['direction']} {p['leverage']}x\n"
-                f"   Entry: `${p['entry']:.4f}` → Mark: `${p['mark']:.4f}\n"
-                f"   **${p['pnl_usd']:+.2f}** ({p['pnl_pct']:+.1f}%)"
+            pos_blocks.append(
+                f"{emoji} {p['symbol']} {p['direction']} {p['leverage']}x\n"
+                f"Entry: ${p['entry']:.4f}  →  Mark: ${p['mark']:.4f}\n"
+                f"${p['pnl_usd']:+.2f} ({p['pnl_pct']:+.1f}%)"
             )
-        lines.append("")
+        lines.append(f"<pre>{html_escape(chr(10).join(pos_blocks))}</pre>")
     else:
-        lines.append("**🔻** 💤 No open positions\n")
+        lines.append("<b>🔻</b> 💤 No open positions\n")
 
     # Section 2b: Futures realized
     if fut_realized and fut_realized["realized"] != 0:
-        lines.append("**💰 Futures Realized**")
+        lines.append("<b>💰 Futures Realized</b>")
+        fr_lines = []
         for sym, pnl in sorted(fut_realized["positions"].items()):
             emoji = "🟢" if pnl >= 0 else "🔴"
-            lines.append(f"   {emoji} `{sym}` `${pnl:+.2f}`")
-        lines.append(f"   Funding  `${fut_realized['funding']:+.2f}`")
-        lines.append(f"   Fees     `${fut_realized['commission']:+.2f}`")
-        lines.append(f"   **Net:    `${fut_realized['net']:+.2f}`**")
-        lines.append("")
+            fr_lines.append(f"{emoji} {sym:<12} ${pnl:+.2f}")
+        fr_lines.append(f"Funding  ${fut_realized['funding']:+.2f}")
+        fr_lines.append(f"Fees     ${fut_realized['commission']:+.2f}")
+        fr_lines.append(f"Net      ${fut_realized['net']:+.2f}")
+        lines.append(f"<pre>{html_escape(chr(10).join(fr_lines))}</pre>")
 
     # Section 3: Trading breakdown
     total_decisions = wins + losses
     eff = (wins / total_decisions * 100) if total_decisions > 0 else 0
-    lines.append("**📈 Trading**")
-    lines.append(f"   `{wins}W / {losses}L / {flat} flat → {eff:.0f}%`")
-    lines.append(f"   Spot:     `${realized_from_hops:+.2f}`")
+    lines.append("<b>📈 Trading</b>")
+    trade_summary = [
+        f"{wins}W / {losses}L / {flat} flat → {eff:.0f}%",
+        f"Spot:     ${realized_from_hops:+.2f}",
+    ]
     if fut_realized:
-        lines.append(f"   Futures:  `${fut_realized['net']:+.2f}`")
+        trade_summary.append(f"Futures:  ${fut_realized['net']:+.2f}")
     if failed_trades:
-        lines.append(f"   ⚠️ `{failed_trades}` failed orders")
-    lines.append("")
+        trade_summary.append(f"⚠️ {failed_trades} failed orders")
+    lines.append(f"<pre>{html_escape(chr(10).join(trade_summary))}</pre>")
 
     # Section 4: Hop history
     if round_trips:
-        lines.append("**Hop History**")
+        lines.append("<b>Hop History</b>")
+        hop_lines = []
         for rt in round_trips[-8:]:
             if rt.get("phantom"):
                 emoji = "💰"
@@ -1400,12 +1460,12 @@ def cmd_profit():
             else:
                 emoji = "⚪"
             tag = " (deposit)" if rt.get("phantom") else ""
-            lines.append(
-                f"   {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
-                f"`${rt['pnl']:+.2f}`{tag}"
+            hop_lines.append(
+                f"{emoji} {rt['from_coin']}→{rt['to_coin']}  ${rt['pnl']:+.2f}{tag}"
             )
         if len(round_trips) > 8:
-            lines.append(f"   _...+{len(round_trips) - 8} earlier_")
+            hop_lines.append(f"...+{len(round_trips) - 8} earlier")
+        lines.append(f"<pre>{html_escape(chr(10).join(hop_lines))}</pre>")
 
     return "\n".join(lines)
 
@@ -1417,7 +1477,7 @@ def cmd_hop():
     if positions:
         # BEAR mode — just show futures short candidates
         open_short = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
-        lines = [f"🔻 **Short Candidates** (currently shorting `{open_short}`)\\n"]
+        lines = [f"🔻 <b>Short Candidates</b> (currently shorting <code>{html_escape(open_short)}</code>)\\n"]
         _append_futures_candidates(lines, positions)
         return "\\n".join(lines)
 
@@ -1491,8 +1551,8 @@ def cmd_hop():
     if not rows:
         conn.close()
         # Still show futures short candidates even without scout data
-        lines = [f"⏳ No scout data yet for `{current}` — bot needs a few minutes to build ratios.\n"]
-        lines.append("**🔻 Futures Short Candidates**\n")
+        lines = [f"⏳ No scout data yet for <code>{html_escape(current)}</code> — bot needs a few minutes to build ratios.\n"]
+        lines.append("<b>🔻 Futures Short Candidates</b>\n")
         positions = get_futures_positions()
         has_open_short = any(p["direction"] == "SHORT" for p in positions)
         try:
@@ -1515,17 +1575,17 @@ def cmd_hop():
                     c["mark_price"] = mark
                 if has_open_short:
                     open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
-                    lines.append(f"🔒 Currently shorting: `{open_sym}`\n")
+                    lines.append(f"🔒 Currently shorting: <code>{html_escape(open_sym)}</code>\n")
                 if falling:
-                    lines.append(f"**📉 Falling coins** ({len(falling)} of {len(FUTURES_ELIGIBLE)}):")
+                    lines.append(f"<b>📉 Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)}):")
                     for i, c in enumerate(falling[:5], 1):
                         icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
-                        line = f"  {icon} #{i}: `{c['coin']}` {c['perf_pct']:+.2f}%"
+                        line = f"  {icon} #{i}: <code>{c['coin']}</code> {c['perf_pct']:+.2f}%"
                         if c["funding"] is not None:
                             f_emoji = "🟢" if c["funding"] < 0 else "🔴"
                             line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
                         if c["mark_price"]:
-                            line += f" | Mark: `${c['mark_price']:.4f}`"
+                            line += f" | Mark: <code>${c['mark_price']:.4f}</code>"
                         lines.append(line)
                 else:
                     lines.append("  🟢 No futures-eligible coins falling — no short candidates")
@@ -1600,16 +1660,16 @@ def cmd_hop():
     conn.close()
 
     if not candidates:
-        return f"❌ No viable pairs for `{current}`."
+        return f"❌ No viable pairs for <code>{html_escape(current)}</code>."
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
 
-    lines = [f"🚀 **Hops from `{current}`**\n"]
-    lines.append(f"Market: `{regime}` (avg vol {avg_volatility:.1f}%)")
+    lines = [f"🚀 <b>Hops from <code>{html_escape(current)}</code></b>\n"]
+    lines.append(f"Market: <code>{html_escape(regime)}</code> (avg vol {avg_volatility:.1f}%)")
 
     cooldown_str = f"🔒 Cooldown active ({cooldown_remaining} left)" if cooldown_active else "✅ Cooldown clear"
     lines.append(cooldown_str)
-    lines.append(f"Z-score threshold: `{active_zscore_threshold:.1f}` | Momentum guard: `skip if coin drops >{MOMENTUM_CRASH_THRESHOLD}%`\n")
+    lines.append(f"Z-score threshold: <code>{active_zscore_threshold:.1f}</code> | Momentum guard: <code>skip if coin drops &gt;{MOMENTUM_CRASH_THRESHOLD}%</code>\n")
 
     lines.append("Filter checklist per candidate:")
     lines.append("  ✅ = pass | ⏳ = building data | ❌ = blocked")
@@ -1620,29 +1680,28 @@ def cmd_hop():
         fut_badge = " 🔻" if c["futures"] else ""
 
         score_icon = "✅" if c["score_ok"] else "❌"
-        score_detail = f"{c['score']:.6f}" if not c["score_ok"] else f"**{c['score']:.6f}**"
-        lines.append(f"**#{i}: `{c['to']}`**{fut_badge} {price_str} | Divergence: {c['divergence']:+.2f}%")
+        lines.append(f"<b>#{i}: <code>{c['to']}</code></b>{fut_badge}  {price_str}  |  Divergence: {c['divergence']:+.2f}%")
 
-        filters = f"  {score_icon} Score: {score_detail}"
+        filters = f"{score_icon} Score: {c['score']:.6f}"
 
         if c["zscore"] is not None:
             zs_icon = "✅" if c["zscore_ok"] else "❌"
-            filters += f"\n  {zs_icon} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed"
+            filters += f"\n{zs_icon} Z-score: {c['zscore']:.1f} / {active_zscore_threshold:.1f} needed"
         else:
-            filters += f"\n  ⏳ Z-score: collecting data..."
+            filters += f"\n⏳ Z-score: collecting data..."
 
         mom_icon = "✅" if c["momentum_ok"] else "❌"
         mom_text = "stable" if c["momentum_ok"] else "CRASHING ⚠️"
-        filters += f"\n  {mom_icon} Momentum: {mom_text}"
+        filters += f"\n{mom_icon} Momentum: {mom_text}"
 
         if c["all_clear"]:
-            filters += "\n  🟢 **TRADE READY**"
+            filters += "\n🟢 TRADE READY"
         elif cooldown_active and c["score_ok"] and c["zscore_ok"] is True and c["momentum_ok"]:
-            filters += "\n  🟡 waiting on cooldown"
+            filters += "\n🟡 waiting on cooldown"
         else:
-            filters += "\n  🔴 blocked"
+            filters += "\n🔴 blocked"
 
-        lines.append(filters)
+        lines.append(f"<pre>{html_escape(filters)}</pre>")
         if i < 5:
             lines.append("")
 
@@ -1650,24 +1709,24 @@ def cmd_hop():
     close = [c for c in candidates if not c["all_clear"] and c["score_ok"]]
     if viable:
         best = viable[0]
-        lines.append(f"\n🎯 **Next hop: `{best['to']}`** — all filters passed!")
+        lines.append(f"\n🎯 <b>Next hop: <code>{best['to']}</code></b> — all filters passed!")
     elif close:
         best = close[0]
         blocked = []
         if not best["zscore_ok"]:
-            blocked.append(f"z-score ({best['zscore']:.1f} < {active_zscore_threshold:.1f})")
+            blocked.append(f"z-score ({best['zscore']:.1f} &lt; {active_zscore_threshold:.1f})")
         if not best["momentum_ok"]:
             blocked.append("momentum crash")
         if cooldown_active:
             blocked.append("cooldown")
-        lines.append(f"\n🎯 Closest: `{best['to']}` — blocked by: {', '.join(blocked)}")
+        lines.append(f"\n🎯 Closest: <code>{best['to']}</code> — blocked by: {', '.join(blocked)}")
     else:
-        lines.append(f"\n⏸ Best: `{candidates[0]['to']}` — score needs {abs(candidates[0]['score']):.6f} more")
+        lines.append(f"\n⏸ Best: <code>{candidates[0]['to']}</code> — score needs {abs(candidates[0]['score']):.6f} more")
 
     # ── Futures Short Candidates ──
     positions = get_futures_positions()
     lines.append(f"\n{'─' * 20}")
-    lines.append("**🔻 Futures Short Candidates**")
+    lines.append("<b>🔻 Futures Short Candidates</b>")
     _append_futures_candidates(lines, positions)
 
     return "\n".join(lines)
@@ -1708,11 +1767,11 @@ def _append_futures_candidates(lines, positions):
 
             if has_open_short:
                 open_sym = next((p["symbol"] for p in positions if p["direction"] == "SHORT"), None)
-                lines.append(f"🔒 Currently shorting: `{open_sym}`")
+                lines.append(f"🔒 Currently shorting: <code>{html_escape(open_sym)}</code>")
                 lines.append("")
 
             if falling:
-                lines.append(f"**📉 Falling coins** ({len(falling)} of {len(FUTURES_ELIGIBLE)} futures-eligible):")
+                lines.append(f"<b>📉 Falling coins</b> ({len(falling)} of {len(FUTURES_ELIGIBLE)} futures-eligible):")
                 for i, c in enumerate(falling[:5], 1):
                     icon = "🔴" if c["perf_pct"] < -3 else "🟠" if c["perf_pct"] < -1 else "🟡"
 
@@ -1722,12 +1781,12 @@ def _append_futures_candidates(lines, positions):
                     )
                     badge = " 🔒 SHORTING" if is_shorted else ""
 
-                    line = f"  {icon} #{i}: `{c['coin']}` {c['perf_pct']:+.2f}%{badge}"
+                    line = f"  {icon} #{i}: <code>{c['coin']}</code> {c['perf_pct']:+.2f}%{badge}"
                     if c["funding"] is not None:
                         f_emoji = "🟢" if c["funding"] < 0 else "🔴"
                         line += f" | Funding: {f_emoji}{c['funding']*100:.4f}%"
                     if c["mark_price"]:
-                        line += f" | Mark: `${c['mark_price']:.4f}`"
+                        line += f" | Mark: <code>${c['mark_price']:.4f}</code>"
                     lines.append(line)
             else:
                 lines.append("  🟢 No futures-eligible coins are falling — no short candidates")
@@ -1748,13 +1807,17 @@ def cmd_deposit(args=""):
         conn.close()
 
         if not rows:
-            return "📋 **No deposits recorded.**\n\nUse `/deposit <amount>` to record a top-up."
+            return "📋 <b>No deposits recorded.</b>\n\nUse <code>/deposit &lt;amount&gt;</code> to record a top-up."
 
         total = sum(r["amount"] for r in rows)
-        lines = [f"📋 **Deposits** (total: `${total:.2f}`)\n"]
+        lines = [f"📋 <b>Deposits</b> (total: <code>${total:.2f}</code>)\n"]
+        dep_lines = []
         for r in rows:
             note = f" — {r['note']}" if r["note"] else ""
-            lines.append(f"  💰 `${r['amount']:.2f}` {r['currency']} ({r['source']}){note} — `{r['datetime'][:16]}`")
+            dep_lines.append(
+                f"💰 ${r['amount']:.2f} {r['currency']} ({r['source']}){note} — {r['datetime'][:16]}"
+            )
+        lines.append(f"<pre>{html_escape(chr(10).join(dep_lines))}</pre>")
         return "\n".join(lines)
 
     parts = args[0].strip().split(None, 1)
@@ -1763,7 +1826,7 @@ def cmd_deposit(args=""):
         if amount <= 0:
             return "❌ Amount must be positive."
     except ValueError:
-        return "❌ Usage: `/deposit <amount> [note]`\nExample: `/deposit 50 topped up from main wallet`"
+        return "❌ Usage: <code>/deposit &lt;amount&gt; [note]</code>\nExample: <code>/deposit 50 topped up from main wallet</code>"
 
     note = parts[1] if len(parts) > 1 else ""
 
@@ -1778,36 +1841,36 @@ def cmd_deposit(args=""):
         conn.close()
     except Exception as e:
         conn.close()
-        return f"❌ Failed to record deposit: {e}"
+        return f"❌ Failed to record deposit: {html_escape(e)}"
 
-    return f"✅ Deposited `${amount:.2f}` recorded (total: `${total:.2f}`)"
+    return f"✅ Deposited <code>${amount:.2f}</code> recorded (total: <code>${total:.2f}</code>)"
 
 
 def cmd_help():
     """List available commands."""
-    lines = ["🤖 **Available Commands**\n"]
+    lines = ["🤖 <b>Available Commands</b>\n"]
 
-    lines.append("**📊 Monitoring:**")
-    lines.append("  /status — Holdings & total portfolio (spot + futures)")
+    lines.append("<b>📊 Monitoring:</b>")
+    lines.append("  /status — Holdings &amp; total portfolio (spot + futures)")
     lines.append("  /trades — Recent trades (incl. FAILED)")
     lines.append("  /price — Current coin live price + 24h stats")
-    lines.append("  /hop — Potential next trade targets & filters")
-    lines.append("  /profit — P&L, win rate, fees, trade breakdown")
+    lines.append("  /hop — Potential next trade targets &amp; filters")
+    lines.append("  /profit — P&amp;L, win rate, fees, trade breakdown")
 
-    lines.append("\n**🧠 Market:**")
-    lines.append("  /regime — Market regime & what the bot is doing")
+    lines.append("\n<b>🧠 Market:</b>")
+    lines.append("  /regime — Market regime &amp; what the bot is doing")
     lines.append("  /coins — Monitored coins (futures-eligible marked)")
 
-    lines.append("\n**🔻 Futures:**")
-    lines.append("  /futures — Futures wallet, positions, P&L, funding")
+    lines.append("\n<b>🔻 Futures:</b>")
+    lines.append("  /futures — Futures wallet, positions, P&amp;L, funding")
     lines.append("  /kill — ⚠️ Emergency: close all shorts + transfer back")
 
-    lines.append("\n**🔧 System:**")
+    lines.append("\n<b>🔧 System:</b>")
     lines.append("  /health — DB, backups, container, API connectivity")
-    lines.append("  /config — Current bot configuration & settings")
-    lines.append("  /deposit — Record a top-up (`/deposit <amount> [note]`)")
+    lines.append("  /config — Current bot configuration &amp; settings")
+    lines.append("  /deposit — Record a top-up (<code>/deposit &lt;amount&gt; [note]</code>)")
 
-    lines.append("\n**⚙️ Coin Management:**")
+    lines.append("\n<b>⚙️ Coin Management:</b>")
     lines.append("  /addcoin TICKER — Add a coin")
     lines.append("  /removecoin TICKER — Remove a coin")
     lines.append("  /swap OLD NEW — Replace one coin with another")
@@ -1851,16 +1914,18 @@ def send_message(chat_id, text):
             json={
                 "chat_id": chat_id,
                 "text": text,
-                "parse_mode": "Markdown",
+                "parse_mode": "HTML",
             },
             timeout=15,
         )
         if r.status_code != 200:
             log.error(f"sendMessage failed: {r.status_code} {r.text[:200]}")
-            # Retry without markdown
+            # Retry without HTML markup (strip tags + unescape entities)
+            clean = re.sub(r"<[^>]+>", "", text)
+            clean = html.unescape(clean)
             r = requests.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id, "text": text.replace("`", "").replace("*", "")},
+                json={"chat_id": chat_id, "text": clean},
                 timeout=15,
             )
     except Exception as e:
