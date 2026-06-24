@@ -452,15 +452,23 @@ class FuturesManager:
             self.logger.warning(f"Failed to place server stop-loss: {e}")
 
         try:
-            # Trailing stop: 1% callback — tight enough to approximate
-            # client-side "10% of peak P&L" logic (which at typical +3-15%
-            # profit means 0.3-1.5% of entry price movement)
+            # Trailing stop: activates only after price drops below entry
+            # (short is in profit). Without activationPrice, Binance activates
+            # immediately and the 1% callback would close at a tiny loss on
+            # the first bounce. We set activationPrice = entry * (1 - activation_pct/100)
+            # so the trail only kicks in when the short is profitable.
+            activation_pct = getattr(self.config, "FUTURES_TRAIL_ACTIVATION_PCT", 3.0)
+            callback_rate = int(getattr(self.config, "FUTURES_TRAILING_STOP_PCT", 10))
+            # Clamp callback to Binance range (0.1 - 5.0)
+            callback_rate = max(1, min(5, callback_rate))
+            activation_price = round(entry_price * (1 - activation_pct / 100), 6)
             trailing = self.client.futures_create_order(
                 symbol=symbol,
                 side="BUY",
                 type="TRAILING_STOP_MARKET",
                 quantity=quantity,
-                callbackRate="1",
+                callbackRate=str(callback_rate),
+                activationPrice=str(activation_price),
                 workingType="MARK_PRICE",
                 priceProtect="true",
                 reduceOnly="true",
@@ -468,7 +476,8 @@ class FuturesManager:
             self._trailing_order_id = trailing.get("algoId", trailing.get("orderId", 0))
             self.logger.info(
                 f"Server trailing stop placed: {symbol} "
-                f"callback=1% algoId={self._trailing_order_id}"
+                f"activation={activation_price} callback={callback_rate}% "
+                f"algoId={self._trailing_order_id}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to place server trailing stop: {e}")

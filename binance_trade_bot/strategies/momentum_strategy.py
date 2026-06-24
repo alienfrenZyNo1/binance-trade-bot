@@ -571,6 +571,10 @@ class Strategy(AutoTrader):
 
     def bridge_scout(self):
         """Buy a coin with leftover bridge balance."""
+        # CRITICAL: Never buy spot coins during BEAR regime
+        if self._market_regime == "bear":
+            return
+
         current_coin = self.db.get_current_coin()
         if current_coin and self.manager.get_currency_balance(current_coin.symbol) > self.manager.get_min_notional(
             current_coin.symbol, self.config.BRIDGE.symbol

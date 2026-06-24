@@ -582,6 +582,9 @@ def cmd_status():
     regime = regime_row["regime"] if regime_row else "?"
 
     fut_value = fut_balance["balance"] if fut_balance else 0
+    # Add unrealized P&L from open positions to get true equity
+    if fut_positions:
+        fut_value += sum(p["pnl_usd"] for p in fut_positions)
     total_value = spot_value + fut_value
 
     lines = [f"🤖 <b>Bot Status</b>\n"]
@@ -739,11 +742,25 @@ def cmd_coins():
 
 def cmd_price():
     """Live price of current coin + futures context if eligible."""
-    # Regime-aware: in BEAR mode, show the shorted coin's price instead of stale spot coin
+    # Regime-aware: in BEAR mode, show the shorted coin's price
     positions = get_futures_positions()
     if positions:
         current_coin = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
     else:
+        # Check regime — if BEAR and no position, don't show stale spot coin
+        conn = get_db()
+        regime_row = conn.execute(
+            "SELECT regime FROM market_regime_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        regime = regime_row["regime"] if regime_row else ""
+        conn.close()
+
+        if regime == "bear":
+            # Show top falling futures candidates instead of stale spot coin
+            lines = ["💤 <b>No open position</b> — scouting for short entry\n"]
+            _append_futures_candidates(lines, [])
+            return "\n".join(lines)
+
         current_coin = get_current_coin()
     stats = get_24h_stats(current_coin)
 
@@ -775,7 +792,7 @@ def cmd_price():
                 f"Basis:   {basis_pct:+.3f}% (spot vs mark)",
             ]
             if funding is not None:
-                funding_desc = "shorts get paid" if funding < 0 else "shorts pay"
+                funding_desc = "shorts get paid" if funding > 0 else "shorts pay"
                 fut_lines.append(f"Funding: {funding*100:.4f}% ({funding_desc})")
             lines.append(f"<pre>{html_escape(chr(10).join(fut_lines))}</pre>")
         else:
@@ -1331,7 +1348,6 @@ def cmd_regime():
     ).fetchone()
 
     if not row:
-        conn.close()
         try:
             r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
             if r.status_code == 200:
@@ -1345,9 +1361,9 @@ def cmd_regime():
                             total_vol += abs(float(t["priceChangePercent"]))
                             cnt += 1
                             break
+                conn.close()
                 avg_vol = total_vol / cnt if cnt > 0 else 0
                 regime = "stormy" if avg_vol > 8 else "sideways"
-                conn.close()
                 return (
                     f"🧠 <b>Market Regime</b> (estimated)\n\n"
                     f"Status: <code>{html_escape(regime)}</code>\n"
@@ -1356,6 +1372,7 @@ def cmd_regime():
                 )
         except Exception:
             pass
+        conn.close()
         return "❌ No regime data yet. Bot needs a few minutes to classify the market."
 
     regime = row["regime"]
@@ -1466,10 +1483,12 @@ def cmd_profit():
     spot_value = get_portfolio_value(holdings)
     fut_balance = get_futures_balance()
     fut_wallet = fut_balance["balance"] if fut_balance else 0
-    current_value = spot_value + fut_wallet
 
     positions = get_futures_positions()
     unrealized_pnl = sum(p["pnl_usd"] for p in positions) if positions else 0.0
+
+    # True equity = spot + futures wallet + unrealized P&L
+    current_value = spot_value + fut_wallet + unrealized_pnl
 
     completed = conn.execute(
         "SELECT * FROM trade_history WHERE state = 'COMPLETE' ORDER BY id ASC"
