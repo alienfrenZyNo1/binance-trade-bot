@@ -443,12 +443,13 @@ class FuturesManager:
             # BUY = close short (reduceOnly ensures we don't accidentally go long).
             # Keep the server stop live until after the market close succeeds;
             # if close fails, protection remains intact.
-            self.client.futures_create_order(
+            close_order = self.client.futures_create_order(
                 symbol=pos.symbol,
                 side="BUY",
                 type="MARKET",
                 quantity=pos.quantity,
                 reduceOnly="true",
+                newOrderRespType="RESULT",
             )
 
             # Confirm the position is actually flat before canceling protection.
@@ -468,18 +469,31 @@ class FuturesManager:
             # Now that we are flat, cancel any leftover server-side stop orders.
             self._cancel_server_stops(pos.symbol)
 
-            # Calculate final P&L
-            mark_price = self._get_mark_price(pos.symbol)
-            if mark_price:
-                pnl_pct = ((pos.entry_price - mark_price) / pos.entry_price) * 100
-            else:
-                pnl_pct = 0.0
+            # Calculate final P&L from the actual close fill price, not the
+            # post-close mark price (which can move after execution).
+            close_price = float(close_order.get("avgPrice") or 0)
+            close_order_id = close_order.get("orderId")
+            if close_price <= 0 and close_order_id:
+                try:
+                    fetched = self.client.futures_get_order(
+                        symbol=pos.symbol,
+                        orderId=close_order_id,
+                    )
+                    close_price = float(fetched.get("avgPrice") or 0)
+                except Exception as e:
+                    self.logger.debug(f"Could not fetch close avgPrice for {pos.symbol}: {e}")
+            if close_price <= 0:
+                close_price = self._get_mark_price(pos.symbol) or pos.entry_price
+
+            pnl_pct = ((pos.entry_price - close_price) / pos.entry_price) * 100
+            pnl_usd = (pos.entry_price - close_price) * pos.quantity
 
             hold_time = time.time() - pos.opened_at
             self.logger.warning(
                 f" Futures SHORT closed: {pos.symbol} "
-                f"P&L={pnl_pct:+.1f}% held={hold_time/3600:.1f}h "
-                f"reason={reason}"
+                f"entry={pos.entry_price} close={close_price} "
+                f"P&L={pnl_pct:+.1f}% (${pnl_usd:+.2f}) "
+                f"held={hold_time/3600:.1f}h reason={reason}"
             )
 
             self._open_position = None
