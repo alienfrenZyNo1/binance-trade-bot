@@ -1606,12 +1606,25 @@ def cmd_profit():
 
 def cmd_hop():
     """Show potential next hops with full strategy filter breakdown."""
-    # Regime-aware: in BEAR mode, skip spot hops (no spot position) and go straight to futures
+    # Regime-aware: in BEAR mode, always show futures short candidates
+    # regardless of whether there's an open position
     positions = get_futures_positions()
-    if positions:
-        # BEAR mode — just show futures short candidates
-        open_short = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
-        lines = [f"\n🔻 <b>Short Candidates</b> (currently shorting <code>{html_escape(open_short)}</code>)\n"]
+
+    # Check regime
+    conn = get_db()
+    regime_row = conn.execute(
+        "SELECT regime FROM market_regime_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    regime = regime_row["regime"] if regime_row else ""
+    conn.close()
+
+    if regime == "bear" or positions:
+        # BEAR mode — show futures short candidates (with or without open position)
+        if positions:
+            open_short = positions[0]["symbol"].replace(BRIDGE_SYMBOL, "")
+            lines = [f"\n🔻 <b>Short Candidates</b> (currently shorting <code>{html_escape(open_short)}</code>)\n"]
+        else:
+            lines = [f"\n🔻 <b>Short Candidates</b> (no open position, scouting for entry)\n"]
         _append_futures_candidates(lines, positions)
         return "\n".join(lines)
 
