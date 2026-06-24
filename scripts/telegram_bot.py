@@ -523,13 +523,29 @@ def get_futures_positions():
                 else:
                     pnl_pct = 0.0
                 un_pnl = float(p.get("unRealizedProfit", 0))
+                try:
+                    liquidation = float(p.get("liquidationPrice", 0) or 0)
+                except Exception:
+                    liquidation = 0.0
+                try:
+                    notional = abs(float(p.get("notional", 0) or 0))
+                except Exception:
+                    notional = abs(mark * qty)
+                try:
+                    break_even = float(p.get("breakEvenPrice", 0) or 0)
+                except Exception:
+                    break_even = 0.0
                 positions.append({
                     "symbol": p["symbol"],
                     "direction": direction,
                     "qty": qty,
                     "entry": entry,
+                    "break_even": break_even,
                     "mark": mark,
                     "leverage": leverage,
+                    "margin_type": (p.get("marginType") or "?").upper(),
+                    "liquidation": liquidation,
+                    "notional": notional,
                     "pnl_pct": pnl_pct,
                     "pnl_usd": un_pnl,
                 })
@@ -573,6 +589,87 @@ def get_futures_mark_price(symbol):
     except Exception:
         pass
     return None
+
+
+def get_futures_algo_orders(symbol=None):
+    """Get open Binance futures algo orders (hard stop + server trailing)."""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return []
+    try:
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        r = _signed_get(f"{FAPI_PUB}/openAlgoOrders", params=params)
+        if r.status_code != 200:
+            log.warning(f"Futures openAlgoOrders API: {r.status_code} {r.text[:150]}")
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        log.warning(f"get_futures_algo_orders failed: {e}")
+        return []
+
+
+def _algo_order_type(order):
+    return order.get("orderType") or order.get("type") or "?"
+
+
+def _fmt_price(value, digits=4):
+    if value in (None, "", "-"):
+        return "-"
+    try:
+        return money(float(value), digits)
+    except Exception:
+        return "-"
+
+
+def _float_or_none(value):
+    try:
+        if value in (None, "", "-"):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _protection_rows_for_position(position, orders):
+    """Build compact protection rows for a futures position."""
+    symbol = position["symbol"]
+    entry = position["entry"] or 0
+    direction = position["direction"]
+    symbol_orders = [o for o in orders if o.get("symbol") == symbol]
+    hard = next((o for o in symbol_orders if _algo_order_type(o) == "STOP_MARKET"), None)
+    trail = next((o for o in symbol_orders if _algo_order_type(o) == "TRAILING_STOP_MARKET"), None)
+
+    rows = []
+    if hard:
+        trigger = _float_or_none(hard.get("triggerPrice") or hard.get("stopPrice"))
+        risk = "-"
+        if trigger and entry > 0:
+            if direction == "SHORT":
+                risk = pct(-abs((trigger - entry) / entry * 100), 1)
+            else:
+                risk = pct(-abs((entry - trigger) / entry * 100), 1)
+        rows.append(["Hard stop", _fmt_price(trigger), risk, "LIVE"])
+    else:
+        rows.append(["Hard stop", "-", "-", "MISSING"])
+
+    if trail:
+        activate = _float_or_none(trail.get("activatePrice") or trail.get("activationPrice"))
+        callback = _float_or_none(trail.get("callbackRate"))
+        lock = "-"
+        if activate and callback is not None and entry > 0:
+            if direction == "SHORT":
+                worst_trigger = activate * (1 + callback / 100)
+                lock = pct((entry - worst_trigger) / entry * 100, 1)
+            else:
+                worst_trigger = activate * (1 - callback / 100)
+                lock = pct((worst_trigger - entry) / entry * 100, 1)
+        cb = f" {callback:.1f}%" if callback is not None else ""
+        rows.append(["Trail arm", _fmt_price(activate), f"lock {lock}", f"LIVE{cb}"])
+    else:
+        rows.append(["Trail arm", "-", "-", "MISSING"])
+    return rows
 
 
 def get_futures_realized():
@@ -1058,59 +1155,89 @@ def cmd_futures():
     if balance is None and not positions:
         return "❌ Cannot reach futures API. Check API keys."
 
-    lines = ["🔻 <b>Futures Dashboard</b> 🐻\n"]
-
     unrealized_total = sum(p["pnl_usd"] for p in positions) if positions else 0.0
-    if balance:
-        equity = balance["balance"] + unrealized_total
-        lines.append(kv_table([
-            ["Wallet balance", money(balance["balance"])],
-            ["Unrealized P&L", money(unrealized_total, signed=True)],
-            ["Equity", money(equity)],
-            ["Available", money(balance["available"])],
-        ]))
+    wallet_balance = balance["balance"] if balance else 0.0
+    available = balance["available"] if balance else 0.0
+    equity = wallet_balance + unrealized_total
+    in_position = max(equity - available, 0.0)
+    mood = pnl_emoji(unrealized_total) if positions else "🟡"
+
+    lines = [f"🔻 <b>Futures Control Room</b> {mood}\n"]
+
+    status_text = "Live short" if any(p["direction"] == "SHORT" for p in positions) else "Scouting"
+    if positions:
+        short_names = ", ".join(p["symbol"].replace(BRIDGE_SYMBOL, "") for p in positions)
+        status_text = f"{status_text}: {short_names}"
+    else:
+        status_text = "No open position"
+
+    lines.append(kv_table([
+        ["Status", status_text],
+        ["Wallet", money(wallet_balance)],
+        ["Equity", money(equity)],
+        ["Available", money(available)],
+        ["In position", money(in_position)],
+        ["Unrealized P&L", money(unrealized_total, signed=True)],
+    ]))
+
+    all_algo_orders = get_futures_algo_orders() if positions else []
 
     if positions:
-        lines.append(section(f"📊 Open Positions ({len(positions)})"))
-        pos_rows = []
-        pnl_values = []
         for p in positions:
             funding = get_futures_funding(p["symbol"])
             funding_str = f"{funding*100:+.4f}%" if funding is not None else "-"
-            pos_rows.append([
-                p["symbol"], p["direction"], f"{p['qty']}",
-                f"{p['leverage']}x", money(p["entry"], 4), money(p["mark"], 4),
-                pct(p["pnl_pct"]), money(p["pnl_usd"], signed=True), funding_str, funding_flow(funding),
-            ])
-            pnl_values.append(p["pnl_usd"])
-        lines.append(pre_table(
-            ["SYMBOL", "DIR", "QTY", "LEV", "ENTRY", "MARK", "P&L%", "P&L$", "FUND", "FLOW"],
-            pos_rows,
-            aligns=["l", "l", "r", "r", "d", "d", "d", "d", "d", "l"],
-            pnl_values=pnl_values,
-        ))
-        lines.append("<i>Funding flow is from the short side: GET = shorts receive, PAY = shorts pay.</i>")
+            liq = money(p.get("liquidation"), 4) if p.get("liquidation") else "-"
+            break_even = money(p.get("break_even"), 4) if p.get("break_even") else "-"
+            lines.append(section(f"{pnl_emoji(p['pnl_usd'])} {p['symbol']} {p['direction']}"))
+            lines.append(kv_table([
+                ["Size", f"{p['qty']} @ {p['leverage']}x {p.get('margin_type', '?')}"],
+                ["Notional", money(p.get("notional", p["qty"] * p["mark"]))],
+                ["Entry -> mark", f"{money(p['entry'], 4)} -> {money(p['mark'], 4)}"],
+                ["Break-even", break_even],
+                ["P&L", f"{pct(p['pnl_pct'])} / {money(p['pnl_usd'], signed=True)}"],
+                ["Liquidation", liq],
+                ["Funding", f"{funding_str} / {funding_flow(funding)}"],
+            ]))
+
+            protection_rows = _protection_rows_for_position(p, all_algo_orders)
+            lines.append(section("🛡 Server Protection"))
+            lines.append(pre_table(
+                ["PROTECT", "TRIGGER", "IMPACT", "STATUS"],
+                protection_rows,
+                aligns=["l", "d", "l", "l"],
+            ))
+            if any(r[-1] == "MISSING" for r in protection_rows):
+                lines.append("⚠️ Protection mismatch detected — hard stop/trailing should be checked immediately.")
+            else:
+                lines.append("✅ Hard stop + server trailing are live on Binance.")
     else:
-        lines.append("\n💤 <b>No open futures positions.</b>")
+        lines.append("\n💤 <b>No open futures position.</b> Bot is waiting for a clean short setup.")
 
     try:
         r = requests.get(f"{API_BASE}/ticker/24hr", timeout=10)
         if r.status_code == 200:
             performers = []
+            shorted_syms = {p["symbol"] for p in positions}
             for t in r.json():
                 sym = t["symbol"]
                 for coin in FUTURES_ELIGIBLE:
                     if sym == f"{coin}{BRIDGE_SYMBOL}":
-                        performers.append((coin, float(t["priceChangePercent"])))
+                        performers.append((coin, sym, float(t["priceChangePercent"])))
                         break
-            performers.sort(key=lambda x: x[1])
+            performers.sort(key=lambda x: x[2])
             if performers:
-                lines.append(section("📉 Top Short Radar"))
+                lines.append(section("📉 Short Radar"))
                 cand_rows = []
-                for coin, perf in performers[:5]:
-                    bias = "WEAK" if perf < 0 else "GREEN"
-                    cand_rows.append([coin, pct(perf, 2), bias])
-                lines.append(pre_table(["COIN", "24H%", "BIAS"], cand_rows, aligns=["l", "d", "l"]))
+                for coin, sym, perf in performers[:4]:
+                    funding = get_futures_funding(sym)
+                    funding_str = f"{funding*100:+.4f}%" if funding is not None else "-"
+                    tag = "LIVE" if sym in shorted_syms else ("WEAK" if perf < 0 else "GREEN")
+                    cand_rows.append([coin, pct(perf, 2), funding_str, funding_flow(funding), tag])
+                lines.append(pre_table(
+                    ["COIN", "24H%", "FUND", "FLOW", "TAG"],
+                    cand_rows,
+                    aligns=["l", "d", "d", "l", "l"],
+                ))
     except Exception:
         pass
 
