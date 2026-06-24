@@ -1,3 +1,4 @@
+import logging
 import os
 import queue
 import threading
@@ -9,6 +10,8 @@ APPRISE_CONFIG_PATHS = [
     "config/apprise.yml",
     "data/apprise.yml",
 ]
+
+log = logging.getLogger(__name__)
 
 
 class NotificationHandler:
@@ -41,12 +44,19 @@ class NotificationHandler:
     def process_queue(self):
         while True:
             message, attachments = self.queue.get()
-
-            if attachments:
-                self.apobj.notify(body=message, attach=attachments)
-            else:
-                self.apobj.notify(body=message)
-            self.queue.task_done()
+            try:
+                if attachments:
+                    result = self.apobj.notify(body=message, attach=attachments)
+                else:
+                    result = self.apobj.notify(body=message)
+                if not result:
+                    log.warning("Notification delivery returned False")
+            except Exception as e:
+                # Never let a single Apprise/Telegram error kill the daemon
+                # worker thread; otherwise future alerts silently stop.
+                log.exception("Notification delivery failed: %s", e)
+            finally:
+                self.queue.task_done()
 
     def send_notification(self, message, attachments=None):
         if self.enabled:

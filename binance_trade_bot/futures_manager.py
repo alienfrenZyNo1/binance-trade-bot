@@ -6,12 +6,11 @@ USDC-M perpetual futures. When the regime shifts back to BULL/SIDEWAYS,
 it closes all shorts and returns capital to spot trading.
 
 SAFETY:
-- 1x leverage only (no liquidation risk — margin equals position size)
-- Isolated margin (one bad position can't affect others)
-- Funding rate guard (skip entry if rate is too expensive)
+- 1x leverage only (low liquidation risk at current sizing)
+- Cross margin currently required (Binance rejects ISOLATED on this account)
+- Funding rate guard (skip/exit when short funding is adverse)
 - Server-side STOP_MARKET orders (instant execution, survives crashes)
-- Server-side TRAILING_STOP_MARKET (Binance manages the trail)
-- Client-side polling as backup + funding rate monitoring
+- Client-side profit trailing + funding rate monitoring
 - Position reconciliation on every cycle
 
 REQUIRES: Binance account with USDC-M futures access (verified for IE).
@@ -125,9 +124,13 @@ class FuturesManager:
                         f"qty={qty} entry={entry} "
                         f"(recovered from exchange state)"
                     )
-                    # Cancel any leftover stops first, then place fresh ones
+                    # Cancel any leftover stops first, then place a fresh hard stop
                     self._cancel_server_stops(symbol)
-                    self._place_server_stops(symbol, qty, entry)
+                    if not self._place_server_stops(symbol, qty, entry):
+                        self.logger.error(
+                            f"Recovered {symbol} short is unprotected — closing immediately"
+                        )
+                        self._close_position("unprotected after reconciliation")
                     return
         except BinanceAPIException as e:
             self.logger.warning(f"Position reconciliation failed: {e}")
@@ -228,11 +231,12 @@ class FuturesManager:
                 )
                 return self._close_position("stop loss")
 
-            # Check funding rate on open position
+            # Check funding rate on open position.
+            # For shorts, NEGATIVE funding is adverse (shorts pay longs).
             funding = self._get_funding_rate(pos.symbol)
-            if funding is not None and funding > self.max_funding_rate * 3:
+            if funding is not None and funding < -(self.max_funding_rate * 3):
                 self.logger.warning(
-                    f"Futures funding rate high: {pos.symbol} rate={funding*100:.4f}% "
+                    f"Futures adverse funding rate: {pos.symbol} rate={funding*100:.4f}% "
                     f"— closing position to avoid bleed"
                 )
                 return self._close_position("funding rate")
@@ -282,12 +286,13 @@ class FuturesManager:
         symbol = best_short[0]
         perf = best_short[1]
 
-        # Check funding rate — don't open if it's too expensive
+        # Check funding rate — don't open if short funding is adverse.
+        # For shorts, NEGATIVE funding means shorts pay longs.
         funding = self._get_funding_rate(f"{symbol}{self.bridge_symbol}")
-        if funding is not None and funding > self.max_funding_rate:
+        if funding is not None and funding < -self.max_funding_rate:
             self.logger.info(
-                f"Futures: skipping {symbol} short — funding rate too high "
-                f"({funding*100:.4f}% > {self.max_funding_rate*100:.4f}%)"
+                f"Futures: skipping {symbol} short — adverse funding rate "
+                f"({funding*100:.4f}% < -{self.max_funding_rate*100:.4f}%)"
             )
             return 'idle'
 
@@ -360,8 +365,23 @@ class FuturesManager:
                 opened_at=time.time(),
             )
 
-            # Place server-side stop orders for instant protection
-            self._place_server_stops(futures_symbol, quantity, fill_price)
+            # Place server-side hard stop for instant crash/VPS protection.
+            # If protection cannot be confirmed, immediately flatten the short.
+            if not self._place_server_stops(futures_symbol, quantity, fill_price):
+                self.logger.error(
+                    f"Protective stop failed for {futures_symbol}; closing new short immediately"
+                )
+                try:
+                    self.client.futures_create_order(
+                        symbol=futures_symbol,
+                        side="BUY",
+                        type="MARKET",
+                        quantity=quantity,
+                        reduceOnly="true",
+                    )
+                finally:
+                    self._open_position = None
+                return 'idle'
 
             self.logger.warning(
                 f" Futures SHORT opened: {futures_symbol} "
@@ -385,10 +405,9 @@ class FuturesManager:
             return 'idle'
 
         try:
-            # Cancel server-side stops first (avoid double-close)
-            self._cancel_server_stops(pos.symbol)
-
-            # BUY = close short (reduceOnly ensures we don't accidentally go long)
+            # BUY = close short (reduceOnly ensures we don't accidentally go long).
+            # Keep the server stop live until after the market close succeeds;
+            # if close fails, protection remains intact.
             self.client.futures_create_order(
                 symbol=pos.symbol,
                 side="BUY",
@@ -396,6 +415,23 @@ class FuturesManager:
                 quantity=pos.quantity,
                 reduceOnly="true",
             )
+
+            # Confirm the position is actually flat before canceling protection.
+            time.sleep(1)
+            still_open = False
+            for p in self.client.futures_position_information(symbol=pos.symbol):
+                if p.get("symbol") == pos.symbol and abs(float(p.get("positionAmt", 0))) > 0:
+                    still_open = True
+                    break
+            if still_open:
+                self.logger.error(
+                    f"Futures close for {pos.symbol} did not flatten position; "
+                    "keeping server stop active"
+                )
+                return 'holding'
+
+            # Now that we are flat, cancel any leftover server-side stop orders.
+            self._cancel_server_stops(pos.symbol)
 
             # Calculate final P&L
             mark_price = self._get_mark_price(pos.symbol)
@@ -425,11 +461,12 @@ class FuturesManager:
     #  SERVER-SIDE STOP ORDERS (algo orders on Binance)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _place_server_stops(self, symbol: str, quantity: float, entry_price: float):
-        """Place server-side STOP_MARKET and TRAILING_STOP_MARKET orders.
+    def _place_server_stops(self, symbol: str, quantity: float, entry_price: float) -> bool:
+        """Place server-side hard STOP_MARKET protection.
 
-        These execute instantly on Binance's side — no polling delay.
-        Covers us even if the bot crashes or the VPS goes down.
+        Returns True only if the hard stop was accepted and an order/algo ID
+        was recorded. Server-side trailing is disabled; client-side trailing
+        handles profit exits.
         """
         try:
             # Hard stop-loss: fires when price goes UP by stop_loss_pct (short loses)
@@ -444,12 +481,16 @@ class FuturesManager:
                 reduceOnly="true",
             )
             self._stop_order_id = stop.get("algoId", stop.get("orderId", 0))
+            if not self._stop_order_id:
+                self.logger.error(f"Server stop placement returned no order/algo ID for {symbol}")
+                return False
             self.logger.info(
                 f"Server stop placed: {symbol} trigger={stop_price} "
                 f"(+{self.stop_loss_pct}%) algoId={self._stop_order_id}"
             )
         except Exception as e:
             self.logger.warning(f"Failed to place server stop-loss: {e}")
+            return False
 
         # Do NOT place server-side TRAILING_STOP_MARKET for now.
         # Live audit showed Binance/open_algo_orders activating the trail at
@@ -462,6 +503,7 @@ class FuturesManager:
             f"Server trailing stop skipped for {symbol}; using hard STOP_MARKET "
             "plus client-side profit trailing"
         )
+        return True
 
     def _cancel_server_stops(self, symbol: str):
         """Cancel server-side stop orders when we close manually."""
@@ -542,11 +584,16 @@ class FuturesManager:
             return None
 
     def _get_funding_rate(self, symbol: str) -> Optional[float]:
-        """Get current funding rate for a futures symbol."""
+        """Get current/predicted funding rate for a futures symbol.
+
+        Uses premiumIndex.lastFundingRate rather than funding history. For
+        shorts: positive = shorts get paid, negative = shorts pay.
+        """
         try:
-            data = self.client.futures_funding_rate(symbol=symbol, limit=1)
-            if data:
-                return float(data[0].get("fundingRate", 0))
+            data = self.client.futures_mark_price(symbol=symbol)
+            rate = data.get("lastFundingRate")
+            if rate is not None:
+                return float(rate)
         except Exception:
             pass
         return None

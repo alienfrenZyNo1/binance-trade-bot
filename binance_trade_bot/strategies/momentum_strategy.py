@@ -212,7 +212,22 @@ class Strategy(AutoTrader):
                 price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
                 if balance and price and balance * price > 5.0:
                     self.logger.info(f"Selling {current_coin} to {self.config.BRIDGE} for futures margin")
-                    self.manager.sell_alt(current_coin, self.config.BRIDGE)
+                    result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
+                    if result is None:
+                        self.logger.error(
+                            f"BEAR transition blocked: failed to sell {current_coin}; "
+                            "will not transfer to futures/open shorts"
+                        )
+                        return
+                    # Verify spot exposure is gone before opening futures shorts.
+                    remaining = self.manager.get_currency_balance(current_coin.symbol)
+                    latest_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE) or price
+                    if remaining and remaining * latest_price > 5.0:
+                        self.logger.error(
+                            f"BEAR transition blocked: still holding {remaining} {current_coin} "
+                            f"(~${remaining * latest_price:.2f}) after sell"
+                        )
+                        return
 
             # Transfer USDC to futures wallet
             bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
@@ -228,9 +243,15 @@ class Strategy(AutoTrader):
         elif old_regime == BEAR and new_regime != BEAR:
             # Moving OUT OF bear: close shorts, transfer back to spot
             self.logger.info("Regime ← BEAR: closing futures, returning to spot")
-            self.futures_manager.manage_exit()
+            close_result = self.futures_manager.manage_exit()
+            if close_result not in ('closed', 'idle'):
+                self.logger.error(
+                    f"BEAR exit blocked: futures close returned {close_result}; "
+                    "leaving funds in futures and keeping protection active"
+                )
+                return
 
-            # Transfer USDC back to spot wallet
+            # Transfer USDC back to spot wallet only after confirmed flat/idle
             futures_bal = self.futures_manager._get_futures_usdc_balance()
             if futures_bal and futures_bal > 5.0:
                 self.futures_manager.transfer_to_spot(futures_bal)
@@ -291,8 +312,13 @@ class Strategy(AutoTrader):
         del self._recently_held[coin_symbol]
         return False
 
-    def _check_rsi(self, coin_symbol, max_rsi=75):
-        """Skip very overbought coins."""
+    def _check_rsi(self, coin_symbol, max_rsi=None):
+        """Skip very overbought coins, respecting config."""
+        enabled = str(getattr(self.config, 'RSI_FILTER_ENABLED', 'yes')).lower() in ('yes', 'true', '1', 'on')
+        if not enabled:
+            return True
+        if max_rsi is None:
+            max_rsi = float(getattr(self.config, 'RSI_OVERBOUGHT', 68))
         try:
             klines = self.manager.binance_client.get_klines(
                 symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
@@ -304,10 +330,62 @@ class Strategy(AutoTrader):
             closes = [float(k[4]) for k in klines]
             rsi = _compute_rsi_func(closes, 14)
             if rsi is not None and rsi > max_rsi:
+                self.logger.info(f"Skipping {coin_symbol}: RSI {rsi:.1f} > {max_rsi:.1f}")
                 return False
             return True
         except Exception:
             return True
+
+    def _passes_momentum_buy_guard(self, coin_symbol, perf_pct):
+        """Avoid buying coins that are falling in absolute terms.
+
+        Momentum rotation should buy strength, not merely a coin that is
+        falling less badly than the current holding.  This guard applies to
+        spot rotations, re-entry from bridge, and bridge_scout purchases.
+        """
+        if perf_pct is None:
+            return False
+
+        # Require the selected coin to be positive over the strategy lookback
+        # unless explicitly disabled. This prevents buying -10% coins just
+        # because the current holding is down -20%.
+        min_target_perf = float(getattr(self.config, 'MOMENTUM_MIN_TARGET_PERF', 0.0))
+        if perf_pct <= min_target_perf:
+            self.logger.info(
+                f"Skipping {coin_symbol}: momentum {perf_pct:+.2f}% <= "
+                f"minimum {min_target_perf:+.2f}%"
+            )
+            return False
+
+        enabled = str(getattr(self.config, 'MOMENTUM_FILTER_ENABLED', 'yes')).lower() in ('yes', 'true', '1', 'on')
+        if not enabled:
+            return True
+
+        # 1h crash guard from config: skip if the latest hourly candle is
+        # down more than MOMENTUM_MAX_DROP_1H.
+        try:
+            max_drop = float(getattr(self.config, 'MOMENTUM_MAX_DROP_1H', 5.0))
+            klines = self.manager.binance_client.get_klines(
+                symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
+                interval="1h",
+                limit=2,
+            )
+            if klines and len(klines) >= 1:
+                k = klines[-1]
+                open_price = float(k[1]) if not isinstance(k, dict) else float(k['open'])
+                close_price = float(k[4]) if not isinstance(k, dict) else float(k['close'])
+                if open_price > 0:
+                    one_hour_perf = ((close_price / open_price) - 1.0) * 100
+                    if one_hour_perf < -max_drop:
+                        self.logger.info(
+                            f"Skipping {coin_symbol}: 1h crash {one_hour_perf:+.2f}% "
+                            f"< -{max_drop:.2f}%"
+                        )
+                        return False
+        except Exception as e:
+            self.logger.debug(f"Momentum crash guard failed for {coin_symbol}: {e}")
+
+        return True
 
     def _check_trailing_stop(self, current_coin, current_price):
         """Sell to bridge if price drops N% from peak."""
@@ -373,7 +451,7 @@ class Strategy(AutoTrader):
             if self._is_churn_blocked(coin.symbol):
                 continue
             perf = performance.get(coin.symbol)
-            if perf is not None and perf > best_perf:
+            if perf is not None and perf > best_perf and self._passes_momentum_buy_guard(coin.symbol, perf):
                 best_perf = perf
                 best_coin = coin
 
@@ -479,6 +557,8 @@ class Strategy(AutoTrader):
 
             target_perf = performance.get(coin.symbol)
             if target_perf is None:
+                continue
+            if not self._passes_momentum_buy_guard(coin.symbol, target_perf):
                 continue
 
             edge = target_perf - cur_perf
@@ -587,7 +667,7 @@ class Strategy(AutoTrader):
         best_perf = -float("inf")
         for coin in self.db.get_coins():
             perf = performance.get(coin.symbol)
-            if perf is not None and perf > best_perf:
+            if perf is not None and perf > best_perf and self._passes_momentum_buy_guard(coin.symbol, perf):
                 best_perf = perf
                 best_coin = coin
 
@@ -614,7 +694,8 @@ class Strategy(AutoTrader):
             self.db.set_current_coin(current_coin_symbol)
 
             if self.config.CURRENT_COIN_SYMBOL == "":
-                current_coin = self.db.get_current_coin()
-                self.logger.info(f"Purchasing {current_coin} to begin trading")
-                self.manager.buy_alt(current_coin, self.config.BRIDGE)
+                self.logger.info(
+                    "Initial coin recorded without auto-buy; first purchase waits "
+                    "for confirmed non-BEAR regime and normal scout filters"
+                )
                 self.logger.info("Ready to start trading")

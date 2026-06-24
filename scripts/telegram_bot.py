@@ -474,15 +474,21 @@ def get_futures_positions():
 
 
 def get_futures_funding(symbol):
-    """Get current funding rate for a futures symbol."""
+    """Get current/predicted funding rate for a futures symbol.
+
+    Uses premiumIndex.lastFundingRate. Positive funding = longs pay shorts,
+    so shorts get paid; negative funding = shorts pay.
+    """
     try:
         r = requests.get(
-            f"{FAPI_PUB}/fundingRate",
-            params={"symbol": symbol, "limit": 1},
+            f"{FAPI_PUB}/premiumIndex",
+            params={"symbol": symbol},
             timeout=10,
         )
-        if r.status_code == 200 and r.json():
-            return float(r.json()[0].get("fundingRate", 0))
+        if r.status_code == 200:
+            rate = r.json().get("lastFundingRate")
+            if rate is not None:
+                return float(rate)
     except Exception:
         pass
     return None
@@ -712,7 +718,15 @@ def cmd_coins():
     if positions:
         current = f"{positions[0]['symbol'].replace(BRIDGE_SYMBOL, '')} (SHORT)"
     else:
-        current = get_current_coin()
+        conn = get_db()
+        regime_row = conn.execute(
+            "SELECT regime FROM market_regime_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if regime_row and regime_row["regime"] == "bear":
+            current = "Cash (scouting shorts)"
+        else:
+            current = get_current_coin()
 
     fut_coins = [c for c in coins if c in FUTURES_ELIGIBLE]
     spot_only = [c for c in coins if c not in FUTURES_ELIGIBLE]
@@ -930,13 +944,15 @@ def cmd_futures():
     lines = ["🔻 <b>Futures Dashboard</b>\n"]
 
     # Wallet balance
+    unrealized_total = sum(p["pnl_usd"] for p in positions) if positions else 0.0
     if balance:
+        equity = balance['balance'] + unrealized_total
         bal_lines = [
             f"Wallet Balance:  ${balance['balance']:.2f}",
+            f"Unrealized P&L:  ${unrealized_total:+.2f}",
+            f"Equity:          ${equity:.2f}",
             f"Available:       ${balance['available']:.2f}",
         ]
-        if balance["pnl"] != 0:
-            bal_lines.append(f"Unrealized P&L:  ${balance['pnl']:+.2f}")
         lines.append(f"<pre>{html_escape(chr(10).join(bal_lines))}</pre>")
 
     # Open positions
@@ -1552,7 +1568,8 @@ def cmd_profit():
     wallet_lines = [
         f"Deposited: ${total_deposited:.2f}",
         f"Current:   ${current_value:.2f}",
-        f"Spot ${spot_value:.2f}  |  Futures ${fut_wallet:.2f}",
+        f"Spot ${spot_value:.2f}  |  Futures equity ${fut_wallet + unrealized_pnl:.2f}",
+        f"Futures wallet ${fut_wallet:.2f}  |  uPnL ${unrealized_pnl:+.2f}",
         f"{uptime_str} uptime  |  {len(real_trips)} hops",
     ]
     lines.append(f"<pre>{html_escape(chr(10).join(wallet_lines))}</pre>")
@@ -1961,7 +1978,8 @@ def _append_futures_candidates(lines, positions):
 
 def cmd_deposit(args=""):
     """Record a deposit. Usage: /deposit <amount> [note]"""
-    if not args or not args[0].strip():
+    argstr = args.strip() if isinstance(args, str) else " ".join(args).strip()
+    if not argstr:
         # Show current deposits
         conn = get_db()
         try:
@@ -1985,7 +2003,7 @@ def cmd_deposit(args=""):
         lines.append(f"<pre>{html_escape(table)}</pre>")
         return "\n".join(lines)
 
-    parts = args[0].strip().split(None, 1)
+    parts = argstr.split(None, 1)
     try:
         amount = float(parts[0])
         if amount <= 0:
