@@ -351,6 +351,47 @@ def get_futures_mark_price(symbol):
     return None
 
 
+def get_futures_realized():
+    """Get realized PnL, funding, and commissions from futures income history."""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return None
+    try:
+        r = _signed_get(f"{FAPI_PUB}/income")
+        if r.status_code != 200:
+            return None
+
+        income = r.json()
+        realized = 0.0
+        funding = 0.0
+        commission = 0.0
+        # Track per-position realized for breakdown
+        position_pnl = {}  # symbol → total realized
+
+        for entry in income:
+            itype = entry.get("incomeType", "")
+            amount = float(entry.get("income", 0))
+            symbol = entry.get("symbol", "")
+
+            if itype == "REALIZED_PNL":
+                realized += amount
+                position_pnl[symbol] = position_pnl.get(symbol, 0) + amount
+            elif itype == "FUNDING_FEE":
+                funding += amount
+            elif itype == "COMMISSION":
+                commission += amount
+
+        return {
+            "realized": realized,
+            "funding": funding,
+            "commission": commission,
+            "net": realized + funding + commission,
+            "positions": position_pnl,
+        }
+    except Exception as e:
+        log.warning(f"get_futures_realized failed: {e}")
+        return None
+
+
 # ── Config Reader ────────────────────────────────────────────────────────────
 
 def load_config():
@@ -1307,6 +1348,7 @@ def cmd_profit():
     lines.append("")
 
     # Section 2: Open position
+    fut_realized = get_futures_realized()
     if positions:
         lines.append("**🔻 Open Position**")
         for p in positions:
@@ -1321,8 +1363,21 @@ def cmd_profit():
                 f"   Unrealized: `${p['pnl_usd']:+.2f}` ({p['pnl_pct']:+.1f}%)"
             )
         lines.append("")
+    elif fut_realized and fut_realized["realized"] != 0:
+        lines.append("**🔻 Futures:** 💤 No open positions\n")
     else:
         lines.append("**🔻 Futures:** 💤 No open positions\n")
+
+    # Section 2b: Futures realized breakdown
+    if fut_realized and fut_realized["realized"] != 0:
+        lines.append("**💰 Futures Realized**")
+        for sym, pnl in sorted(fut_realized["positions"].items()):
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            lines.append(f"   {emoji} `{sym}`: `${pnl:+.2f}`")
+        lines.append(f"   Funding: `${fut_realized['funding']:+.2f}`")
+        lines.append(f"   Fees: `${fut_realized['commission']:+.2f}`")
+        lines.append(f"   **Net: `${fut_realized['net']:+.2f}`**")
+        lines.append("")
 
     # Section 3: Trading stats
     lines.append("**📈 Trading**")
@@ -1336,7 +1391,9 @@ def cmd_profit():
     else:
         eff = 0
     lines.append(f"   {wins}W / {losses}L / {flat} flat → {eff:.0f}% efficiency")
-    lines.append(f"   Realized from hops: `${realized_from_hops:+.2f}`")
+    lines.append(f"   Spot realized: `${realized_from_hops:+.2f}`")
+    if fut_realized:
+        lines.append(f"   Futures realized: `${fut_realized['net']:+.2f}`")
     lines.append("")
 
     # Section 4: Hop history (compact)
