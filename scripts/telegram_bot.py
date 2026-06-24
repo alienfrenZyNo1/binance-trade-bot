@@ -393,7 +393,18 @@ def cmd_status():
 
     lines = [f"🤖 **Bot Status**\n"]
     lines.append(f"🧭 Regime: `{regime.upper()}`")
-    lines.append(f"📌 Holding: `{current_coin}`")
+
+    # Regime-aware "Holding" line
+    if regime == "bear" and fut_positions:
+        pos_summary = " + ".join(
+            f"{p['symbol'].replace('USDC','')} {p['direction']}" for p in fut_positions
+        )
+        lines.append(f"📌 Holding: `{pos_summary}` (futures)")
+    elif regime == "bear":
+        lines.append(f"📌 Holding: `Cash (awaiting short signal)`")
+    else:
+        lines.append(f"📌 Holding: `{current_coin}`")
+
     lines.append(f"💰 **Total: `${total_value:.2f}`**")
     lines.append(f"   Spot: `${spot_value:.2f}` | Futures: `${fut_value:.2f}`\n")
 
