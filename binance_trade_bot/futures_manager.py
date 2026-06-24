@@ -100,7 +100,11 @@ class FuturesManager:
             self.logger.warning(f"FuturesManager init failed: {e}")
 
     def _reconcile_positions(self):
-        """Check Binance for any open short positions (e.g. from a crash)."""
+        """Check Binance for any open short positions (e.g. from a crash).
+        Also cleans up orphaned algo orders from previous positions."""
+        # First: check for any stale algo orders across all symbols
+        self._cleanup_orphaned_algo_orders()
+
         try:
             positions = self.client.futures_position_information()
             for pos in positions:
@@ -121,7 +125,8 @@ class FuturesManager:
                         f"qty={qty} entry={entry} "
                         f"(recovered from exchange state)"
                     )
-                    # Place server-side stops on the recovered position
+                    # Cancel any leftover stops first, then place fresh ones
+                    self._cancel_server_stops(symbol)
                     self._place_server_stops(symbol, qty, entry)
                     return
         except BinanceAPIException as e:
@@ -187,9 +192,9 @@ class FuturesManager:
                     f" Futures SHORT closed externally (server-side stop): {pos.symbol} "
                     f"entry={pos.entry_price}"
                 )
+                # Clean up the OTHER algo order still live on Binance
+                self._cancel_server_stops(pos.symbol)
                 self._open_position = None
-                self._stop_order_id = None
-                self._trailing_order_id = None
                 return 'closed'
 
             # Get current mark price
@@ -478,6 +483,48 @@ class FuturesManager:
         finally:
             self._stop_order_id = None
             self._trailing_order_id = None
+
+    def _cleanup_orphaned_algo_orders(self):
+        """Find and cancel algo orders that have no matching open position.
+        
+        This handles:
+        - Server stop fired → the OTHER stop is still live
+        - Bot crashed/restarted after position closed → stale orders remain
+        - Multiple restarts → duplicate orders accumulated
+        """
+        try:
+            open_algo = self.client.futures_get_open_algo_orders()
+            if not open_algo:
+                return
+
+            # Get all symbols with open positions
+            open_symbols = set()
+            for pos in self.client.futures_position_information():
+                if float(pos.get("positionAmt", 0)) != 0:
+                    open_symbols.add(pos["symbol"])
+
+            # Cancel any algo order whose symbol has no open position
+            cancelled = 0
+            for order in open_algo:
+                sym = order.get("symbol", "")
+                if sym not in open_symbols:
+                    try:
+                        self.client.futures_cancel_all_algo_open_orders(symbol=sym)
+                        cancelled += 1
+                        self.logger.info(
+                            f"Cleaned up orphaned {order.get('orderType', '?')} "
+                            f"on {sym} (no open position)"
+                        )
+                    except Exception:
+                        pass
+
+            if cancelled:
+                self.logger.info(
+                    f"Orphan cleanup: removed {cancelled} stale algo order(s) "
+                    f"across {cancelled} symbol(s)"
+                )
+        except Exception as e:
+            self.logger.warning(f"Orphan algo cleanup failed: {e}")
 
     def _check_server_stopped(self) -> bool:
         """Check if server-side stops already closed our position (e.g. bot was down)."""
