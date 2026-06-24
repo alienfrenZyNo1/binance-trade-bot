@@ -77,13 +77,19 @@ def html_escape(text):
     return html.escape(str(text), quote=False)
 
 
-def format_table(headers, rows):
+def format_table(headers, rows, aligns=None):
     """Build a clean, aligned monospace table string.
 
     Args:
         headers: list of column header strings.
         rows: list of lists; each inner list is one data row of cell values
             (numbers are coerced to str automatically).
+        aligns: optional list of per-column alignment specifiers, one per
+            column.  Accepted values:
+              'l'  – left-justify  (default; text columns)
+              'r'  – right-justify (numeric columns; aligns by last char)
+              'd'  – decimal-align (splits on last '.', pads integer part
+                     left and fractional part right so decimal points line up)
 
     Returns:
         A multi-line string with a header row, a '──' separator line, and
@@ -92,13 +98,59 @@ def format_table(headers, rows):
         must html_escape() it and wrap it in <pre>...</pre>.
     """
     ncols = len(headers)
-    # Normalise every cell to a string and pad short rows to ``ncols``.
+    if aligns is None:
+        aligns = ["l"] * ncols
+    # Pad aligns to match ncols
+    while len(aligns) < ncols:
+        aligns.append("l")
+
+    # Normalise every cell to a string and pad short rows to ncols.
     str_rows = []
     for row in rows:
         cells = [str(c) for c in row]
         while len(cells) < ncols:
             cells.append("")
         str_rows.append(cells[:ncols])
+
+    # ── Decimal-align pass: split each cell at the last '.' and pad ──
+    # For each 'd' column we split every cell into left_of_dot and
+    # right_of_dot, then left-pad the left side to the column max and
+    # right-pad the right side.  This lines up ALL decimal points perfectly
+    # regardless of sign, currency symbol, or magnitude.
+    for col_idx in range(ncols):
+        if aligns[col_idx] != "d":
+            continue
+        lefts = []
+        rights = []
+        has_dot = []
+        for row in str_rows:
+            cell = row[col_idx]
+            if "." in cell:
+                # Split on LAST dot (handles values like $1,234.56)
+                idx = cell.rfind(".")
+                lefts.append(cell[:idx])
+                rights.append(cell[idx + 1:])
+                has_dot.append(True)
+            else:
+                # No decimal — whole cell is the left part
+                lefts.append(cell)
+                rights.append("")
+                has_dot.append(False)
+
+        max_left = max((len(l) for l in lefts), default=0)
+        max_right = max((len(r) for r in rights if r), default=0)
+
+        for row_idx in range(len(str_rows)):
+            left = lefts[row_idx].rjust(max_left)
+            if has_dot[row_idx] and rights[row_idx]:
+                right = rights[row_idx].ljust(max_right)
+                str_rows[row_idx][col_idx] = left + "." + right
+            elif has_dot[row_idx]:
+                # Has dot but nothing after (e.g. "42.")
+                str_rows[row_idx][col_idx] = left + "." + " " * max_right
+            else:
+                # No decimal point — pad right side with spaces to match
+                str_rows[row_idx][col_idx] = left + " " * (max_right + 1 if max_right > 0 else 0)
 
     # Column widths from headers + data
     widths = [len(h) for h in headers]
@@ -107,13 +159,62 @@ def format_table(headers, rows):
             widths[i] = max(widths[i], len(row[i]))
 
     sep = "  "
-    header_line = sep.join(headers[i].ljust(widths[i]) for i in range(ncols))
+    # Header: right-align headers for 'r'/'d' columns, left for 'l'
+    header_cells = []
+    for i in range(ncols):
+        if aligns[i] in ("r", "d"):
+            header_cells.append(headers[i].rjust(widths[i]))
+        else:
+            header_cells.append(headers[i].ljust(widths[i]))
+    header_line = sep.join(header_cells)
     divider_line = sep.join("\u2500" * widths[i] for i in range(ncols))
-    data_lines = [
-        sep.join(row[i].ljust(widths[i]) for i in range(ncols))
-        for row in str_rows
-    ]
+
+    data_lines = []
+    for row in str_rows:
+        cells = []
+        for i in range(ncols):
+            if aligns[i] in ("r", "d"):
+                cells.append(row[i].rjust(widths[i]))
+            else:
+                cells.append(row[i].ljust(widths[i]))
+        data_lines.append(sep.join(cells))
     return "\n".join([header_line, divider_line] + data_lines)
+
+
+def _annotate_pnl_emoji(table, pnl_values):
+    """Prefix each data row of an aligned table with a 🟢/🔴 profit marker.
+
+    The circle emoji render as two monospace cells, so the header and divider
+    lines receive a matching 3-cell blank spacer ("   ") and every data row
+    gets the emoji plus a trailing space.
+
+    Args:
+        table: output string from format_table() (header, divider, data rows).
+        pnl_values: numeric P&L value for each data row, in row order.
+            >= 0 is shown green (🟢), negative is red (🔴).
+            Pass None for rows that should get a blank spacer (summary lines).
+
+    Returns:
+        A new multi-line string with the indicators prepended.
+    """
+    lines = table.split("\n")
+    spacer = "   "  # 2 cells (emoji) + 1 trailing space
+    out = []
+    for i, line in enumerate(lines):
+        if i < 2:
+            out.append(spacer + line)
+        else:
+            idx = i - 2
+            if idx < len(pnl_values):
+                val = pnl_values[idx]
+                if val is None:
+                    out.append(spacer + line)
+                else:
+                    marker = "🟢" if val >= 0 else "🔴"
+                    out.append(f"{marker} {line}")
+            else:
+                out.append(spacer + line)
+    return "\n".join(out)
 
 
 # ── DB Helpers ───────────────────────────────────────────────────────────────
@@ -517,7 +618,7 @@ def cmd_status():
         if value > 0.01:
             hold_rows.append([coin, f"{balance:.4f}", f"${price:.4f}", f"${value:.2f}"])
     if hold_rows:
-        table = format_table(["COIN", "BALANCE", "PRICE", "VALUE"], hold_rows)
+        table = format_table(["COIN", "BALANCE", "PRICE", "VALUE"], hold_rows, aligns=["l", "d", "d", "d"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Futures positions
@@ -528,9 +629,10 @@ def cmd_status():
             pos_rows.append([
                 p["symbol"], p["direction"], f"{p['qty']}",
                 f"${p['entry']:.4f}", f"${p['mark']:.4f}",
-                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})",
+                f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}",
             ])
-        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L"], pos_rows)
+        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L%", "P&L$"], pos_rows, aligns=["l", "l", "r", "d", "d", "d", "d"])
+        table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in fut_positions])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     if fut_balance and fut_balance["available"] > 0 and not fut_positions:
@@ -564,7 +666,7 @@ def cmd_trades():
                 trade_rows.append([dt, "FAIL", f"{amount:.2f}", coin, "-", "stuck!"])
             else:
                 trade_rows.append([dt, state, f"{amount:.2f}", coin, "-", "-"])
-        table = format_table(["TIME", "ACTION", "AMOUNT", "COIN", "COST", "CURRENCY"], trade_rows)
+        table = format_table(["TIME", "ACTION", "AMOUNT", "COIN", "COST", "CURRENCY"], trade_rows, aligns=["l", "l", "d", "l", "d", "l"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
         # Count states
@@ -588,9 +690,10 @@ def cmd_trades():
             pos_rows.append([
                 p["symbol"], p["direction"], f"{p['qty']}",
                 f"${p['entry']:.4f}", f"${p['mark']:.4f}",
-                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})",
+                f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}",
             ])
-        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L"], pos_rows)
+        table = format_table(["SYMBOL", "DIR", "QTY", "ENTRY", "MARK", "P&L%", "P&L$"], pos_rows, aligns=["l", "l", "r", "d", "d", "d", "d"])
+        table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in positions])
         lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("  💤 No open futures positions")
@@ -829,12 +932,14 @@ def cmd_futures():
             pos_rows.append([
                 p["symbol"], p["direction"], f"{p['qty']}",
                 f"{p['leverage']}x", f"${p['entry']:.4f}", f"${p['mark']:.4f}",
-                f"{p['pnl_pct']:+.1f}% (${p['pnl_usd']:+.2f})", funding_str,
+                f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}", funding_str,
             ])
         table = format_table(
-            ["SYMBOL", "DIR", "QTY", "LEV", "ENTRY", "MARK", "P&L", "FUNDING"],
+            ["SYMBOL", "DIR", "QTY", "LEV", "ENTRY", "MARK", "P&L%", "P&L$", "FUNDING"],
             pos_rows,
+            aligns=["l", "l", "r", "r", "d", "d", "d", "d", "d"],
         )
+        table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in positions])
         lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("💤 No open positions")
@@ -855,7 +960,7 @@ def cmd_futures():
             if performers:
                 lines.append("\n📉 <b>Top short candidates</b> (24h perf):")
                 cand_rows = [[coin, f"{perf:+.2f}%"] for coin, perf in performers[:3]]
-                table = format_table(["COIN", "24H%"], cand_rows)
+                table = format_table(["COIN", "24H%"], cand_rows, aligns=["l", "d"])
                 lines.append(f"<pre>{html_escape(table)}</pre>")
     except Exception:
         pass
@@ -1055,7 +1160,7 @@ def cmd_config():
             label = labels.get(k, k)
             trade_rows.append([label, config[k]])
     if trade_rows:
-        table = format_table(["SETTING", "VALUE"], trade_rows)
+        table = format_table(["SETTING", "VALUE"], trade_rows, aligns=["l", "l"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Risk management
@@ -1066,7 +1171,7 @@ def cmd_config():
             label = labels.get(k, k)
             risk_rows.append([label, config[k]])
     if risk_rows:
-        table = format_table(["SETTING", "VALUE"], risk_rows)
+        table = format_table(["SETTING", "VALUE"], risk_rows, aligns=["l", "l"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Futures settings
@@ -1092,7 +1197,7 @@ def cmd_config():
                     pass
             fut_rows.append([label, val])
         if fut_rows:
-            table = format_table(["SETTING", "VALUE"], fut_rows)
+            table = format_table(["SETTING", "VALUE"], fut_rows, aligns=["l", "l"])
             lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Coin count
@@ -1130,8 +1235,9 @@ def cmd_kill(args=None):
         lines.append(f"<b>{len(positions)} position(s) will be closed:</b>")
         pos_rows = []
         for p in positions:
-            pos_rows.append([p["symbol"], p["direction"], f"{p['qty']}", f"{p['pnl_pct']:+.1f}%"])
-        table = format_table(["SYMBOL", "DIR", "QTY", "P&L"], pos_rows)
+            pos_rows.append([p["symbol"], p["direction"], f"{p['qty']}", f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}"])
+        table = format_table(["SYMBOL", "DIR", "QTY", "P&L%", "P&L$"], pos_rows, aligns=["l", "l", "r", "d", "d"])
+        table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in positions])
         lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("No open positions to close.")
@@ -1322,7 +1428,8 @@ def cmd_regime():
             bear_pos_rows = []
             for p in positions:
                 bear_pos_rows.append([p["symbol"], "SHORT", f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}"])
-            table = format_table(["SYMBOL", "DIR", "P&L%", "P&L$"], bear_pos_rows)
+            table = format_table(["SYMBOL", "DIR", "P&L%", "P&L$"], bear_pos_rows, aligns=["l", "l", "d", "d"])
+            table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in positions])
             lines.append(f"<pre>{html_escape(table)}</pre>")
         elif fut_balance and fut_balance["balance"] > 5:
             lines.append("  💤 Scouting for short entry...")
@@ -1336,7 +1443,7 @@ def cmd_regime():
         total = sum(counts.values())
         lines.append(f"\n<b>Recent distribution:</b> (last {total} samples)")
         dist_rows = [[r, str(c), f"{c / total * 100:.0f}%"] for r, c in counts.most_common()]
-        table = format_table(["REGIME", "COUNT", "PCT"], dist_rows)
+        table = format_table(["REGIME", "COUNT", "PCT"], dist_rows, aligns=["l", "r", "r"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     return "\n".join(lines)
@@ -1440,9 +1547,10 @@ def cmd_profit():
             pos_rows.append([
                 p["symbol"], p["direction"], f"{p['leverage']}x",
                 f"${p['entry']:.4f}", f"${p['mark']:.4f}",
-                f"${p['pnl_usd']:+.2f} ({p['pnl_pct']:+.1f}%)",
+                f"{p['pnl_pct']:+.1f}%", f"${p['pnl_usd']:+.2f}",
             ])
-        table = format_table(["SYMBOL", "DIR", "LEV", "ENTRY", "MARK", "P&L"], pos_rows)
+        table = format_table(["SYMBOL", "DIR", "LEV", "ENTRY", "MARK", "P&L%", "P&L$"], pos_rows, aligns=["l", "l", "r", "d", "d", "d", "d"])
+        table = _annotate_pnl_emoji(table, [p["pnl_usd"] for p in positions])
         lines.append(f"<pre>{html_escape(table)}</pre>")
     else:
         lines.append("<b>🔻</b> 💤 No open positions\n")
@@ -1450,14 +1558,15 @@ def cmd_profit():
     # Section 2b: Futures realized
     if fut_realized and fut_realized["realized"] != 0:
         lines.append("<b>💰 Futures Realized</b>")
-        fr_rows = [[sym, f"${pnl:+.2f}"] for sym, pnl in sorted(fut_realized["positions"].items())]
-        table = format_table(["SYMBOL", "P&L"], fr_rows)
-        fr_summary = (
-            f"\nFunding  ${fut_realized['funding']:+.2f}\n"
-            f"Fees     ${fut_realized['commission']:+.2f}\n"
-            f"Net      ${fut_realized['net']:+.2f}"
-        )
-        lines.append(f"<pre>{html_escape(table + fr_summary)}</pre>")
+        sorted_positions = sorted(fut_realized["positions"].items())
+        fr_rows = [[sym, f"${pnl:+.2f}"] for sym, pnl in sorted_positions]
+        fr_rows.append(["Funding", f"${fut_realized['funding']:+.2f}"])
+        fr_rows.append(["Fees", f"${fut_realized['commission']:+.2f}"])
+        fr_rows.append(["Net", f"${fut_realized['net']:+.2f}"])
+        table = format_table(["SYMBOL", "P&L"], fr_rows, aligns=["l", "d"])
+        pnl_vals = [pnl for _, pnl in sorted_positions] + [None, None, None]
+        table = _annotate_pnl_emoji(table, pnl_vals)
+        lines.append(f"<pre>{html_escape(table)}</pre>")
 
     # Section 3: Trading breakdown
     total_decisions = wins + losses
@@ -1489,7 +1598,7 @@ def cmd_profit():
             hop_rows.append([rt["from_coin"], rt["to_coin"], f"${rt['pnl']:+.2f}", tag])
         if len(round_trips) > 8:
             hop_rows.append(["...", f"+{len(round_trips) - 8} earlier", "", ""])
-        table = format_table(["FROM", "TO", "P&L", "TAG"], hop_rows)
+        table = format_table(["FROM", "TO", "P&L", "TAG"], hop_rows, aligns=["l", "l", "d", "l"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
 
     return "\n".join(lines)
@@ -1610,7 +1719,7 @@ def cmd_hop():
                         funding_str = f"{c['funding']*100:.4f}%" if c["funding"] is not None else "-"
                         mark_str = f"${c['mark_price']:.4f}" if c["mark_price"] else "-"
                         cand_rows.append([c["coin"] + badge, f"{c['perf_pct']:+.2f}%", funding_str, mark_str])
-                    table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows)
+                    table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows, aligns=["l", "d", "d", "d"])
                     lines.append(f"<pre>{html_escape(table)}</pre>")
                 else:
                     lines.append("🟢 No futures-eligible coins falling — no short candidates")
@@ -1809,7 +1918,7 @@ def _append_futures_candidates(lines, positions):
                         funding_str,
                         mark_str,
                     ])
-                table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows)
+                table = format_table(["COIN", "24H%", "FUNDING", "MARK"], cand_rows, aligns=["l", "d", "d", "d"])
                 lines.append(f"<pre>{html_escape(table)}</pre>")
             else:
                 lines.append("🟢 No futures-eligible coins are falling — no short candidates")
@@ -1840,7 +1949,7 @@ def cmd_deposit(args=""):
                 f"${r['amount']:.2f}", r["currency"], r["source"],
                 r["note"] or "-", r["datetime"][:16],
             ])
-        table = format_table(["AMOUNT", "CUR", "SOURCE", "NOTE", "DATE"], dep_rows)
+        table = format_table(["AMOUNT", "CUR", "SOURCE", "NOTE", "DATE"], dep_rows, aligns=["d", "l", "l", "l", "l"])
         lines.append(f"<pre>{html_escape(table)}</pre>")
         return "\n".join(lines)
 
