@@ -8,7 +8,7 @@ from typing import List, Optional, Union
 from socketio import Client
 from socketio.exceptions import ConnectionError as SocketIOConnectionError
 from sqlalchemy import create_engine, func
-from sqlalchemy.orm import Session, scoped_session, sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Config
 from .logger import Logger
@@ -57,11 +57,20 @@ class Database:
     def db_session(self):
         """
         Creates a context with an open SQLAlchemy session.
+
+        Always rolls back on exceptions and always closes the session so a
+        failed trade/database operation cannot leak locks or leave a dirty
+        transaction open.
         """
-        session: Session = scoped_session(self.SessionMaker)
-        yield session
-        session.commit()
-        session.close()
+        session: Session = self.SessionMaker()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def set_coins(self, symbols: List[str]):
         """Sync coin list from config, but NEVER re-enable a coin that was
