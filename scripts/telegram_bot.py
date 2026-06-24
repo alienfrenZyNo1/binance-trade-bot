@@ -1206,14 +1206,12 @@ def cmd_profit():
 
     # ── Get total deposits ──
     total_deposited = 0.0
-    deposit_count = 0
     try:
         dep_rows = conn.execute("SELECT amount FROM deposits").fetchall()
-        deposit_count = len(dep_rows)
         for dr in dep_rows:
             total_deposited += dr["amount"] or 0
     except Exception:
-        pass  # deposits table may not exist yet
+        pass
 
     # ── Current value (spot + futures) ──
     holdings = get_holdings()
@@ -1222,135 +1220,132 @@ def cmd_profit():
     fut_value = fut_balance["balance"] if fut_balance else 0
     current_value = spot_value + fut_value
 
-    # ── Trade stats ──
-    total_trades = conn.execute(
-        "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'COMPLETE'"
-    ).fetchone()["cnt"]
+    # ── Completed trades ──
+    completed = conn.execute(
+        "SELECT * FROM trade_history WHERE state = 'COMPLETE' ORDER BY id ASC"
+    ).fetchall()
     failed_trades = conn.execute(
         "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'FAILED'"
     ).fetchone()["cnt"]
 
-    all_trades = conn.execute(
-        """SELECT alt_coin_id, crypto_coin_id, selling, alt_trade_amount,
-                  crypto_trade_amount, datetime
-           FROM trade_history WHERE state = 'COMPLETE'
-           ORDER BY id ASC"""
-    ).fetchall()
+    # ── USDC flow analysis ──
+    # Track total USDC spent on buys vs received from sells
+    # This is the true measure of trading efficiency
+    total_usdc_spent = sum(float(t["crypto_trade_amount"] or 0) for t in completed if not t["selling"])
+    total_usdc_received = sum(float(t["crypto_trade_amount"] or 0) for t in completed if t["selling"])
+    # Fees eat the difference between spent and received
+    est_fees = (total_usdc_spent + total_usdc_received) * 0.001
 
+    # ── Round-trip analysis ──
+    # Pair sells with subsequent buys to show trade hops
     round_trips = []
-    wins = 0
-    losses = 0
-    total_fees_paid = 0.0
-    best_trade = {"coin": "?", "pnl": -9999.0}
-    worst_trade = {"coin": "?", "pnl": 9999.0}
-
     pending_sell = None
-    for t in all_trades:
+    for t in completed:
         if t["selling"]:
             pending_sell = t
         elif pending_sell:
-            sold_usdc = pending_sell["crypto_trade_amount"] or 0
-            bought_usdc = t["crypto_trade_amount"] or 0
-            coin = t["alt_coin_id"]
-            pnl = bought_usdc - sold_usdc
-            fee_est = sold_usdc * 0.002
+            sold_usdc = float(pending_sell["crypto_trade_amount"] or 0)
+            bought_usdc = float(t["crypto_trade_amount"] or 0)
+            # The "slippage" on this hop: how much USDC was lost
+            # Positive = USDC grew (good), Negative = USDC shrank (lost to fees/slippage)
+            hop_pnl = bought_usdc - sold_usdc
+            fee_est = (sold_usdc + bought_usdc) * 0.001
 
             round_trips.append({
                 "from_coin": pending_sell["alt_coin_id"],
-                "to_coin": coin,
+                "to_coin": t["alt_coin_id"],
                 "sold_usdc": sold_usdc,
                 "bought_usdc": bought_usdc,
-                "pnl": pnl,
+                "pnl": hop_pnl,
                 "fee_est": fee_est,
                 "datetime": t["datetime"],
             })
-            total_fees_paid += fee_est
-
-            if pnl >= 0:
-                wins += 1
-            else:
-                losses += 1
-
-            if pnl > best_trade["pnl"]:
-                best_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
-            if pnl < worst_trade["pnl"]:
-                worst_trade = {"coin": f"{pending_sell['alt_coin_id']}→{coin}", "pnl": pnl}
-
             pending_sell = None
 
-    # ── P&L based on deposits ──
+    # Classify hops: meaningful win/loss vs flat (near-zero change)
+    # Flat means just hopping with no real gain or loss
+    wins = sum(1 for rt in round_trips if rt["pnl"] > 0.01)
+    losses = sum(1 for rt in round_trips if rt["pnl"] < -0.01)
+    flat = sum(1 for rt in round_trips if abs(rt["pnl"]) <= 0.01)
+
+    # ── Account-level P&L ──
     total_pnl = current_value - total_deposited
     pnl_pct = (total_pnl / total_deposited * 100) if total_deposited > 0 else 0
 
     # ── Uptime from first trade ──
-    first_trade = conn.execute(
-        "SELECT MIN(datetime) as first_dt FROM trade_history"
-    ).fetchone()
+    first_trade = conn.execute("SELECT MIN(datetime) as first_dt FROM trade_history").fetchone()
     start_time = first_trade["first_dt"] if first_trade else None
     if start_time:
         start_dt = datetime.strptime(start_time[:19], "%Y-%m-%d %H:%M:%S")
-        now_dt = datetime.now()
-        uptime_hours = (now_dt - start_dt).total_seconds() / 3600
+        uptime_hours = (datetime.now() - start_dt).total_seconds() / 3600
         uptime_str = f"{uptime_hours:.1f}h" if uptime_hours < 48 else f"{uptime_hours / 24:.1f}d"
     else:
         uptime_str = "?"
-        uptime_hours = 0
 
     conn.close()
 
+    # ── Build output ──
     pnl_emoji = "📈" if total_pnl >= 0 else "📉"
     lines = [f"📊 **Performance Report**\n"]
     lines.append(f"{pnl_emoji} **P&L: ${total_pnl:+.2f}** ({pnl_pct:+.1f}% of deposited)")
     lines.append(f"🏦 Deposited: `${total_deposited:.2f}` → Current: `${current_value:.2f}`")
-    lines.append(f"   (Spot: `${spot_value:.2f}` + Futures: `${fut_value:.2f}`)")
-    lines.append(f"⏱ Uptime: `{uptime_str}` | Trades: `{total_trades}`")
+    lines.append(f"   Spot: `${spot_value:.2f}` | Futures: `${fut_value:.2f}`")
+    lines.append(f"⏱ Uptime: `{uptime_str}` | Hops: `{len(round_trips)}`")
     if failed_trades:
-        lines.append(f"⚠️ Failed: `{failed_trades}`\n")
+        lines.append(f"⚠️ Failed orders: `{failed_trades}`\n")
     else:
         lines.append("")
 
-    if round_trips:
-        win_rate = wins / len(round_trips) * 100
-        wr_emoji = "✅" if win_rate >= 50 else "⚠️"
-        lines.append(f"**Round-trip Trades:** {len(round_trips)}")
-        lines.append(f"{wr_emoji} Win rate: `{win_rate:.0f}%` ({wins}W / {losses}L)")
-        lines.append(f"💸 Est. fees paid: `~${total_fees_paid:.2f}`\n")
+    # ── Futures ──
+    positions = get_futures_positions()
+    fut_bal = get_futures_balance()
+    lines.append("**🔻 Futures:**")
+    if fut_bal:
+        lines.append(f"   Wallet: `${fut_bal['balance']:.2f}` | Unrealized: `${fut_bal['pnl']:+.2f}`")
+    if positions:
+        for p in positions:
+            pnl_e = "🟢" if p["pnl_usd"] >= 0 else "🔴"
+            lines.append(f"   {pnl_e} `{p['symbol']}` {p['direction']} {p['pnl_pct']:+.1f}% (`${p['pnl_usd']:+.2f}`)")
+    if not positions:
+        lines.append("   💤 No open positions")
+    lines.append("")
 
-        lines.append("**Trade breakdown:**")
-        cumul_pnl = 0.0
-        for rt in round_trips[-10:]:  # Last 10
-            cumul_pnl += rt["pnl"]
-            emoji = "🟢" if rt["pnl"] >= 0 else "🔴"
+    # ── USDC efficiency summary ──
+    if completed:
+        lines.append("**USDC Flow:**")
+        lines.append(f"   Spent (buys): `${total_usdc_spent:.2f}`")
+        lines.append(f"   Received (sells): `${total_usdc_received:.2f}`")
+        lines.append(f"   Fees (est. 0.1%/side): `~${est_fees:.2f}`")
+        lines.append(f"   Locked in position: `${total_usdc_spent - total_usdc_received:.2f}`")
+        lines.append("")
+
+    # ── Trade hops ──
+    if round_trips:
+        total_decisions = wins + losses
+        win_rate = (wins / total_decisions * 100) if total_decisions > 0 else 0
+        wr_emoji = "✅" if win_rate >= 50 else "⚠️"
+
+        lines.append(f"**Hops:** {len(round_trips)}")
+        if flat:
+            lines.append(f"   {wr_emoji} Efficiency: `{win_rate:.0f}%` ({wins} gained / {losses} lost / {flat} flat)")
+        else:
+            lines.append(f"   {wr_emoji} Efficiency: `{win_rate:.0f}%` ({wins} gained / {losses} lost)")
+
+        lines.append("\n**Hop history:**")
+        for rt in round_trips[-8:]:
+            if rt["pnl"] > 0.01:
+                emoji = "🟢"
+            elif rt["pnl"] < -0.01:
+                emoji = "🔴"
+            else:
+                emoji = "⚪"
             lines.append(
                 f"  {emoji} `{rt['from_coin']}→{rt['to_coin']}` "
                 f"${rt['sold_usdc']:.2f} → ${rt['bought_usdc']:.2f} "
                 f"({rt['pnl']:+.2f})"
             )
-        if len(round_trips) > 10:
-            lines.append(f"  _...and {len(round_trips) - 10} earlier trades_")
-        lines.append(f"\n  Cumulative trade P&L: `${cumul_pnl:+.2f}`")
-
-    if best_trade["pnl"] > -9999:
-        lines.append(f"\n🏆 Best: `{best_trade['coin']}` ${best_trade['pnl']:+.2f}")
-        lines.append(f"📉 Worst: `{worst_trade['coin']}` ${worst_trade['pnl']:+.2f}")
-
-    # ── Futures P&L ──
-    positions = get_futures_positions()
-    fut_bal = get_futures_balance()
-    if positions or fut_bal:
-        lines.append(f"\n{'─' * 20}")
-        lines.append("**🔻 Futures**")
-        if fut_bal:
-            lines.append(f"💼 Wallet: `${fut_bal['balance']:.2f}` | Unrealized P&L: `${fut_bal['pnl']:+.2f}`")
-        if positions:
-            for p in positions:
-                pnl_emoji = "🟢" if p["pnl_usd"] >= 0 else "🔴"
-                lines.append(
-                    f"  {pnl_emoji} `{p['symbol']}` {p['direction']} "
-                    f"P&L: {p['pnl_pct']:+.1f}% (`${p['pnl_usd']:+.2f}`)"
-                )
-        if not positions and fut_bal:
-            lines.append("  💤 No open positions")
+        if len(round_trips) > 8:
+            lines.append(f"  _...+{len(round_trips) - 8} earlier_")
 
     return "\n".join(lines)
 
