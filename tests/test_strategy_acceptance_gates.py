@@ -121,3 +121,51 @@ def test_cli_reads_json_and_writes_leaderboard(tmp_path, capsys):
     payload = json.loads(output_path.read_text())
     assert payload["summary"]["passed"] == 1
     assert "candidate" in capsys.readouterr().out
+
+
+def test_build_research_output_adds_manifest_and_gated_leaderboard():
+    module = load_module()
+    ohlcv = {
+        "SOL": [
+            {"ts": 0, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 10},
+            {"ts": 3600_000, "open": 2, "high": 2, "low": 2, "close": 2, "volume": 12},
+        ],
+        "TIA": [
+            {"ts": 0, "open": 10, "high": 10, "low": 10, "close": 10, "volume": 5},
+            {"ts": 3600_000, "open": 11, "high": 11, "low": 11, "close": 11, "volume": 6},
+        ],
+    }
+    records = [
+        {
+            "name": "momentum-oos",
+            "strategy": "momentum_rotation",
+            "regime": "bull",
+            "oos_pnl": 7.0,
+            "baseline_pnl": 1.0,
+            "max_drawdown": 4.0,
+            "trades": 5,
+            "fee_pct": 0.8,
+            "sharpe": 0.7,
+            "params": {"momentum_lookback": 24},
+        }
+    ]
+
+    output = module.build_research_output(
+        records,
+        ohlcv_by_coin=ohlcv,
+        interval="1h",
+        bridge="USDC",
+        assumptions={"fee_rate": 0.00075, "slippage": 0.0005},
+    )
+
+    assert output["records"] == records
+    assert output["leaderboard"]["summary"] == {"total": 1, "passed": 1, "failed": 0}
+    manifest = output["manifest"]
+    assert manifest["bridge"] == "USDC"
+    assert manifest["interval"] == "1h"
+    assert manifest["symbols"] == ["SOLUSDC", "TIAUSDC"]
+    assert manifest["date_range"]["start_ts"] == 0
+    assert manifest["date_range"]["end_ts"] == 3600_000
+    assert manifest["candle_counts"] == {"SOL": 2, "TIA": 2}
+    assert manifest["assumptions"] == {"fee_rate": 0.00075, "slippage": 0.0005}
+    assert len(manifest["data_hash"]) == 64

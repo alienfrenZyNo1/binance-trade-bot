@@ -93,3 +93,30 @@ def test_run_momrot_full_backtest_still_uses_full_dataset():
 
     assert result["final"] == 800.0
     assert result["pnl"] == 700.0
+
+
+def test_run_optimization_output_includes_manifest_records_and_gated_leaderboard(tmp_path):
+    namespace = load_module_without_main()
+    run_optimization = namespace["run_optimization"]
+    ohlcv, btc, _timestamps = synthetic_ohlcv()
+    output_path = tmp_path / "best_momentum.json"
+
+    payload = run_optimization(
+        ohlcv,
+        btc,
+        max_combos=1,
+        output_path=str(output_path),
+        initial_balance=100.0,
+    )
+
+    assert output_path.exists()
+    saved = __import__("json").loads(output_path.read_text())
+    assert saved == payload
+    assert payload["manifest"]["bridge"] == "USDC"
+    assert payload["manifest"]["symbols"] == ["SOLUSDC", "TIAUSDC"]
+    assert len(payload["manifest"]["data_hash"]) == 64
+    assert payload["manifest"]["assumptions"]["initial_balance"] == 100.0
+    assert payload["records"]
+    assert payload["records"][0]["strategy"] == "momentum_rotation"
+    assert "params" in payload["records"][0]
+    assert payload["leaderboard"]["summary"]["total"] == len(payload["records"])

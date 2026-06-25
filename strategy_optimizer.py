@@ -29,6 +29,8 @@ from collections import defaultdict
 
 import importlib.util
 
+from scripts.strategy_acceptance_gates import build_research_output
+
 _spec = importlib.util.spec_from_file_location(
     "indicators", "binance_trade_bot/indicators.py"
 )
@@ -1361,6 +1363,41 @@ def monte_carlo(trade_log, initial_balance=62.0, num_sims=1000):
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
+def build_strategy_research_output(
+    records,
+    ohlcv_by_coin,
+    btc_ohlcv=None,
+    *,
+    months=None,
+    strategies=None,
+    max_combos=None,
+):
+    """Package broad optimizer results with acceptance gates and data manifest."""
+    manifest_data = dict(ohlcv_by_coin)
+    if btc_ohlcv is not None and "BTC" not in manifest_data:
+        manifest_data["BTC"] = btc_ohlcv
+    assumptions = {
+        "initial_balance": 62.0,
+        "bridge": BRIDGE,
+        "interval": "1h",
+        "months": months,
+        "strategies": list(strategies or []),
+        "max_combos": max_combos,
+        "fee_rate": BASE_PARAMS["fee_rate"],
+        "slippage": BASE_PARAMS["slippage"],
+        "train_days": 120,
+        "test_days": 60,
+    }
+    safe_records = [{k: v for k, v in record.items() if k != "trade_log"} for record in records]
+    return build_research_output(
+        safe_records,
+        ohlcv_by_coin=manifest_data,
+        interval="1h",
+        bridge=BRIDGE,
+        assumptions=assumptions,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Strategy Optimization Engine")
     parser.add_argument("--months", type=int, default=6, help="Total months of data")
@@ -1469,10 +1506,17 @@ def main():
             bh = ((data[-1]["close"] / data[0]["close"]) - 1) * 100
             print(f"  {coin:>4}: {bh:+.1f}%")
 
-    # Save results
+    # Save gated research output with manifest and leaderboard
+    research_output = build_strategy_research_output(
+        all_oos_results[:20],
+        ohlcv_by_coin,
+        btc_ohlcv,
+        months=args.months,
+        strategies=strategies,
+        max_combos=args.max_combos,
+    )
     with open("backtest_results.json", "w") as f:
-        json.dump([{k: v for k, v in r.items() if k != "trade_log"}
-                    for r in all_oos_results[:20]], f, indent=2, default=str)
+        json.dump(research_output, f, indent=2, default=str)
     print(f"\n  Results saved to backtest_results.json")
 
 

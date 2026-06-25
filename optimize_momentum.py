@@ -17,6 +17,8 @@ from pathlib import Path
 import importlib.util
 import requests
 
+from scripts.strategy_acceptance_gates import build_research_output
+
 _REPO_ROOT = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location(
     "indicators", _REPO_ROOT / "binance_trade_bot" / "indicators.py"
@@ -375,6 +377,58 @@ def build_param_grid():
     return [dict(zip(keys, vals)) for vals in itertools.product(*[grid[k] for k in keys])]
 
 
+def buy_hold_pnl(candles, start_ts=None, end_ts=None):
+    """Return buy-and-hold P&L for candles inside a requested window."""
+    window = [
+        row for row in candles
+        if (start_ts is None or row["ts"] >= start_ts) and (end_ts is None or row["ts"] <= end_ts)
+    ]
+    if len(window) < 2 or window[0]["close"] == 0:
+        return 0.0
+    return (window[-1]["close"] / window[0]["close"] - 1.0) * 100.0
+
+
+def optimizer_assumptions(initial_balance, *, interval="1h", days=None, max_combos=None, seed=None):
+    return {
+        "initial_balance": initial_balance,
+        "bridge": BRIDGE,
+        "interval": interval,
+        "days": days,
+        "max_combos": max_combos,
+        "seed": seed,
+        "fee_rate": 0.00075,
+        "slippage": 0.0005,
+        "strategy": "momentum_rotation",
+        "train_days": 120,
+        "test_days": 60,
+    }
+
+
+def make_acceptance_record(rank, result, params, *, train_pnl, baseline_pnl, initial_balance):
+    fee_pct = (result.get("fees", 0.0) / initial_balance * 100.0) if initial_balance else 0.0
+    return {
+        "name": f"momentum_rotation_rank_{rank}",
+        "strategy": "momentum_rotation",
+        "regime": "bull_sideways",
+        "params": params,
+        "train_pnl": train_pnl,
+        "oos_pnl": result["pnl"],
+        "pnl_pct": result["pnl"],
+        "baseline_pnl": baseline_pnl,
+        "baseline_pnl_pct": baseline_pnl,
+        "final": result["final"],
+        "trades": result["trades"],
+        "trade_count": result["trades"],
+        "fees": result["fees"],
+        "total_fees": result["fees"],
+        "fee_pct": fee_pct,
+        "max_dd": result["max_dd"],
+        "max_drawdown": result["max_dd"],
+        "sharpe": result.get("sharpe", 0.0),
+        "initial_balance": initial_balance,
+    }
+
+
 def run_optimization(
     ohlcv_by_coin,
     btc_data,
@@ -383,6 +437,8 @@ def run_optimization(
     output_path: str | None = "best_momentum.json",
     seed=42,
     initial_balance=DEFAULT_INITIAL_BALANCE,
+    days=None,
+    interval="1h",
 ):
     idx = build_price_index(ohlcv_by_coin)
     ts_list = _timestamps_for(ohlcv_by_coin)
@@ -434,6 +490,8 @@ def run_optimization(
     print("-" * 80)
 
     best_oos = None
+    acceptance_records = []
+    baseline_pnl = buy_hold_pnl(ohlcv_by_coin.get(DEFAULT_STARTING_COIN, []), test_start, end_ts)
     for i in range(min(10, len(train_results))):
         result = run_momrot(
             train_results[i]["params"],
@@ -455,6 +513,17 @@ def run_optimization(
         )
         result["params"] = params
         result["train_pnl"] = train_results[i]["pnl"]
+        result["oos_pnl"] = result["pnl"]
+        acceptance_records.append(
+            make_acceptance_record(
+                i + 1,
+                result,
+                params,
+                train_pnl=train_results[i]["pnl"],
+                baseline_pnl=baseline_pnl,
+                initial_balance=initial_balance,
+            )
+        )
         if best_oos is None or result["pnl"] > best_oos["pnl"]:
             best_oos = result
 
@@ -490,6 +559,20 @@ def run_optimization(
         "train_pnl": best_oos["train_pnl"],
         "oos_pnl": best_oos["pnl"],
     }
+    research_output = build_research_output(
+        acceptance_records,
+        ohlcv_by_coin=ohlcv_by_coin,
+        interval=interval,
+        bridge=BRIDGE,
+        assumptions=optimizer_assumptions(
+            initial_balance,
+            interval=interval,
+            days=days,
+            max_combos=max_combos,
+            seed=seed,
+        ),
+    )
+    payload.update(research_output)
     if output_path:
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
@@ -501,6 +584,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--months", type=int, default=6, help="History length in 30-day months")
     parser.add_argument("--days", type=int, default=None, help="Override history length in days")
+    parser.add_argument("--interval", default="1h", help="Binance kline interval")
     parser.add_argument("--max-combos", type=int, default=500, help="Maximum sampled parameter combos")
     parser.add_argument("--output", default="best_momentum.json", help="JSON output path")
     parser.add_argument("--no-output", action="store_true", help="Do not write a JSON result file")
@@ -515,7 +599,7 @@ def main(argv=None):
 
     print(f"Fetching {days} days data...")
     global ohlcv, btc_ohlcv, price_idx, timestamps
-    ohlcv, btc_ohlcv = load_market_data(days=days)
+    ohlcv, btc_ohlcv = load_market_data(days=days, interval=args.interval)
     price_idx = build_price_index(ohlcv)
     timestamps = _timestamps_for(ohlcv)
     print(f"Done: {len(timestamps)} {REF_COIN} candles")
@@ -526,6 +610,8 @@ def main(argv=None):
         max_combos=args.max_combos,
         output_path=output_path,
         seed=args.seed,
+        days=days,
+        interval=args.interval,
     )
 
 

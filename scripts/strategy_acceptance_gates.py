@@ -9,8 +9,10 @@ promoted to shadow/live mode on vibes or one lucky headline P&L.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -154,6 +156,83 @@ def build_leaderboard(records: list[dict[str, Any]], gates: dict[str, float] | N
             "passed": sum(1 for row in evaluated if row.passed),
             "failed": sum(1 for row in evaluated if not row.passed),
         },
+    }
+
+
+def _iso(ts_ms: int | None) -> str | None:
+    if ts_ms is None:
+        return None
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+
+
+def build_data_manifest(
+    ohlcv_by_coin: dict[str, list[dict[str, Any]]],
+    *,
+    interval: str = "1h",
+    bridge: str = "USDC",
+    assumptions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a reproducible manifest for the market data behind research output."""
+    normalized: dict[str, list[dict[str, float | int]]] = {}
+    timestamps: list[int] = []
+    candle_counts: dict[str, int] = {}
+
+    for coin in sorted(ohlcv_by_coin):
+        rows = sorted(ohlcv_by_coin.get(coin) or [], key=lambda row: int(row.get("ts", 0)))
+        candle_counts[coin] = len(rows)
+        normalized[coin] = []
+        for row in rows:
+            ts = int(row.get("ts", 0))
+            timestamps.append(ts)
+            normalized[coin].append(
+                {
+                    "ts": ts,
+                    "open": float(row.get("open", 0.0)),
+                    "high": float(row.get("high", 0.0)),
+                    "low": float(row.get("low", 0.0)),
+                    "close": float(row.get("close", 0.0)),
+                    "volume": float(row.get("volume", 0.0)),
+                }
+            )
+
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    start_ts = min(timestamps) if timestamps else None
+    end_ts = max(timestamps) if timestamps else None
+    return {
+        "bridge": bridge,
+        "interval": interval,
+        "symbols": [f"{coin}{bridge}" for coin in sorted(ohlcv_by_coin)],
+        "date_range": {
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "start": _iso(start_ts),
+            "end": _iso(end_ts),
+        },
+        "candle_counts": candle_counts,
+        "assumptions": assumptions or {},
+        "data_hash": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def build_research_output(
+    records: list[dict[str, Any]],
+    *,
+    ohlcv_by_coin: dict[str, list[dict[str, Any]]],
+    interval: str = "1h",
+    bridge: str = "USDC",
+    assumptions: dict[str, Any] | None = None,
+    gates: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Package raw research records with a manifest and gated leaderboard."""
+    return {
+        "manifest": build_data_manifest(
+            ohlcv_by_coin,
+            interval=interval,
+            bridge=bridge,
+            assumptions=assumptions,
+        ),
+        "records": records,
+        "leaderboard": build_leaderboard(records, gates),
     }
 
 
