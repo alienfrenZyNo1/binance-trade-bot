@@ -8,10 +8,10 @@ from typing import List, Optional, Union
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import Session, sessionmaker
 
-from .accounting import evaluate_deposit_delta
 from .config import Config
 from .logger import Logger
 from .models import *  # pylint: disable=wildcard-import
+from .repositories import BotStateRepository, DepositRepository
 
 
 class Database:
@@ -26,6 +26,8 @@ class Database:
             pool_pre_ping=True,
         )
         self.SessionMaker = sessionmaker(bind=self.engine)
+        self.bot_state = BotStateRepository(self.SessionMaker)
+        self.deposits = DepositRepository(self.SessionMaker, self.bot_state, self.logger)
         # Lazily created by socketio_connect(). Importing python-socketio at
         # module import time pulls in eventlet/zmq on this dependency set, which
         # breaks pure helper imports and test collection.
@@ -371,25 +373,11 @@ class Database:
 
     def get_bot_state(self, key, default=None):
         """Get a persisted strategy state value by key. Returns default if not found."""
-        from .models import BotState
-        session: Session
-        with self.db_session() as session:
-            entry = session.query(BotState).filter(BotState.key == key).first()
-            if entry:
-                return entry.value
-            return default
+        return self.bot_state.get(key, default)
 
     def set_bot_state(self, key, value):
         """Persist a strategy state value. Creates or updates."""
-        from .models import BotState
-        session: Session
-        with self.db_session() as session:
-            entry = session.query(BotState).filter(BotState.key == key).first()
-            if entry:
-                entry.value = str(value)
-                entry.updated_at = datetime.utcnow()
-            else:
-                session.add(BotState(key, str(value)))
+        self.bot_state.set(key, value)
 
     def suppress_next_deposit_detection(self, reason="internal transfer"):
         """Suppress one automatic spot-bridge deposit check.
@@ -398,72 +386,11 @@ class Database:
         exit). The next detector run will seed the baseline to the observed
         spot balance without recording a deposit.
         """
-        self.set_bot_state("suppress_next_usdc_deposit_detection", "True")
-        self.set_bot_state("suppress_next_usdc_deposit_reason", reason)
+        self.deposits.suppress_next_detection(reason)
 
     def detect_and_record_deposit(self, current_usdc_balance: float):
-        """Detect unexpected USDC balance increases (deposits) and record them.
-
-        Compares current USDC balance against the last known balance stored in bot_state.
-        If current balance exceeds last known by more than a small tolerance (accounts
-        for rounding, tiny airdrops, etc.), the difference is recorded as a deposit.
-        Internal transfers can suppress one detector cycle via
-        suppress_next_deposit_detection().
-
-        Returns the deposit amount recorded (0 if none).
-        """
-        MIN_DEPOSIT_THRESHOLD = 1.0  # Ignore increases under $1
-
-        last_bal_str = self.get_bot_state("last_usdc_balance", "0")
-        try:
-            last_usdc_balance = float(last_bal_str)
-        except (ValueError, TypeError):
-            last_usdc_balance = 0.0
-
-        suppress_once = str(
-            self.get_bot_state("suppress_next_usdc_deposit_detection", "False")
-        ).lower() in ("true", "1", "yes")
-        reason = self.get_bot_state("suppress_next_usdc_deposit_reason", "internal transfer")
-
-        evaluation = evaluate_deposit_delta(
-            last_balance=last_usdc_balance,
-            current_balance=current_usdc_balance,
-            suppress_once=suppress_once,
-            min_threshold=MIN_DEPOSIT_THRESHOLD,
-        )
-
-        # Update stored balance for next cycle
-        self.set_bot_state("last_usdc_balance", str(evaluation.new_baseline))
-
-        if evaluation.suppression_consumed:
-            self.set_bot_state("suppress_next_usdc_deposit_detection", "False")
-            self.set_bot_state("suppress_next_usdc_deposit_reason", "")
-            self.logger.info(
-                f"Deposit detector baseline reset after {reason}: "
-                f"{evaluation.new_baseline:.2f} USDC"
-            )
-            return 0.0
-
-        if evaluation.deposit_amount > 0:
-            increase = evaluation.deposit_amount
-            # Record the deposit
-            session: Session
-            with self.db_session() as session:
-                dep = Deposit(
-                    amount=increase,
-                    currency="USDC",
-                    source="auto",
-                    note=f"Auto-detected: balance increased from {last_usdc_balance:.2f} to {current_usdc_balance:.2f}",
-                    datetime=datetime.utcnow(),
-                )
-                session.add(dep)
-            self.logger.info(
-                f"💰 Deposit auto-detected: ${increase:.2f} USDC "
-                f"(balance {last_usdc_balance:.2f} → {current_usdc_balance:.2f})"
-            )
-            return increase
-
-        return 0.0
+        """Detect unexpected USDC balance increases and record real deposits."""
+        return self.deposits.detect_and_record(current_usdc_balance)
 
     def log_market_regime(self, regime, adx_value=None, avg_volatility=None,
                           btc_correlation=None, ema_short=None, ema_long=None):
