@@ -26,6 +26,9 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
 from binance_trade_bot.futures_transfer_policy import (
+    TransferAttemptResult,
+    TransferStatus,
+    binance_error_code,
     choose_retry_transfer_amount,
     is_insufficient_balance_error,
     safe_transfer_amount,
@@ -984,7 +987,11 @@ class FuturesManager:
             return False
 
     def transfer_to_spot(self, amount: float) -> bool:
-        """Transfer USDC from futures wallet to spot wallet.
+        """Transfer USDC from futures wallet to spot wallet."""
+        return bool(self.transfer_to_spot_result(amount))
+
+    def transfer_to_spot_result(self, amount: float) -> TransferAttemptResult:
+        """Transfer USDC from futures wallet to spot wallet and return metadata.
 
         Binance can reject an exact max-withdrawable amount with -5013 even
         when account fields show funds present. Transfer conservatively: leave
@@ -999,11 +1006,17 @@ class FuturesManager:
                 f"Futures→spot transfer skipped: {amount:.8f} {self.bridge_symbol} "
                 "is below transferable threshold after dust buffer"
             )
-            return False
+            return TransferAttemptResult(
+                status=TransferStatus.SKIPPED,
+                requested_amount=amount,
+                retryable=False,
+            )
 
         attempts = [first_amount]
+        completed_attempts = []
         last_error = None
         for idx, transfer_amount in enumerate(attempts):
+            completed_attempts.append(transfer_amount)
             try:
                 self.client.futures_account_transfer(
                     asset=self.bridge_symbol,
@@ -1011,7 +1024,12 @@ class FuturesManager:
                     type=2,  # 2 = USDT-M/USDC-M futures to spot
                 )
                 self.logger.info(f"Transferred {transfer_amount:.2f} {self.bridge_symbol} to spot")
-                return True
+                return TransferAttemptResult(
+                    status=TransferStatus.SUCCESS,
+                    requested_amount=amount,
+                    attempted_amounts=tuple(completed_attempts),
+                    transferred_amount=transfer_amount,
+                )
             except Exception as e:
                 last_error = e
                 if idx == 0 and is_insufficient_balance_error(e):
@@ -1035,9 +1053,24 @@ class FuturesManager:
                 f"leaving funds in futures ({last_error})",
                 notification=False,
             )
-        else:
-            self.logger.error(f"Transfer from futures failed: {last_error}")
-        return False
+            return TransferAttemptResult(
+                status=TransferStatus.RETRYABLE_FAILURE,
+                requested_amount=amount,
+                attempted_amounts=tuple(completed_attempts),
+                error_code=binance_error_code(last_error),
+                retryable=True,
+                error_message=str(last_error),
+            )
+
+        self.logger.error(f"Transfer from futures failed: {last_error}")
+        return TransferAttemptResult(
+            status=TransferStatus.FAILED,
+            requested_amount=amount,
+            attempted_amounts=tuple(completed_attempts),
+            error_code=binance_error_code(last_error),
+            retryable=False,
+            error_message=str(last_error),
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     #  STATUS

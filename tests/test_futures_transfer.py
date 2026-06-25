@@ -87,6 +87,32 @@ def make_manager(client):
     return FuturesManager(client, logger, config), logger
 
 
+def test_transfer_to_spot_returns_typed_result_for_success():
+    client = FakeTransferClient()
+    manager, _logger = make_manager(client)
+
+    result = manager.transfer_to_spot_result(54.69950409)
+
+    assert bool(result) is True
+    assert result.status.value == "success"
+    assert result.requested_amount == 54.69950409
+    assert result.attempted_amounts == (54.59,)
+    assert result.transferred_amount == 54.59
+    assert result.error_code is None
+    assert result.attempt_count == 1
+
+
+def test_transfer_to_spot_bool_api_delegates_to_typed_result():
+    client = FakeTransferClient()
+    manager, _logger = make_manager(client)
+
+    assert manager.transfer_to_spot(54.69950409) is True
+
+    assert client.transfers == [
+        {"asset": "USDC", "amount": 54.59, "type": 2}
+    ]
+
+
 def test_transfer_to_spot_leaves_dust_and_floors_amount_before_transfer():
     client = FakeTransferClient()
     manager, logger = make_manager(client)
