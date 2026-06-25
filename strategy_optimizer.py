@@ -130,20 +130,44 @@ class BacktestBase:
             self.ohlcv_index[coin] = {c["ts"]: c for c in candles}
         self.btc_price_index = {c["ts"]: c["close"] for c in self.btc_ohlcv}
 
-        # State
-        first_price = self.ohlcv.get(starting_coin, [{}])[0].get("close", 1.0) if self.ohlcv.get(starting_coin) else 1.0
-        self.balance = initial_balance / first_price if first_price else initial_balance
+        self.starting_coin = starting_coin
+        self._last_processed_ts = None
+
+        # Runtime state is initialized from the actual run window start in
+        # run().  This avoids train/OOS contamination where a windowed backtest
+        # accidentally sizes the opening position at the full dataset's first
+        # candle.
+        self._reset_runtime_state(self.timestamps[0] if self.timestamps else None)
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+
+    def _price_for_ts(self, coin, ts, fallback=1.0):
+        if ts is None:
+            candles = self.ohlcv.get(coin) or []
+            return candles[0].get("close", fallback) if candles else fallback
+        price = self.price_index.get(coin, {}).get(ts)
+        if price is not None:
+            return price
+        # Use the latest known close before the requested timestamp.  This keeps
+        # synthetic tests and real windows stable if a symbol is missing one bar.
+        candles = self.ohlcv.get(coin) or []
+        prior = [c["close"] for c in candles if c["ts"] <= ts]
+        return prior[-1] if prior else fallback
+
+    def _reset_runtime_state(self, start_ts=None):
+        first_price = self._price_for_ts(self.starting_coin, start_ts)
+        self.balance = self.initial_balance / first_price if first_price else self.initial_balance
         self.bridge_reserve = 0.0
-        self.current_coin = starting_coin
+        self.current_coin = self.starting_coin
         self.last_trade_ts = None
         self.trade_count = 0
         self.fee_total = 0.0
-        self.peak_value = initial_balance
+        self.peak_value = self.initial_balance
         self.max_drawdown = 0.0
 
         # Trailing stop
-        self.entry_price = None
-        self.peak_price = None
+        self.entry_price = first_price
+        self.peak_price = first_price
 
         # Anti-churn
         self.recently_held = {}
@@ -160,8 +184,7 @@ class BacktestBase:
         # Stats
         self.trade_log = []
         self.equity_curve = []
-
-    # ── Helpers ──────────────────────────────────────────────────────────
+        self._last_processed_ts = None
 
     def portfolio_value(self, ts):
         if self.current_coin == BRIDGE:
@@ -423,12 +446,17 @@ class BacktestBase:
 
     def run(self, start_ts=None, end_ts=None):
         """Run backtest, optionally over a time window."""
+        started = False
         for ts in self.timestamps:
             if start_ts and ts < start_ts:
-                # Still update ratios even before trading starts
                 continue
             if end_ts and ts > end_ts:
                 break
+            if not started:
+                # Size the initial holding at the first tradable candle in this
+                # run window, not at the full dataset's first candle.
+                self._reset_runtime_state(ts)
+                started = True
 
             val = self.portfolio_value(ts)
             self.peak_value = max(self.peak_value, val)
@@ -437,12 +465,15 @@ class BacktestBase:
                 self.max_drawdown = max(self.max_drawdown, dd)
 
             self.equity_curve.append((ts, val))
+            self._last_processed_ts = ts
             self.scout(ts)
 
         return self.get_results()
 
     def get_results(self):
-        last_ts = self.timestamps[-1] if self.timestamps else 0
+        last_ts = self._last_processed_ts
+        if last_ts is None:
+            last_ts = self.equity_curve[-1][0] if self.equity_curve else (self.timestamps[-1] if self.timestamps else 0)
         if self.current_coin == BRIDGE:
             final_value = self.balance + self.bridge_reserve
         else:
