@@ -189,3 +189,46 @@ def test_evaluate_regime_v2_history_can_emit_tuned_scorecard_results():
     assert "regime_v2_tuned" in output["sequence"]
     assert "regime_v2_tuned" in {row["name"] for row in output["leaderboard"]["by_metric"]["label_accuracy"]}
     assert "v2_tuned_regime" in output["records"][-1]
+
+
+def test_route_return_models_regime_actions_after_costs():
+    module = load_module()
+
+    assert module.route_window_return(module.BULL, future_basket_ret=4.0, future_btc_ret=2.0, fee_bps=10) > 3.8
+    assert module.route_window_return(module.SIDEWAYS, future_basket_ret=4.0, future_btc_ret=2.0, fee_bps=10) == 0.0
+    assert module.route_window_return(module.STORMY, future_basket_ret=-8.0, future_btc_ret=-6.0, fee_bps=10) == 0.0
+    assert module.route_window_return(module.BEAR, future_basket_ret=-4.0, future_btc_ret=-3.0, fee_bps=10) > 0.0
+
+
+def test_build_route_outcomes_compounds_equity_and_drawdown():
+    module = load_module()
+    records = [
+        {"legacy_regime": module.BULL, "v2_smoothed": module.SIDEWAYS, "future_basket_ret": -5.0, "future_btc_ret": -4.0},
+        {"legacy_regime": module.BULL, "v2_smoothed": module.BULL, "future_basket_ret": 3.0, "future_btc_ret": 1.0},
+    ]
+
+    outcomes = module.build_route_outcomes(records, fee_bps=10)
+
+    assert outcomes["legacy_sol"]["total_return_pct"] < 0
+    assert outcomes["regime_v2"]["total_return_pct"] > outcomes["legacy_sol"]["total_return_pct"]
+    assert outcomes["regime_v2"]["max_drawdown_pct"] <= outcomes["legacy_sol"]["max_drawdown_pct"]
+    assert outcomes["cash"]["total_return_pct"] == 0.0
+
+
+def test_evaluate_regime_v2_history_includes_route_outcome_leaderboard():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_scorecard=True,
+        train_fraction=0.5,
+    )
+
+    assert "route_outcomes" in output
+    assert "route_outcomes" in output["leaderboard"]["by_metric"]
+    assert {"cash", "buy_and_hold_basket", "legacy_sol", "regime_v2"}.issubset(output["route_outcomes"])
+    assert "total_return_pct" in output["route_outcomes"]["regime_v2"]
