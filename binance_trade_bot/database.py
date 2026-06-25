@@ -46,6 +46,9 @@ class Database:
             logger.debug("SQLite WAL mode enabled")
 
     def socketio_connect(self):
+        if not getattr(self.config, "SOCKETIO_UPDATES_ENABLED", False):
+            return False
+
         if self.socketio_client is None:
             try:
                 from socketio import Client

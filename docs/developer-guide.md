@@ -68,6 +68,7 @@ Important values/quirks:
 | futures margin | `FUTURES_MARGIN_TYPE=CROSS` by default |
 | regime confirmation | `REGIME_CONFIRMATION_CYCLES=3` default |
 | notification guard | duplicate dedupe + 12/minute cap |
+| Socket.IO dashboard updates | `SOCKETIO_UPDATES_ENABLED=no` by default; enable only when the legacy API dashboard sidecar is actually running |
 
 ## Testing
 
