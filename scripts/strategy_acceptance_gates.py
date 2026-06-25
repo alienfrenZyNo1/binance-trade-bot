@@ -23,6 +23,8 @@ DEFAULT_GATES = {
     "min_trades": 3,
     "max_fee_pct": 15.0,
     "min_sharpe": 0.0,
+    "min_passing_windows": 0,
+    "min_window_pass_rate_pct": 0.0,
 }
 
 
@@ -73,6 +75,11 @@ def normalize_record(record: dict[str, Any]) -> dict[str, float | int | str]:
     trades = int(_num(record, "trade_count", "trades", default=0.0))
     max_drawdown = _num(record, "max_drawdown", "max_dd", default=100.0)
     sharpe = _num(record, "sharpe", default=0.0)
+    robustness_any = record.get("robustness")
+    robustness: dict[str, Any] = robustness_any if isinstance(robustness_any, dict) else {}
+    passing_windows = int(_num(robustness, "passing_windows", default=0.0))
+    window_count = int(_num(robustness, "window_count", default=0.0))
+    window_pass_rate = _num(robustness, "pass_rate_pct", default=0.0)
 
     return {
         "name": _name(record),
@@ -84,6 +91,9 @@ def normalize_record(record: dict[str, Any]) -> dict[str, float | int | str]:
         "trades": trades,
         "fee_pct": fee_pct,
         "sharpe": sharpe,
+        "passing_windows": passing_windows,
+        "window_count": window_count,
+        "window_pass_rate_pct": window_pass_rate,
     }
 
 
@@ -106,6 +116,15 @@ def evaluate_strategy(record: dict[str, Any], gates: dict[str, float] | None = N
         failures.append(f"fees {metrics['fee_pct']:.2f}% > {gates['max_fee_pct']:.2f}%")
     if float(metrics["sharpe"]) < gates["min_sharpe"]:
         failures.append(f"sharpe {metrics['sharpe']:.2f} < {gates['min_sharpe']:.2f}")
+    if int(metrics["passing_windows"]) < int(gates["min_passing_windows"]):
+        failures.append(
+            f"passing windows {metrics['passing_windows']} < {int(gates['min_passing_windows'])}"
+        )
+    if float(metrics["window_pass_rate_pct"]) < gates["min_window_pass_rate_pct"]:
+        failures.append(
+            f"window pass rate {metrics['window_pass_rate_pct']:.2f}% < "
+            f"{gates['min_window_pass_rate_pct']:.2f}%"
+        )
 
     # Ranking score deliberately penalizes drawdown/fees so a high-P&L but ugly
     # strategy doesn't automatically top the leaderboard.
@@ -113,6 +132,7 @@ def evaluate_strategy(record: dict[str, Any], gates: dict[str, float] | None = N
         float(metrics["pnl_pct"])
         + float(metrics["vs_baseline_pct"]) * 0.5
         + float(metrics["sharpe"]) * 5.0
+        + float(metrics["window_pass_rate_pct"]) * 0.05
         - float(metrics["max_drawdown_pct"]) * 0.35
         - float(metrics["fee_pct"]) * 0.5
     )
@@ -246,6 +266,12 @@ def parse_args(argv=None):
     parser.add_argument("--min-trades", type=int, default=int(DEFAULT_GATES["min_trades"]))
     parser.add_argument("--max-fee-pct", type=float, default=DEFAULT_GATES["max_fee_pct"])
     parser.add_argument("--min-sharpe", type=float, default=DEFAULT_GATES["min_sharpe"])
+    parser.add_argument("--min-passing-windows", type=int, default=int(DEFAULT_GATES["min_passing_windows"]))
+    parser.add_argument(
+        "--min-window-pass-rate-pct",
+        type=float,
+        default=DEFAULT_GATES["min_window_pass_rate_pct"],
+    )
     return parser.parse_args(argv)
 
 
@@ -264,6 +290,8 @@ def main(argv=None):
         "min_trades": args.min_trades,
         "max_fee_pct": args.max_fee_pct,
         "min_sharpe": args.min_sharpe,
+        "min_passing_windows": args.min_passing_windows,
+        "min_window_pass_rate_pct": args.min_window_pass_rate_pct,
     }
     leaderboard = build_leaderboard(records, gates)
     text = json.dumps(leaderboard, indent=2, sort_keys=True)
