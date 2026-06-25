@@ -222,6 +222,20 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             os.environ.get("FUTURES_CHECK_INTERVAL") or config.get(USER_CFG_SECTION, "futures_check_interval", fallback="60")
         )
 
+        # Canary capital guard — conservative real-money rollout caps. Disabled by default.
+        self.CANARY_MODE_ENABLED = (
+            os.environ.get("CANARY_MODE_ENABLED") or config.get(USER_CFG_SECTION, "canary_mode_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+        self.CANARY_MAX_SPOT_TRADE_USDC = float(
+            os.environ.get("CANARY_MAX_SPOT_TRADE_USDC") or config.get(USER_CFG_SECTION, "canary_max_spot_trade_usdc", fallback="0")
+        )
+        self.CANARY_FUTURES_MAX_MARGIN_PCT = float(
+            os.environ.get("CANARY_FUTURES_MAX_MARGIN_PCT") or config.get(USER_CFG_SECTION, "canary_futures_max_margin_pct", fallback="0")
+        )
+        self.CANARY_MAX_FUTURES_MARGIN_USDC = float(
+            os.environ.get("CANARY_MAX_FUTURES_MARGIN_USDC") or config.get(USER_CFG_SECTION, "canary_max_futures_margin_usdc", fallback="0")
+        )
+
         # Phase D: Trailing stop-loss
         self.TRAILING_STOP_ENABLED = (
             os.environ.get("TRAILING_STOP_ENABLED") or config.get(USER_CFG_SECTION, "trailing_stop_enabled", fallback="yes")

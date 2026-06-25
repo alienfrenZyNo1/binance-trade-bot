@@ -8,6 +8,7 @@ from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache, cached
 
 from .binance_stream_manager import BinanceCache, BinanceOrder, BinanceStreamManager, OrderGuard
+from .canary_capital_guard import cap_spot_trade_balance
 from .config import Config
 from .database import Database
 from .logger import Logger
@@ -418,6 +419,13 @@ class BinanceAPIManager:
         # Dynamic position sizing: cap the amount deployed
         if max_target_balance is not None:
             target_balance = min(target_balance, max_target_balance)
+        canary_cap = cap_spot_trade_balance(target_balance, self.config)
+        if canary_cap.capped:
+            self.logger.warning(
+                f"{canary_cap.reason}: limiting spot buy from ${canary_cap.original_balance:.2f} "
+                f"to ${canary_cap.allowed_balance:.2f}"
+            )
+        target_balance = canary_cap.allowed_balance
         pair_info = self.binance_client.get_symbol_info(origin_symbol + target_symbol)
         
         # Maker order support: use best bid for passive fill (0.025% fee vs 0.075%)

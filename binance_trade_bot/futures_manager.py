@@ -25,14 +25,26 @@ from typing import Dict, List, Optional, Tuple
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
-from binance_trade_bot.futures_transfer_policy import (
-    TransferAttemptResult,
-    TransferStatus,
-    binance_error_code,
-    choose_retry_transfer_amount,
-    is_insufficient_balance_error,
-    safe_transfer_amount,
-)
+try:
+    from .futures_transfer_policy import (
+        TransferAttemptResult,
+        TransferStatus,
+        binance_error_code,
+        choose_retry_transfer_amount,
+        is_insufficient_balance_error,
+        safe_transfer_amount,
+    )
+    from .canary_capital_guard import cap_futures_margin, canary_status_summary
+except ImportError:  # pragma: no cover - supports direct spec loading in legacy tests
+    from binance_trade_bot.futures_transfer_policy import (
+        TransferAttemptResult,
+        TransferStatus,
+        binance_error_code,
+        choose_retry_transfer_amount,
+        is_insufficient_balance_error,
+        safe_transfer_amount,
+    )
+    from binance_trade_bot.canary_capital_guard import cap_futures_margin, canary_status_summary
 
 
 # Coins with USDC-M perpetual futures on Binance (verified via API)
@@ -183,7 +195,8 @@ class FuturesManager:
                 f"Margin mode: {self.margin_type} | "
                 f"Max margin: {self.max_margin_pct*100:.0f}% | "
                 f"Stop: {self.stop_loss_pct}% | "
-                f"Open positions: {1 if self._open_position else 0}"
+                f"Open positions: {1 if self._open_position else 0} | "
+                f"{canary_status_summary(self.config)}"
             )
         except Exception as e:
             self.logger.warning(f"FuturesManager init failed: {e}")
@@ -384,7 +397,13 @@ class FuturesManager:
             self.logger.debug(f"Futures: insufficient USDC for margin ({usdc_balance})")
             return 'idle'
 
-        margin = usdc_balance * self.max_margin_pct
+        cap = cap_futures_margin(usdc_balance, self.max_margin_pct, self.config)
+        margin = cap.allowed_margin
+        if cap.capped:
+            self.logger.warning(
+                f"{cap.reason}: limiting futures margin from ${cap.original_margin:.2f} "
+                f"to ${cap.allowed_margin:.2f}"
+            )
         if margin < 5.0:
             return 'idle'
 

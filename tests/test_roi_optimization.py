@@ -360,7 +360,9 @@ class TestConfigValidation:
         # Ensure env vars don't interfere
         for key in ['USE_MAKER_ORDERS', 'DYNAMIC_POSITION_ENABLED', 'BEAR_POSITION_SIZE',
                      'BB_SQUEEZE_ENABLED', 'CORRELATION_FILTER_ENABLED', 'BTC_CORRELATION_ENABLED',
-                     'MIN_PROFIT_THRESHOLD', 'CHURN_BLOCK_SECONDS']:
+                     'MIN_PROFIT_THRESHOLD', 'CHURN_BLOCK_SECONDS', 'CANARY_MODE_ENABLED',
+                     'CANARY_MAX_SPOT_TRADE_USDC', 'CANARY_FUTURES_MAX_MARGIN_PCT',
+                     'CANARY_MAX_FUTURES_MARGIN_USDC']:
             os.environ.pop(key, None)
 
         from binance_trade_bot.config import Config
@@ -406,6 +408,16 @@ class TestConfigValidation:
         assert hasattr(c, 'RSI_FILTER_ENABLED')
         assert hasattr(c, 'RSI_OVERBOUGHT')
         assert 0 < c.RSI_OVERBOUGHT <= 100
+
+        # Canary capital guard defaults are disabled/no-op
+        assert hasattr(c, 'CANARY_MODE_ENABLED')
+        assert c.CANARY_MODE_ENABLED is False
+        assert hasattr(c, 'CANARY_MAX_SPOT_TRADE_USDC')
+        assert c.CANARY_MAX_SPOT_TRADE_USDC == 0.0
+        assert hasattr(c, 'CANARY_FUTURES_MAX_MARGIN_PCT')
+        assert c.CANARY_FUTURES_MAX_MARGIN_PCT == 0.0
+        assert hasattr(c, 'CANARY_MAX_FUTURES_MARGIN_USDC')
+        assert c.CANARY_MAX_FUTURES_MARGIN_USDC == 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
