@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from .accounting import evaluate_deposit_delta
-from .models import BotState, Coin, CurrentCoin, Deposit, MarketRegimeLog, Pair
+from .models import BotState, Coin, CurrentCoin, Deposit, MarketRegimeLog, Pair, ScoutHistory
 
 
 MIN_DEPOSIT_THRESHOLD = 1.0
@@ -146,6 +146,51 @@ class CoinRepository:
                 pair.to_coin.symbol
             session.expunge_all()
             return pairs
+
+
+class ScoutHistoryRepository:
+    """Repository for scout-ratio history persistence."""
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.session_factory = session_factory
+
+    @contextmanager
+    def _session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def log_scout(
+        self,
+        pair: Pair,
+        target_ratio: float,
+        current_coin_price: float,
+        other_coin_price: float,
+    ) -> ScoutHistory:
+        with self._session() as session:
+            pair = session.merge(pair)
+            history = ScoutHistory(pair, target_ratio, current_coin_price, other_coin_price)
+            session.add(history)
+            session.flush()
+            history.datetime
+            history.pair.from_coin.symbol
+            history.pair.from_coin.enabled
+            history.pair.to_coin.symbol
+            history.pair.to_coin.enabled
+            history.current_ratio
+            session.expunge_all()
+            return history
+
+    def prune_scout_history(self, hours_to_keep: int) -> None:
+        time_diff = datetime.now() - timedelta(hours=hours_to_keep)
+        with self._session() as session:
+            session.query(ScoutHistory).filter(ScoutHistory.datetime < time_diff).delete()
 
 
 class RegimeRepository:
