@@ -25,6 +25,12 @@ from typing import Dict, List, Optional, Tuple
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+from binance_trade_bot.futures_transfer_policy import (
+    choose_retry_transfer_amount,
+    is_insufficient_balance_error,
+    safe_transfer_amount,
+)
+
 
 # Coins with USDC-M perpetual futures on Binance (verified via API)
 # Updated: all have $5 min notional, deep order books
@@ -34,10 +40,6 @@ FUTURES_ELIGIBLE_COINS = {
     # Also available but not in bot's coin list:
     # "BTC", "ETH", "BNB"
 }
-
-FUTURES_TRANSFER_DUST_BUFFER = Decimal("0.10")
-FUTURES_TRANSFER_MIN_AMOUNT = Decimal("1.00")
-FUTURES_TRANSFER_STEP = Decimal("0.01")
 
 
 class FuturesPosition:
@@ -981,19 +983,6 @@ class FuturesManager:
             self.logger.error(f"Transfer to futures failed: {e}")
             return False
 
-    @staticmethod
-    def _safe_transfer_amount(amount: float) -> float:
-        """Floor transfer amount to cents and leave a small futures dust buffer."""
-        raw = Decimal(str(amount or 0)) - FUTURES_TRANSFER_DUST_BUFFER
-        if raw < FUTURES_TRANSFER_MIN_AMOUNT:
-            return 0.0
-        safe = raw.quantize(FUTURES_TRANSFER_STEP, rounding=ROUND_DOWN)
-        return float(safe)
-
-    @staticmethod
-    def _is_insufficient_balance_error(error: Optional[Exception]) -> bool:
-        return isinstance(error, BinanceAPIException) and getattr(error, "code", None) == -5013
-
     def transfer_to_spot(self, amount: float) -> bool:
         """Transfer USDC from futures wallet to spot wallet.
 
@@ -1004,7 +993,7 @@ class FuturesManager:
         Telegram notification spam; funds remain safely in futures for the next
         cycle/manual inspection.
         """
-        first_amount = self._safe_transfer_amount(amount)
+        first_amount = safe_transfer_amount(amount)
         if first_amount <= 0:
             self.logger.debug(
                 f"Futures→spot transfer skipped: {amount:.8f} {self.bridge_symbol} "
@@ -1025,10 +1014,10 @@ class FuturesManager:
                 return True
             except Exception as e:
                 last_error = e
-                if idx == 0 and self._is_insufficient_balance_error(e):
-                    refreshed_amount = min(
-                        self._safe_transfer_amount(self._get_futures_usdc_balance()),
-                        self._safe_transfer_amount(transfer_amount),
+                if idx == 0 and is_insufficient_balance_error(e):
+                    refreshed_amount = choose_retry_transfer_amount(
+                        previous_attempt=transfer_amount,
+                        refreshed_withdrawable=self._get_futures_usdc_balance(),
                     )
                     if refreshed_amount > 0 and refreshed_amount < transfer_amount:
                         self.logger.warning(
@@ -1040,7 +1029,7 @@ class FuturesManager:
                         continue
                 break
 
-        if self._is_insufficient_balance_error(last_error):
+        if is_insufficient_balance_error(last_error):
             self.logger.warning(
                 f"Futures→spot transfer unavailable after conservative retry; "
                 f"leaving funds in futures ({last_error})",
