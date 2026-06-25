@@ -10,7 +10,9 @@ from binance_trade_bot.database import Database
 from binance_trade_bot.models import (
     Base,
     Coin,
+    CoinValue,
     Deposit,
+    Interval,
     MarketRegimeLog,
     Pair,
     PairStat,
@@ -24,6 +26,7 @@ from binance_trade_bot.repositories import (
     RegimeRepository,
     RatioStatsRepository,
     ScoutHistoryRepository,
+    ValueHistoryRepository,
 )
 
 
@@ -253,6 +256,114 @@ def test_database_facade_delegates_ratio_stat_methods():
     db.prune_ratio_samples()
     with db.db_session() as session:
         assert session.query(RatioSample).filter(RatioSample.datetime < datetime.utcnow() - timedelta(days=1)).count() == 0
+
+
+def add_coin_value(session, coin, when, interval=Interval.MINUTELY):
+    value = CoinValue(
+        coin,
+        balance=1.0,
+        usd_price=10.0,
+        btc_price=0.001,
+        interval=interval,
+        datetime=when,
+    )
+    session.add(value)
+    return value
+
+
+def test_value_history_repository_promotes_rollups_and_prunes_retention_windows():
+    sessions = make_session_factory()
+    coin_repo = CoinRepository(sessions)
+    coin_repo.set_coins(["SOL"])
+    sol = coin_repo.get_coin("SOL")
+    now = datetime.now()
+    repo = ValueHistoryRepository(sessions)
+
+    with sessions() as session:
+        sol = session.merge(sol)
+        recent_minutely = add_coin_value(session, sol, now - timedelta(hours=2))
+        old_minutely = add_coin_value(session, sol, now - timedelta(hours=26))
+        old_hourly = add_coin_value(session, sol, now - timedelta(days=30), Interval.HOURLY)
+        old_daily = add_coin_value(session, sol, now - timedelta(days=370), Interval.DAILY)
+        old_weekly = add_coin_value(session, sol, now - timedelta(days=800), Interval.WEEKLY)
+        session.commit()
+        ids = {
+            "recent_minutely": recent_minutely.id,
+            "old_minutely": old_minutely.id,
+            "old_hourly": old_hourly.id,
+            "old_daily": old_daily.id,
+            "old_weekly": old_weekly.id,
+        }
+
+    repo.prune_value_history(reference_time=now)
+
+    with sessions() as session:
+        rows = {row.id: row.interval for row in session.query(CoinValue).all()}
+        assert ids["recent_minutely"] in rows
+        assert rows[ids["recent_minutely"]] in {
+            Interval.HOURLY,
+            Interval.DAILY,
+            Interval.WEEKLY,
+        }
+        assert ids["old_weekly"] in rows
+        assert (
+            session.query(CoinValue)
+            .filter(
+                CoinValue.interval == Interval.MINUTELY,
+                CoinValue.datetime < now - timedelta(hours=24),
+            )
+            .count()
+            == 0
+        )
+        assert (
+            session.query(CoinValue)
+            .filter(
+                CoinValue.interval == Interval.HOURLY,
+                CoinValue.datetime < now - timedelta(days=28),
+            )
+            .count()
+            == 0
+        )
+        assert (
+            session.query(CoinValue)
+            .filter(
+                CoinValue.interval == Interval.DAILY,
+                CoinValue.datetime < now - timedelta(days=365),
+            )
+            .count()
+            == 0
+        )
+
+
+def test_database_facade_delegates_value_history_pruning():
+    logger = FakeLogger()
+    config = make_config()
+    db = Database(logger, config, uri="sqlite:///:memory:")
+    db.create_database()
+    db.set_coins(["SOL"])
+    now = datetime.now()
+
+    with db.db_session() as session:
+        sol = session.query(Coin).filter(Coin.symbol == "SOL").one()
+        old_minutely = add_coin_value(session, sol, now - timedelta(hours=26))
+        old_weekly = add_coin_value(session, sol, now - timedelta(days=800), Interval.WEEKLY)
+        session.flush()
+        ids = {"old_minutely": old_minutely.id, "old_weekly": old_weekly.id}
+
+    db.prune_value_history(reference_time=now)
+
+    with db.db_session() as session:
+        rows = {row.id: row.interval for row in session.query(CoinValue).all()}
+        assert rows[ids["old_weekly"]] == Interval.WEEKLY
+        assert (
+            session.query(CoinValue)
+            .filter(
+                CoinValue.interval == Interval.MINUTELY,
+                CoinValue.datetime < now - timedelta(hours=24),
+            )
+            .count()
+            == 0
+        )
 
 
 def test_regime_repository_logs_latest_and_hour_filtered_history():

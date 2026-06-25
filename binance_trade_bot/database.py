@@ -2,10 +2,10 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional, Union
 
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Config
@@ -18,6 +18,7 @@ from .repositories import (
     RatioStatsRepository,
     RegimeRepository,
     ScoutHistoryRepository,
+    ValueHistoryRepository,
 )
 
 
@@ -35,6 +36,7 @@ class Database:
         self.SessionMaker = sessionmaker(bind=self.engine)
         self.coins = CoinRepository(self.SessionMaker)
         self.scout_history = ScoutHistoryRepository(self.SessionMaker)
+        self.value_history = ValueHistoryRepository(self.SessionMaker)
         bridge_symbol = getattr(getattr(self.config, "BRIDGE", None), "symbol", "USDC")
         self.ratio_stats = RatioStatsRepository(self.SessionMaker, self.logger, bridge_symbol)
         self.regimes = RegimeRepository(self.SessionMaker)
@@ -142,51 +144,8 @@ class Database:
     def prune_scout_history(self):
         self.scout_history.prune_scout_history(self.config.SCOUT_HISTORY_PRUNE_TIME)
 
-    def prune_value_history(self):
-        session: Session
-        with self.db_session() as session:
-            # Sets the first entry for each coin for each hour as 'hourly'
-            hourly_entries: List[CoinValue] = (
-                session.query(CoinValue).group_by(CoinValue.coin_id, func.strftime("%H", CoinValue.datetime)).all()
-            )
-            for entry in hourly_entries:
-                entry.interval = Interval.HOURLY
-
-            # Sets the first entry for each coin for each day as 'daily'
-            daily_entries: List[CoinValue] = (
-                session.query(CoinValue).group_by(CoinValue.coin_id, func.date(CoinValue.datetime)).all()
-            )
-            for entry in daily_entries:
-                entry.interval = Interval.DAILY
-
-            # Sets the first entry for each coin for each month as 'weekly'
-            # (Sunday is the start of the week)
-            weekly_entries: List[CoinValue] = (
-                session.query(CoinValue).group_by(CoinValue.coin_id, func.strftime("%Y-%W", CoinValue.datetime)).all()
-            )
-            for entry in weekly_entries:
-                entry.interval = Interval.WEEKLY
-
-            # The last 24 hours worth of minutely entries will be kept, so
-            # count(coins) * 1440 entries
-            time_diff = datetime.now() - timedelta(hours=24)
-            session.query(CoinValue).filter(
-                CoinValue.interval == Interval.MINUTELY, CoinValue.datetime < time_diff
-            ).delete()
-
-            # The last 28 days worth of hourly entries will be kept, so count(coins) * 672 entries
-            time_diff = datetime.now() - timedelta(days=28)
-            session.query(CoinValue).filter(
-                CoinValue.interval == Interval.HOURLY, CoinValue.datetime < time_diff
-            ).delete()
-
-            # The last years worth of daily entries will be kept, so count(coins) * 365 entries
-            time_diff = datetime.now() - timedelta(days=365)
-            session.query(CoinValue).filter(
-                CoinValue.interval == Interval.DAILY, CoinValue.datetime < time_diff
-            ).delete()
-
-            # All weekly entries will be kept forever
+    def prune_value_history(self, reference_time: Optional[datetime] = None):
+        self.value_history.prune_value_history(reference_time=reference_time)
 
     def create_database(self):
         Base.metadata.create_all(self.engine)
