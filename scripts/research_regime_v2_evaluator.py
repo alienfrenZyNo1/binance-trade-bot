@@ -519,6 +519,8 @@ def build_route_outcomes(records: list[dict[str, Any]], *, fee_bps: float) -> di
         route_keys["regime_v2_tuned"] = "v2_tuned_smoothed"
     if records and "v2_route_tuned_smoothed" in records[0]:
         route_keys["regime_v2_route_tuned"] = "v2_route_tuned_smoothed"
+    if records and "selector_smoothed" in records[0]:
+        route_keys["regime_v2_selector"] = "selector_smoothed"
     outcomes: dict[str, dict[str, Any]] = {}
     for name, key in route_keys.items():
         returns = []
@@ -535,6 +537,64 @@ def build_route_outcomes(records: list[dict[str, Any]], *, fee_bps: float) -> di
         result["route"] = name
         outcomes[name] = result
     return outcomes
+
+
+def _route_returns_for_key(records: list[dict[str, Any]], route_key: str, *, fee_bps: float) -> list[float]:
+    return [
+        route_window_return(
+            str(row.get(route_key, SIDEWAYS)),
+            future_basket_ret=float(row.get("future_basket_ret", 0.0)),
+            future_btc_ret=float(row.get("future_btc_ret", 0.0)),
+            fee_bps=fee_bps,
+        )
+        for row in records
+    ]
+
+
+def build_selector_route(
+    records: list[dict[str, Any]],
+    *,
+    route_candidates: dict[str, str],
+    fee_bps: float,
+    lookback: int = 12,
+    min_trailing_objective: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Select a route using only prior realized route windows.
+
+    This is a research-only no-lookahead selector. At row i it scores each
+    candidate on rows [i-lookback, i), never on row i or later.
+    """
+    selected: list[dict[str, Any]] = []
+    lookback = max(1, lookback)
+    for idx, row in enumerate(records):
+        history = records[max(0, idx - lookback) : idx]
+        choice_name = "cash"
+        choice_key = ""
+        choice_objective = 0.0
+        if history:
+            scored = []
+            for name, key in route_candidates.items():
+                returns = _route_returns_for_key(history, key, fee_bps=fee_bps)
+                outcome = _compound_returns(returns)
+                objective = outcome["total_return_pct"] - 0.35 * outcome["max_drawdown_pct"]
+                scored.append((objective, outcome["total_return_pct"], -outcome["max_drawdown_pct"], name, key))
+            scored.sort(reverse=True)
+            best = scored[0]
+            if best[0] >= min_trailing_objective:
+                choice_objective = best[0]
+                choice_name = best[3]
+                choice_key = best[4]
+        selected_regime = SIDEWAYS if choice_name == "cash" else str(row.get(choice_key, SIDEWAYS))
+        selected.append(
+            {
+                **row,
+                "selector_route_key": choice_name,
+                "selector_route_source": choice_key,
+                "selector_trailing_objective": choice_objective,
+                "selector_smoothed": selected_regime,
+            }
+        )
+    return selected
 
 
 def score_route_records_with_weights(records: list[dict[str, Any]], weights: dict[str, float], *, fee_bps: float) -> dict[str, Any]:
@@ -720,6 +780,8 @@ def evaluate_regime_v2_history(
     tune_scorecard: bool = False,
     tune_route_objective: bool = False,
     train_fraction: float = 0.60,
+    selector_lookback: int = 12,
+    selector_min_objective: float = 0.0,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -821,6 +883,30 @@ def evaluate_regime_v2_history(
         route_tuning["test_records"] = max(0, len(raw_records) - len(training_records))
         route_tuning["train_fraction"] = train_fraction
 
+    selector_candidates = {
+        "regime_v2": "v2_smoothed",
+        "research_v1": "v1_regime",
+        "legacy_sol": "legacy_regime",
+    }
+    if raw_records and "v2_tuned_smoothed" in raw_records[0]:
+        selector_candidates["regime_v2_tuned"] = "v2_tuned_smoothed"
+    if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
+        selector_candidates["regime_v2_route_tuned"] = "v2_route_tuned_smoothed"
+    selector = {
+        "enabled": bool(raw_records),
+        "lookback": selector_lookback,
+        "min_trailing_objective": selector_min_objective,
+        "candidates": selector_candidates,
+        "no_lookahead": True,
+    }
+    raw_records = build_selector_route(
+        raw_records,
+        route_candidates=selector_candidates,
+        fee_bps=fee_bps,
+        lookback=selector_lookback,
+        min_trailing_objective=selector_min_objective,
+    )
+
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
     route_failure = {
         "legacy_sol": route_failure_diagnostics(raw_records, "legacy_regime", fee_bps=fee_bps),
@@ -838,6 +924,9 @@ def evaluate_regime_v2_history(
     if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_route_tuned"] = route_failure_diagnostics(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
         route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
+    if raw_records and "selector_smoothed" in raw_records[0]:
+        route_failure["regime_v2_selector"] = route_failure_diagnostics(raw_records, "selector_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_selector"] = build_route_robustness_gates(raw_records, "selector_smoothed", fee_bps=fee_bps)
 
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
@@ -858,6 +947,8 @@ def evaluate_regime_v2_history(
                 "tune_scorecard": tune_scorecard,
                 "tune_route_objective": tune_route_objective,
                 "train_fraction": train_fraction,
+                "selector_lookback": selector_lookback,
+                "selector_min_objective": selector_min_objective,
             },
         },
         "records": raw_records,
@@ -868,12 +959,14 @@ def evaluate_regime_v2_history(
             "regime_v2_smoothed": _seq([row["v2_smoothed"] for row in raw_records]),
             **({"regime_v2_tuned": _seq([row["v2_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_tuned_smoothed" in raw_records[0] else {}),
             **({"regime_v2_route_tuned": _seq([row["v2_route_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_route_tuned_smoothed" in raw_records[0] else {}),
+            "regime_v2_selector": _seq([row["selector_smoothed"] for row in raw_records]),
             "labels": _seq([row["label"] for row in raw_records]),
         },
         "leaderboard": _build_leaderboard(raw_records, route_outcomes),
         "route_outcomes": route_outcomes,
         "route_failure_diagnostics": route_failure,
         "route_robustness": route_robustness,
+        "selector": selector,
         "tuning": tuning,
         "route_tuning": route_tuning,
     }
@@ -897,6 +990,8 @@ def main() -> int:
     parser.add_argument("--tune-scorecard", action="store_true")
     parser.add_argument("--tune-route-objective", action="store_true")
     parser.add_argument("--train-fraction", type=float, default=0.60)
+    parser.add_argument("--selector-lookback", type=int, default=12)
+    parser.add_argument("--selector-min-objective", type=float, default=0.0)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
@@ -916,6 +1011,8 @@ def main() -> int:
         tune_scorecard=args.tune_scorecard,
         tune_route_objective=args.tune_route_objective,
         train_fraction=args.train_fraction,
+        selector_lookback=args.selector_lookback,
+        selector_min_objective=args.selector_min_objective,
     )
 
     if args.output:

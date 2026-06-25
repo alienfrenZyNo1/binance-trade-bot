@@ -378,3 +378,66 @@ def test_evaluate_regime_v2_history_emits_route_robustness_gates():
     assert "route_robustness" in output
     assert "regime_v2" in output["route_robustness"]
     assert "passed" in output["route_robustness"]["regime_v2"]
+
+
+def test_build_selector_route_uses_only_prior_windows():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "b_regime": module.SIDEWAYS, "future_basket_ret": 2.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "b_regime": module.SIDEWAYS, "future_basket_ret": 2.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "b_regime": module.SIDEWAYS, "future_basket_ret": -8.0, "future_btc_ret": -4.0},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime", "b": "b_regime"},
+        fee_bps=10,
+        lookback=2,
+        min_trailing_objective=-999,
+    )
+
+    assert selected[0]["selector_route_key"] == "cash"
+    assert selected[1]["selector_route_key"] == "a"
+    assert selected[2]["selector_route_key"] == "a"
+    assert selected[2]["selector_smoothed"] == module.BULL
+
+
+def test_selector_can_choose_cash_when_all_recent_routes_are_weak():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "future_basket_ret": -2.0, "future_btc_ret": -1.0},
+        {"a_regime": module.BULL, "future_basket_ret": -2.0, "future_btc_ret": -1.0},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime"},
+        fee_bps=10,
+        lookback=1,
+        min_trailing_objective=0.0,
+    )
+
+    assert selected[1]["selector_route_key"] == "cash"
+    assert selected[1]["selector_smoothed"] == module.SIDEWAYS
+
+
+def test_evaluate_regime_v2_history_emits_selector_route_artifacts():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_scorecard=True,
+        tune_route_objective=True,
+        train_fraction=0.5,
+        selector_lookback=2,
+    )
+
+    assert "selector" in output
+    assert output["selector"]["enabled"] is True
+    assert "regime_v2_selector" in output["route_outcomes"]
+    assert "regime_v2_selector" in output["route_robustness"]
+    assert "selector_route_key" in output["records"][-1]
