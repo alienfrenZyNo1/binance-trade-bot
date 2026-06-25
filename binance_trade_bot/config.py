@@ -179,6 +179,9 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.FUTURES_MAX_MARGIN_PCT = float(
             os.environ.get("FUTURES_MAX_MARGIN_PCT") or config.get(USER_CFG_SECTION, "futures_max_margin_pct", fallback="0.5")
         )
+        self.FUTURES_MARGIN_TYPE = (
+            os.environ.get("FUTURES_MARGIN_TYPE") or config.get(USER_CFG_SECTION, "futures_margin_type", fallback="CROSS")
+        ).upper()
         self.FUTURES_STOP_LOSS_PCT = float(
             os.environ.get("FUTURES_STOP_LOSS_PCT") or config.get(USER_CFG_SECTION, "futures_stop_loss_pct", fallback="15.0")
         )
