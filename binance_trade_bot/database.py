@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Config
 from .logger import Logger
 from .models import *  # pylint: disable=wildcard-import
-from .repositories import BotStateRepository, DepositRepository
+from .repositories import BotStateRepository, CoinRepository, DepositRepository
 
 
 class Database:
@@ -26,6 +26,7 @@ class Database:
             pool_pre_ping=True,
         )
         self.SessionMaker = sessionmaker(bind=self.engine)
+        self.coins = CoinRepository(self.SessionMaker)
         self.bot_state = BotStateRepository(self.SessionMaker)
         self.deposits = DepositRepository(self.SessionMaker, self.bot_state, self.logger)
         # Lazily created by socketio_connect(). Importing python-socketio at
@@ -88,109 +89,29 @@ class Database:
             session.close()
 
     def set_coins(self, symbols: List[str]):
-        """Sync coin list from config, but NEVER re-enable a coin that was
-        manually disabled (e.g. via Telegram /removecoin or DB edit).
-
-        Only coins that are brand-new (not yet in DB) are added as enabled.
-        Existing coins keep their current enabled/disabled state unless they
-        are no longer in the config list at all, in which case they are disabled.
-        """
-        session: Session
-
-        with self.db_session() as session:
-            coins: List[Coin] = session.query(Coin).all()
-
-            # Coins in DB but not in config → disable
-            for coin in coins:
-                if coin.symbol not in symbols:
-                    coin.enabled = False
-
-            # Coins in config but not yet in DB → add as enabled
-            # Coins already in DB → KEEP their existing enabled state
-            # (do NOT force re-enable — respects manual /removecoin etc.)
-            for symbol in symbols:
-                coin = next((c for c in coins if c.symbol == symbol), None)
-                if coin is None:
-                    session.add(Coin(symbol))
-
-        # For all the combinations of coins in the database, add a pair to the database
-        with self.db_session() as session:
-            coins: List[Coin] = session.query(Coin).filter(Coin.enabled).all()
-            for from_coin in coins:
-                for to_coin in coins:
-                    if from_coin != to_coin:
-                        pair = session.query(Pair).filter(Pair.from_coin == from_coin, Pair.to_coin == to_coin).first()
-                        if pair is None:
-                            session.add(Pair(from_coin, to_coin))
+        self.coins.set_coins(symbols)
 
     def get_coins(self, only_enabled=True) -> List[Coin]:
-        session: Session
-        with self.db_session() as session:
-            if only_enabled:
-                coins = session.query(Coin).filter(Coin.enabled).all()
-            else:
-                coins = session.query(Coin).all()
-            session.expunge_all()
-            return coins
+        return self.coins.get_coins(only_enabled=only_enabled)
 
     def get_coin(self, coin: Union[Coin, str]) -> Coin:
-        if isinstance(coin, Coin):
-            return coin
-        session: Session
-        with self.db_session() as session:
-            coin = session.query(Coin).get(coin)
-            session.expunge(coin)
-            return coin
+        return self.coins.get_coin(coin)
 
     def set_current_coin(self, coin: Union[Coin, str]):
-        coin = self.get_coin(coin)
-        session: Session
-        with self.db_session() as session:
-            if isinstance(coin, Coin):
-                coin = session.merge(coin)
-            cc = CurrentCoin(coin)
-            session.add(cc)
-            self.send_update(cc)
+        current_coin = self.coins.set_current_coin(coin)
+        self.send_update(current_coin)
 
     def get_current_coin(self) -> Optional[Coin]:
-        session: Session
-        with self.db_session() as session:
-            current_coin = session.query(CurrentCoin).order_by(CurrentCoin.datetime.desc()).first()
-            if current_coin is None:
-                return None
-            coin = current_coin.coin
-            session.expunge(coin)
-            return coin
+        return self.coins.get_current_coin()
 
     def get_pair(self, from_coin: Union[Coin, str], to_coin: Union[Coin, str]):
-        from_coin = self.get_coin(from_coin)
-        to_coin = self.get_coin(to_coin)
-        session: Session
-        with self.db_session() as session:
-            pair: Pair = session.query(Pair).filter(Pair.from_coin == from_coin, Pair.to_coin == to_coin).first()
-            session.expunge(pair)
-            return pair
+        return self.coins.get_pair(from_coin, to_coin)
 
     def get_pairs_from(self, from_coin: Union[Coin, str], only_enabled=True) -> List[Pair]:
-        from_coin = self.get_coin(from_coin)
-        session: Session
-        with self.db_session() as session:
-            pairs = session.query(Pair).filter(Pair.from_coin == from_coin)
-            if only_enabled:
-                pairs = pairs.filter(Pair.enabled.is_(True))
-            pairs = pairs.all()
-            session.expunge_all()
-            return pairs
+        return self.coins.get_pairs_from(from_coin, only_enabled=only_enabled)
 
     def get_pairs(self, only_enabled=True) -> List[Pair]:
-        session: Session
-        with self.db_session() as session:
-            pairs = session.query(Pair)
-            if only_enabled:
-                pairs = pairs.filter(Pair.enabled.is_(True))
-            pairs = pairs.all()
-            session.expunge_all()
-            return pairs
+        return self.coins.get_pairs(only_enabled=only_enabled)
 
     def log_scout(
         self,

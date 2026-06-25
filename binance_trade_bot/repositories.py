@@ -7,10 +7,145 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from .accounting import evaluate_deposit_delta
-from .models import BotState, Deposit
+from .models import BotState, Coin, CurrentCoin, Deposit, Pair
 
 
 MIN_DEPOSIT_THRESHOLD = 1.0
+
+
+class CoinRepository:
+    """Repository for coin, pair, and current-coin persistence."""
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.session_factory = session_factory
+
+    @contextmanager
+    def _session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def set_coins(self, symbols: list[str]) -> None:
+        """Sync configured coins without re-enabling manually disabled coins."""
+        with self._session() as session:
+            coins = session.query(Coin).all()
+
+            for coin in coins:
+                if coin.symbol not in symbols:
+                    coin.enabled = False
+
+            for symbol in symbols:
+                coin = next((c for c in coins if c.symbol == symbol), None)
+                if coin is None:
+                    session.add(Coin(symbol))
+
+        with self._session() as session:
+            coins = session.query(Coin).filter(Coin.enabled).all()
+            for from_coin in coins:
+                for to_coin in coins:
+                    if from_coin == to_coin:
+                        continue
+                    pair = (
+                        session.query(Pair)
+                        .filter(
+                            Pair.from_coin_id == from_coin.symbol,
+                            Pair.to_coin_id == to_coin.symbol,
+                        )
+                        .first()
+                    )
+                    if pair is None:
+                        session.add(Pair(from_coin, to_coin))
+
+    def get_coins(self, only_enabled: bool = True) -> list[Coin]:
+        with self._session() as session:
+            query = session.query(Coin)
+            if only_enabled:
+                query = query.filter(Coin.enabled)
+            coins = query.all()
+            session.expunge_all()
+            return coins
+
+    def get_coin(self, coin: Coin | str) -> Coin:
+        if isinstance(coin, Coin):
+            return coin
+        with self._session() as session:
+            result = session.query(Coin).get(coin)
+            session.expunge(result)
+            return result
+
+    def set_current_coin(self, coin: Coin | str) -> CurrentCoin:
+        coin = self.get_coin(coin)
+        with self._session() as session:
+            if isinstance(coin, Coin):
+                coin = session.merge(coin)
+            current_coin = CurrentCoin(coin)
+            session.add(current_coin)
+            session.flush()
+            current_coin.datetime
+            current_coin.coin.symbol
+            current_coin.coin.enabled
+            session.expunge_all()
+            return current_coin
+
+    def get_current_coin(self) -> Optional[Coin]:
+        with self._session() as session:
+            current_coin = session.query(CurrentCoin).order_by(CurrentCoin.datetime.desc()).first()
+            if current_coin is None:
+                return None
+            coin = current_coin.coin
+            session.expunge(coin)
+            return coin
+
+    def get_pair(self, from_coin: Coin | str, to_coin: Coin | str) -> Pair:
+        from_coin = self.get_coin(from_coin)
+        to_coin = self.get_coin(to_coin)
+        with self._session() as session:
+            pair = (
+                session.query(Pair)
+                .filter(
+                    Pair.from_coin_id == from_coin.symbol,
+                    Pair.to_coin_id == to_coin.symbol,
+                )
+                .first()
+            )
+            if pair is not None:
+                # Load relationship attributes before detaching so callers keep
+                # the same detached-object behaviour as the Database facade.
+                pair.from_coin.symbol
+                pair.to_coin.symbol
+                session.expunge_all()
+            return pair
+
+    def get_pairs_from(self, from_coin: Coin | str, only_enabled: bool = True) -> list[Pair]:
+        from_coin = self.get_coin(from_coin)
+        with self._session() as session:
+            query = session.query(Pair).filter(Pair.from_coin_id == from_coin.symbol)
+            if only_enabled:
+                query = query.filter(Pair.enabled.is_(True))
+            pairs = query.all()
+            for pair in pairs:
+                pair.from_coin.symbol
+                pair.to_coin.symbol
+            session.expunge_all()
+            return pairs
+
+    def get_pairs(self, only_enabled: bool = True) -> list[Pair]:
+        with self._session() as session:
+            query = session.query(Pair)
+            if only_enabled:
+                query = query.filter(Pair.enabled.is_(True))
+            pairs = query.all()
+            for pair in pairs:
+                pair.from_coin.symbol
+                pair.to_coin.symbol
+            session.expunge_all()
+            return pairs
 
 
 class BotStateRepository:
