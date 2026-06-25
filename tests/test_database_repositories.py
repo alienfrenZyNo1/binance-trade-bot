@@ -1,24 +1,91 @@
 """Repository seam tests for database state/deposit persistence."""
 
+from types import SimpleNamespace
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from binance_trade_bot.models import Base, Deposit
-from binance_trade_bot.repositories import BotStateRepository, DepositRepository
+from binance_trade_bot.database import Database
+from binance_trade_bot.models import Base, Coin, Deposit, Pair
+from binance_trade_bot.repositories import BotStateRepository, CoinRepository, DepositRepository
 
 
 class FakeLogger:
     def __init__(self):
         self.infos = []
+        self.debugs = []
 
     def info(self, message, *args, **kwargs):
         self.infos.append(str(message))
+
+    def debug(self, message, *args, **kwargs):
+        self.debugs.append(str(message))
 
 
 def make_session_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine)
+
+
+def test_coin_repository_sync_preserves_manual_disabled_state_and_pairs():
+    sessions = make_session_factory()
+    repo = CoinRepository(sessions)
+
+    repo.set_coins(["SOL", "AVAX"])
+    with sessions() as session:
+        session.query(Coin).filter(Coin.symbol == "AVAX").one().enabled = False
+        session.commit()
+
+    repo.set_coins(["SOL", "AVAX", "JUP"])
+
+    coins = {coin.symbol: coin.enabled for coin in repo.get_coins(only_enabled=False)}
+    assert coins == {"SOL": True, "AVAX": False, "JUP": True}
+    assert [coin.symbol for coin in repo.get_coins()] == ["SOL", "JUP"]
+
+    enabled_pairs = {(pair.from_coin.symbol, pair.to_coin.symbol) for pair in repo.get_pairs()}
+    assert enabled_pairs == {("SOL", "JUP"), ("JUP", "SOL")}
+
+    all_pairs = {(pair.from_coin.symbol, pair.to_coin.symbol) for pair in repo.get_pairs(only_enabled=False)}
+    assert ("SOL", "AVAX") in all_pairs
+    assert ("AVAX", "SOL") in all_pairs
+
+
+def test_coin_repository_tracks_current_coin_and_pair_lookup():
+    sessions = make_session_factory()
+    repo = CoinRepository(sessions)
+    repo.set_coins(["SOL", "JUP"])
+
+    repo.set_current_coin("SOL")
+    assert repo.get_current_coin().symbol == "SOL"
+
+    current_coin_event = repo.set_current_coin("SOL")
+    assert current_coin_event.info()["coin"] == {"symbol": "SOL", "enabled": True}
+
+    jup = repo.get_coin("JUP")
+    repo.set_current_coin(jup)
+    assert repo.get_current_coin().symbol == "JUP"
+
+    pair = repo.get_pair("SOL", "JUP")
+    assert pair.from_coin.symbol == "SOL"
+    assert pair.to_coin.symbol == "JUP"
+
+
+def test_database_facade_delegates_coin_methods_and_sends_current_coin_update():
+    logger = FakeLogger()
+    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False)
+    db = Database(logger, config, uri="sqlite:///:memory:")
+    db.create_database()
+
+    db.set_coins(["SOL", "JUP"])
+    db.set_current_coin("SOL")
+
+    assert db.get_current_coin().symbol == "SOL"
+    assert db.get_pair("SOL", "JUP").from_coin.symbol == "SOL"
+    assert {(p.from_coin.symbol, p.to_coin.symbol) for p in db.get_pairs()} == {
+        ("SOL", "JUP"),
+        ("JUP", "SOL"),
+    }
 
 
 def test_bot_state_repository_get_set_and_default():
