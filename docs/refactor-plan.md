@@ -114,6 +114,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 2. Add typed result objects for futures transfer attempts.
    - Avoid returning only `bool`; include attempted amount, status, error code, and retryability.
    - Preserve public behaviour at call sites initially by adapting result to bool.
+   - Status: implemented with `TransferAttemptResult` / `TransferStatus`; `transfer_to_spot()` remains bool-compatible and delegates to `transfer_to_spot_result()`.
 
 3. Keep high-frequency failure logs deduped/non-spamming.
    - API errors in repeated scout loops should log once or at debug unless action is required.

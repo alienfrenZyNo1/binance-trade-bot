@@ -3,6 +3,8 @@
 from binance.exceptions import BinanceAPIException
 
 from binance_trade_bot.futures_transfer_policy import (
+    TransferAttemptResult,
+    TransferStatus,
     choose_retry_transfer_amount,
     is_insufficient_balance_error,
     safe_transfer_amount,
@@ -16,6 +18,29 @@ class FakeResponse:
 
 def api_error(code, msg):
     return BinanceAPIException(FakeResponse(), 400, f'{{"code": {code}, "msg": "{msg}"}}')
+
+def test_transfer_attempt_result_exposes_bool_compatibility_and_metadata():
+    success = TransferAttemptResult(
+        status=TransferStatus.SUCCESS,
+        requested_amount=54.69950409,
+        attempted_amounts=(54.59,),
+        transferred_amount=54.59,
+        error_code=None,
+        retryable=False,
+    )
+    failed = TransferAttemptResult(
+        status=TransferStatus.RETRYABLE_FAILURE,
+        requested_amount=54.69950409,
+        attempted_amounts=(54.59, 54.02),
+        transferred_amount=0.0,
+        error_code=-5013,
+        retryable=True,
+    )
+
+    assert bool(success) is True
+    assert bool(failed) is False
+    assert success.attempt_count == 1
+    assert failed.attempt_count == 2
 
 
 def test_safe_transfer_amount_leaves_dust_and_floors_to_cents():
