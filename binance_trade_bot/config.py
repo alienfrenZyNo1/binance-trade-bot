@@ -146,6 +146,9 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.REGIME_CHECK_INTERVAL = int(
             os.environ.get("REGIME_CHECK_INTERVAL") or config.get(USER_CFG_SECTION, "regime_check_interval", fallback="300")
         )
+        self.REGIME_CONFIRMATION_CYCLES = int(
+            os.environ.get("REGIME_CONFIRMATION_CYCLES") or config.get(USER_CFG_SECTION, "regime_confirmation_cycles", fallback="3")
+        )
 
         # Phase B: Bull trend mode
         self.BULL_ZSCORE_MULT = float(

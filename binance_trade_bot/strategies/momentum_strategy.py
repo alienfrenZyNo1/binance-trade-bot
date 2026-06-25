@@ -35,6 +35,7 @@ from binance_trade_bot.indicators import (
     compute_adx as _compute_adx_func,
     compute_rsi as _compute_rsi_func,
 )
+from binance_trade_bot.regime_hysteresis import RegimeHysteresis
 
 # Regime constants
 BULL = "bull"
@@ -50,9 +51,19 @@ class Strategy(AutoTrader):
 
         # Regime state
         self._market_regime = SIDEWAYS
+        try:
+            latest_regime = self.db.get_latest_regime()
+            if latest_regime and latest_regime.get("regime") in {BULL, BEAR, SIDEWAYS, STORMY}:
+                self._market_regime = latest_regime["regime"]
+        except Exception:
+            pass
         self._last_regime_check = 0
         self._regime_adx = 0.0
-        self._previous_regime = SIDEWAYS
+        self._previous_regime = self._market_regime
+        self._regime_hysteresis = RegimeHysteresis(
+            active=self._market_regime,
+            confirmations=getattr(self.config, 'REGIME_CONFIRMATION_CYCLES', 3),
+        )
 
         # Trade state — loaded from DB (persists across restarts)
         saved_last_trade = self.db.get_bot_state("last_trade_time")
@@ -184,20 +195,40 @@ class Strategy(AutoTrader):
 
             if is_trending:
                 if current_price > ema_long and plus_di > minus_di:
-                    self._market_regime = BULL
+                    candidate_regime = BULL
                 elif current_price < ema_long and minus_di > plus_di:
-                    self._market_regime = BEAR
+                    candidate_regime = BEAR
                 else:
-                    self._market_regime = SIDEWAYS
+                    candidate_regime = SIDEWAYS
             else:
-                self._market_regime = SIDEWAYS
+                candidate_regime = SIDEWAYS
 
-            if self._market_regime != old:
-                self.logger.warning(
-                    f"Market regime: {old.upper()} → {self._market_regime.upper()} "
-                    f"(ADX: {adx:.1f}, +DI: {plus_di:.1f}, -DI: {minus_di:.1f})"
+            if not hasattr(self, '_regime_hysteresis'):
+                self._regime_hysteresis = RegimeHysteresis(
+                    active=old,
+                    confirmations=getattr(self.config, 'REGIME_CONFIRMATION_CYCLES', 3),
                 )
-                self._handle_regime_transition(old, self._market_regime)
+            observation = self._regime_hysteresis.observe(candidate_regime)
+            self._market_regime = observation.active
+
+            if observation.pending:
+                self.logger.info(
+                    f"Regime candidate pending ({observation.pending_count}/"
+                    f"{observation.required_confirmations}): "
+                    f"{old.upper()} → {observation.pending.upper()} "
+                    f"(ADX: {adx:.1f}, +DI: {plus_di:.1f}, -DI: {minus_di:.1f})",
+                    notification=False,
+                )
+
+            if observation.changed:
+                confirmed_old = observation.previous or old
+                self.logger.warning(
+                    f"Market regime: {confirmed_old.upper()} → {self._market_regime.upper()} "
+                    f"(confirmed {observation.required_confirmations}/"
+                    f"{observation.required_confirmations}, ADX: {adx:.1f}, "
+                    f"+DI: {plus_di:.1f}, -DI: {minus_di:.1f})"
+                )
+                self._handle_regime_transition(confirmed_old, self._market_regime)
                 self._previous_regime = self._market_regime
 
             # Log to DB
@@ -277,7 +308,10 @@ class Strategy(AutoTrader):
             # Transfer USDC back to spot wallet only after confirmed flat/idle
             futures_bal = self.futures_manager._get_futures_usdc_balance()
             if futures_bal and futures_bal > 5.0:
-                self.futures_manager.transfer_to_spot(futures_bal)
+                if self.futures_manager.transfer_to_spot(futures_bal):
+                    self.db.suppress_next_deposit_detection(
+                        f"internal futures→spot transfer of {futures_bal:.2f} {self.config.BRIDGE.symbol}"
+                    )
 
     # ─────────────────────────────────────────────────────────────────────────
     #  PERFORMANCE SCORING
