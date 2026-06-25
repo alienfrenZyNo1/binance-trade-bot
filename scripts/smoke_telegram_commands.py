@@ -11,10 +11,10 @@ short send/delete probe runs first; if deletion does not work, the script aborts
 live sends to avoid leaving a pile of test messages behind.
 
 Safe paths covered:
-  /status /trades /coins /price /futures /health /config /regime /profit /hop
-  /deposit /help, plus /addcoin, /removecoin, /swap usage responses and /kill
-  preview only.  It never runs /kill confirm, never adds/removes/swaps real
-  coins, and never records a positive deposit.
+  /status /trades /coins /price /futures /health /config /regime /shadow
+  /profit /hop /deposit /help, plus /addcoin, /removecoin, /swap usage
+  responses and /kill preview only.  It never runs /kill confirm, never
+  adds/removes/swaps real coins, and never records a positive deposit.
 """
 
 from __future__ import annotations
@@ -100,6 +100,7 @@ SAFE_CASES: list[Case] = [
     Case("/health", "cmd_health"),
     Case("/config", "cmd_config"),
     Case("/regime", "cmd_regime"),
+    Case("/shadow", "cmd_shadow"),
     Case("/profit", "cmd_profit"),
     Case("/hop", "cmd_hop"),
     Case("/deposit", "cmd_deposit", ("",)),  # list deposits only; no write
