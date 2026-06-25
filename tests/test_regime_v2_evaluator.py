@@ -441,3 +441,71 @@ def test_evaluate_regime_v2_history_emits_selector_route_artifacts():
     assert "regime_v2_selector" in output["route_outcomes"]
     assert "regime_v2_selector" in output["route_robustness"]
     assert "selector_route_key" in output["records"][-1]
+
+
+def test_selector_can_cash_out_when_trailing_drawdown_is_too_high():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "future_basket_ret": 20.0, "future_btc_ret": 5.0},
+        {"a_regime": module.BULL, "future_basket_ret": -25.0, "future_btc_ret": -10.0},
+        {"a_regime": module.BULL, "future_basket_ret": 20.0, "future_btc_ret": 5.0},
+        {"a_regime": module.BULL, "future_basket_ret": 1.0, "future_btc_ret": 0.5},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime"},
+        fee_bps=10,
+        lookback=3,
+        min_trailing_objective=-999,
+        max_trailing_drawdown_pct=15.0,
+    )
+
+    assert selected[3]["selector_route_key"] == "cash"
+    assert selected[3]["selector_smoothed"] == module.SIDEWAYS
+    assert selected[3]["selector_trailing_drawdown_pct"] > 15.0
+    assert "drawdown" in selected[3]["selector_block_reason"]
+
+
+def test_evaluate_regime_v2_history_records_selector_drawdown_guard_settings():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_scorecard=True,
+        tune_route_objective=True,
+        train_fraction=0.5,
+        selector_lookback=2,
+        selector_max_trailing_drawdown_pct=15.0,
+    )
+
+    assert output["selector"]["max_trailing_drawdown_pct"] == 15.0
+    assert output["manifest"]["assumptions"]["selector_max_trailing_drawdown_pct"] == 15.0
+    assert "selector_trailing_drawdown_pct" in output["records"][-1]
+
+
+def test_selector_equity_stop_forces_cash_after_own_drawdown_breach():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "future_basket_ret": 5.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "future_basket_ret": -20.0, "future_btc_ret": -5.0},
+        {"a_regime": module.BULL, "future_basket_ret": 5.0, "future_btc_ret": 1.0},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime"},
+        fee_bps=10,
+        lookback=1,
+        min_trailing_objective=-999,
+        selector_equity_stop_drawdown_pct=10.0,
+    )
+
+    assert selected[2]["selector_route_key"] == "cash"
+    assert selected[2]["selector_smoothed"] == module.SIDEWAYS
+    assert selected[2]["selector_equity_drawdown_pct"] > 10.0
+    assert "equity drawdown" in selected[2]["selector_block_reason"]
