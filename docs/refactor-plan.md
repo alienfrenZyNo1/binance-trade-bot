@@ -173,7 +173,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 
 12. Add config validation documentation and eventually startup validation.
     - Start with warnings for invalid ranges before hard failures.
-    - Status: documented in `docs/developer-guide.md`; stricter runtime validation remains future work to avoid surprise production aborts.
+    - Status: non-fatal startup validation added in `binance_trade_bot/config_validation.py`; startup logs warnings/errors with `notification=False` and does not abort.
 
 ## Current urgent bug-fix plan: futures `-5013` transfer failure
 

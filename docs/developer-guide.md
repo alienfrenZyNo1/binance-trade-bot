@@ -70,6 +70,8 @@ Important values/quirks:
 | notification guard | duplicate dedupe + 12/minute cap |
 | Socket.IO dashboard updates | `SOCKETIO_UPDATES_ENABLED=no` by default; enable only when the legacy API dashboard sidecar is actually running |
 
+Startup runs non-fatal validation from `binance_trade_bot/config_validation.py`. Findings are logged with `notification=False` so bad config drift is visible in Docker logs without spamming Telegram or aborting production unexpectedly. Keep validation messages free of secrets.
+
 ## Testing
 
 Run targeted tests first, then the full suite:
