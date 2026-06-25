@@ -136,7 +136,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 6. Split `database.py` into repositories behind the existing `Database` facade.
    - Start with `bot_state` and `deposits` because they already have tests.
    - Keep `Database` methods as delegating compatibility wrappers.
-   - Status: `BotStateRepository`, `DepositRepository`, and `CoinRepository` added behind `Database`; `Deposit.id` model fixed to match live INTEGER schema.
+   - Status: `BotStateRepository`, `DepositRepository`, `CoinRepository`, and `RegimeRepository` added behind `Database`; `Deposit.id` model fixed to match live INTEGER schema.
 
 7. Lazy-load optional runtime integrations.
    - Continue avoiding eager socketio/eventlet imports for pure helper imports.
