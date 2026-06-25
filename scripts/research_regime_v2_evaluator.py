@@ -49,6 +49,8 @@ DEFAULT_SCORE_WEIGHTS = {
     "basis_score": 0.25,
     "taker_flow_score": 0.5,
     "funding_stress_score": 0.25,
+    "bull_threshold": 2.0,
+    "bear_threshold": 2.0,
 }
 
 
@@ -478,6 +480,8 @@ def build_route_outcomes(records: list[dict[str, Any]], *, fee_bps: float) -> di
     }
     if records and "v2_tuned_smoothed" in records[0]:
         route_keys["regime_v2_tuned"] = "v2_tuned_smoothed"
+    if records and "v2_route_tuned_smoothed" in records[0]:
+        route_keys["regime_v2_route_tuned"] = "v2_route_tuned_smoothed"
     outcomes: dict[str, dict[str, Any]] = {}
     for name, key in route_keys.items():
         returns = []
@@ -494,6 +498,66 @@ def build_route_outcomes(records: list[dict[str, Any]], *, fee_bps: float) -> di
         result["route"] = name
         outcomes[name] = result
     return outcomes
+
+
+def score_route_records_with_weights(records: list[dict[str, Any]], weights: dict[str, float], *, fee_bps: float) -> dict[str, Any]:
+    routed_records = []
+    for row in records:
+        result = classify_v2_scorecard(row["features"], weights)
+        routed_records.append({**row, "v2_smoothed": result["regime"]})
+    outcome = build_route_outcomes(routed_records, fee_bps=fee_bps)["regime_v2"]
+    objective = outcome["total_return_pct"] - 0.35 * outcome["max_drawdown_pct"]
+    return {"objective": objective, "route_total_return_pct": outcome["total_return_pct"], "max_drawdown_pct": outcome["max_drawdown_pct"], "weights": weights}
+
+
+def train_route_scorecard_weights(records: list[dict[str, Any]], *, fee_bps: float, min_records: int = 20) -> dict[str, Any]:
+    """Tune scorecard weights against routed return/drawdown, not label accuracy."""
+    if len(records) < min_records:
+        base = score_route_records_with_weights(records, DEFAULT_SCORE_WEIGHTS, fee_bps=fee_bps)
+        return {"enabled": False, "reason": "insufficient_records", **base}
+    best: dict[str, Any] | None = None
+    for ref_scale in [0.0, 0.5, 1.0, 1.5]:
+        for breadth_scale in [0.0, 0.5, 1.0, 1.5]:
+            for momentum_scale in [0.0, 0.5, 1.0, 1.5]:
+                for rel_scale in [0.0, 0.5, 1.0]:
+                    for bull_t, bear_t in [(2.0, 2.0), (3.0, 2.5), (4.0, 3.0), (6.0, 3.0), (8.0, 4.0)]:
+                        weights = dict(DEFAULT_SCORE_WEIGHTS)
+                        weights["reference_trend_score"] *= ref_scale
+                        weights["breadth_score"] *= breadth_scale
+                        weights["momentum_score"] *= momentum_scale
+                        weights["fast_move_score"] *= momentum_scale
+                        weights["relative_strength_score"] *= rel_scale
+                        weights["bull_threshold"] = bull_t
+                        weights["bear_threshold"] = bear_t
+                        result = score_route_records_with_weights(records, weights, fee_bps=fee_bps)
+                        if best is None or (result["objective"], result["route_total_return_pct"], -result["max_drawdown_pct"]) > (best["objective"], best["route_total_return_pct"], -best["max_drawdown_pct"]):
+                            best = {"enabled": True, **result}
+    return best or {"enabled": False, "reason": "no_candidates", **score_route_records_with_weights(records, DEFAULT_SCORE_WEIGHTS, fee_bps=fee_bps)}
+
+
+def route_failure_diagnostics(records: list[dict[str, Any]], route_key: str, *, fee_bps: float, limit: int = 5) -> dict[str, Any]:
+    """Identify worst routed windows and the features/reasons that caused them."""
+    windows = []
+    for row in records:
+        regime = str(row.get(route_key, SIDEWAYS))
+        route_ret = route_window_return(
+            regime,
+            future_basket_ret=float(row.get("future_basket_ret", 0.0)),
+            future_btc_ret=float(row.get("future_btc_ret", 0.0)),
+            fee_bps=fee_bps,
+        )
+        windows.append(
+            {
+                "time": row.get("time"),
+                "regime": regime,
+                "route_return_pct": route_ret,
+                "future_basket_ret": row.get("future_basket_ret", 0.0),
+                "future_btc_ret": row.get("future_btc_ret", 0.0),
+                "reasons": row.get("reasons", []),
+                "features": row.get("features", {}),
+            }
+        )
+    return {"route_key": route_key, "worst_windows": sorted(windows, key=lambda item: item["route_return_pct"])[:limit]}
 
 
 def _build_leaderboard(records: list[dict[str, Any]], route_outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -567,6 +631,7 @@ def evaluate_regime_v2_history(
     min_confidence: float = 0.60,
     fee_bps: float = 10.0,
     tune_scorecard: bool = False,
+    tune_route_objective: bool = False,
     train_fraction: float = 0.60,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
@@ -647,7 +712,38 @@ def evaluate_regime_v2_history(
         tuning["test_records"] = max(0, len(raw_records) - len(training_records))
         tuning["train_fraction"] = train_fraction
 
+    route_tuning: dict[str, Any] = {"enabled": False, "weights": dict(DEFAULT_SCORE_WEIGHTS)}
+    if tune_route_objective and raw_records:
+        split_idx = max(1, min(len(raw_records), int(len(raw_records) * max(0.1, min(0.9, train_fraction)))))
+        training_records = raw_records[:split_idx]
+        route_tuning = train_route_scorecard_weights(training_records, fee_bps=fee_bps, min_records=min(20, max(1, len(training_records))))
+        route_weights = route_tuning.get("weights", DEFAULT_SCORE_WEIGHTS)
+        route_results = [classify_v2_scorecard(row["features"], route_weights) for row in raw_records]
+        route_smoothed = _hysteresis(
+            [str(result["regime"]) for result in route_results],
+            [float(result["confidence"]) for result in route_results],
+            confirmation_samples,
+            min_confidence,
+        )
+        for row, result, regime in zip(raw_records, route_results, route_smoothed):
+            row["v2_route_tuned_regime"] = result["regime"]
+            row["v2_route_tuned_smoothed"] = regime
+            row["route_tuned_score"] = result["score"]
+            row["route_tuned_confidence"] = result["confidence"]
+        route_tuning["train_records"] = len(training_records)
+        route_tuning["test_records"] = max(0, len(raw_records) - len(training_records))
+        route_tuning["train_fraction"] = train_fraction
+
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
+    route_failure = {
+        "legacy_sol": route_failure_diagnostics(raw_records, "legacy_regime", fee_bps=fee_bps),
+        "research_v1": route_failure_diagnostics(raw_records, "v1_regime", fee_bps=fee_bps),
+        "regime_v2": route_failure_diagnostics(raw_records, "v2_smoothed", fee_bps=fee_bps),
+    }
+    if raw_records and "v2_tuned_smoothed" in raw_records[0]:
+        route_failure["regime_v2_tuned"] = route_failure_diagnostics(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
+    if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
+        route_failure["regime_v2_route_tuned"] = route_failure_diagnostics(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
 
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
@@ -666,6 +762,7 @@ def evaluate_regime_v2_history(
                 "min_confidence": min_confidence,
                 "research_only": True,
                 "tune_scorecard": tune_scorecard,
+                "tune_route_objective": tune_route_objective,
                 "train_fraction": train_fraction,
             },
         },
@@ -676,11 +773,14 @@ def evaluate_regime_v2_history(
             "regime_v2_raw": _seq([row["v2_regime"] for row in raw_records]),
             "regime_v2_smoothed": _seq([row["v2_smoothed"] for row in raw_records]),
             **({"regime_v2_tuned": _seq([row["v2_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_tuned_smoothed" in raw_records[0] else {}),
+            **({"regime_v2_route_tuned": _seq([row["v2_route_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_route_tuned_smoothed" in raw_records[0] else {}),
             "labels": _seq([row["label"] for row in raw_records]),
         },
         "leaderboard": _build_leaderboard(raw_records, route_outcomes),
         "route_outcomes": route_outcomes,
+        "route_failure_diagnostics": route_failure,
         "tuning": tuning,
+        "route_tuning": route_tuning,
     }
 
 
@@ -700,6 +800,7 @@ def main() -> int:
     parser.add_argument("--min-confidence", type=float, default=0.60)
     parser.add_argument("--fee-bps", type=float, default=10.0)
     parser.add_argument("--tune-scorecard", action="store_true")
+    parser.add_argument("--tune-route-objective", action="store_true")
     parser.add_argument("--train-fraction", type=float, default=0.60)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
@@ -718,6 +819,7 @@ def main() -> int:
         min_confidence=args.min_confidence,
         fee_bps=args.fee_bps,
         tune_scorecard=args.tune_scorecard,
+        tune_route_objective=args.tune_route_objective,
         train_fraction=args.train_fraction,
     )
 

@@ -232,3 +232,56 @@ def test_evaluate_regime_v2_history_includes_route_outcome_leaderboard():
     assert "route_outcomes" in output["leaderboard"]["by_metric"]
     assert {"cash", "buy_and_hold_basket", "legacy_sol", "regime_v2"}.issubset(output["route_outcomes"])
     assert "total_return_pct" in output["route_outcomes"]["regime_v2"]
+
+
+def test_train_route_scorecard_weights_optimizes_route_return_not_label_accuracy():
+    module = load_module()
+    records = []
+    for idx in range(8):
+        row = synthetic_training_records()[0].copy()
+        row.update({"future_basket_ret": -5.0, "future_btc_ret": -4.0, "v2_smoothed": module.BULL})
+        records.append(row)
+
+    default_outcomes = module.build_route_outcomes(
+        [{**row, "v2_smoothed": module.classify_v2_scorecard(row["features"])["regime"]} for row in records],
+        fee_bps=10,
+    )
+    tuned = module.train_route_scorecard_weights(records, fee_bps=10, min_records=4)
+
+    assert tuned["enabled"] is True
+    assert tuned["route_total_return_pct"] > default_outcomes["regime_v2"]["total_return_pct"]
+    assert tuned["weights"]["bull_threshold"] >= module.DEFAULT_SCORE_WEIGHTS["bull_threshold"]
+
+
+def test_route_failure_diagnostics_identifies_worst_windows():
+    module = load_module()
+    records = [
+        {"time": "t1", "v2_smoothed": module.BULL, "future_basket_ret": -8.0, "future_btc_ret": -6.0, "features": {"breadth_above_ema50_pct": 0.8}, "reasons": ["foo"]},
+        {"time": "t2", "v2_smoothed": module.SIDEWAYS, "future_basket_ret": 3.0, "future_btc_ret": 2.0, "features": {"breadth_above_ema50_pct": 0.5}, "reasons": ["bar"]},
+    ]
+
+    diagnostics = module.route_failure_diagnostics(records, "v2_smoothed", fee_bps=10, limit=1)
+
+    assert diagnostics["route_key"] == "v2_smoothed"
+    assert diagnostics["worst_windows"][0]["time"] == "t1"
+    assert diagnostics["worst_windows"][0]["route_return_pct"] < 0
+
+
+def test_evaluate_regime_v2_history_can_tune_route_objective_and_emit_diagnostics():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_route_objective=True,
+        train_fraction=0.5,
+    )
+
+    assert output["manifest"]["assumptions"]["tune_route_objective"] is True
+    assert output["route_tuning"]["enabled"] is True
+    assert "regime_v2_route_tuned" in output["route_outcomes"]
+    assert "route_failure_diagnostics" in output
+    assert output["route_failure_diagnostics"]["regime_v2"]["worst_windows"]
