@@ -109,3 +109,83 @@ def test_evaluate_regime_v2_history_emits_manifest_records_and_leaderboard():
     assert {"time", "legacy_regime", "v1_regime", "v2_regime", "label", "score"}.issubset(first)
     assert "switching" in output["leaderboard"]["by_metric"]
     assert "relative_performance" in output["leaderboard"]["by_metric"]
+
+
+def synthetic_training_records():
+    rows = []
+    for idx in range(8):
+        rows.append(
+            {
+                "label": "bull",
+                "features": {
+                    "reference_trend_score": 1.0,
+                    "breadth_above_ema50_pct": 0.85,
+                    "breadth_advancers_24h_pct": 0.9,
+                    "basket_ret_24h": 3.0,
+                    "basket_ret_4h": 0.8,
+                    "basket_vs_btc_24h": 1.5,
+                    "median_vol_24h": 3.0,
+                    "downside_vol_24h": 0.5,
+                    "return_dispersion_24h": 1.0,
+                    "futures_oi_change_pct": 1.0,
+                    "futures_basis_pct": 0.02,
+                    "futures_taker_ratio": 1.1,
+                    "futures_funding_pct": 0.0,
+                },
+            }
+        )
+        rows.append(
+            {
+                "label": "bear",
+                "features": {
+                    "reference_trend_score": -1.0,
+                    "breadth_above_ema50_pct": 0.15,
+                    "breadth_advancers_24h_pct": 0.1,
+                    "basket_ret_24h": -3.5,
+                    "basket_ret_4h": -1.0,
+                    "basket_vs_btc_24h": -1.2,
+                    "median_vol_24h": 4.0,
+                    "downside_vol_24h": 2.0,
+                    "return_dispersion_24h": 2.0,
+                    "futures_oi_change_pct": 2.0,
+                    "futures_basis_pct": -0.03,
+                    "futures_taker_ratio": 0.9,
+                    "futures_funding_pct": 0.0,
+                },
+            }
+        )
+    return rows
+
+
+def test_train_scorecard_weights_improves_training_accuracy_over_bad_weights():
+    module = load_module()
+    records = synthetic_training_records()
+    bad_weights = {"reference_trend_score": -2.0, "breadth_score": -1.0, "momentum_score": -1.0, "relative_strength_score": -1.0}
+
+    bad = module.score_records_with_weights(records, bad_weights)
+    tuned = module.train_scorecard_weights(records, min_records=4)
+
+    assert tuned["accuracy_pct"] > bad["accuracy_pct"]
+    assert tuned["weights"]["reference_trend_score"] > 0
+    assert tuned["weights"]["breadth_score"] > 0
+
+
+def test_evaluate_regime_v2_history_can_emit_tuned_scorecard_results():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_scorecard=True,
+        train_fraction=0.5,
+    )
+
+    assert output["manifest"]["assumptions"]["tune_scorecard"] is True
+    assert output["tuning"]["enabled"] is True
+    assert "weights" in output["tuning"]
+    assert "regime_v2_tuned" in output["sequence"]
+    assert "regime_v2_tuned" in {row["name"] for row in output["leaderboard"]["by_metric"]["label_accuracy"]}
+    assert "v2_tuned_regime" in output["records"][-1]
