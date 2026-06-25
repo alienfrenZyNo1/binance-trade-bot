@@ -109,6 +109,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 1. Extract futures transfer amount/error policy into a small pure helper.
    - Candidate file: `binance_trade_bot/futures_transfer.py` or `binance_trade_bot/services/transfer_policy.py`.
    - Tests should cover: full wallet balance, `maxWithdrawAmount`, zero `availableBalance`, Binance `-5013`, minimum transfer threshold, and retry/downsize policy.
+   - Status: implemented in `binance_trade_bot/futures_transfer_policy.py` with pure unit tests in `tests/test_futures_transfer_policy.py`.
 
 2. Add typed result objects for futures transfer attempts.
    - Avoid returning only `bool`; include attempted amount, status, error code, and retryability.
