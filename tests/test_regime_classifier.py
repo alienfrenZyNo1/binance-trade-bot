@@ -153,6 +153,23 @@ def test_history_comparison_summarizes_multi_vs_legacy_sequences():
 
     assert history["samples"]
     assert history["multi"]["count"] == len(history["samples"])
+    assert history["smoothed"]["count"] == len(history["samples"])
     assert history["legacy"]["count"] == len(history["samples"])
     assert 0.0 <= history["disagreement_pct"] <= 100.0
-    assert {"multi", "legacy", "confidence", "score"}.issubset(history["samples"][0])
+    assert 0.0 <= history["smoothed_disagreement_pct"] <= 100.0
+    assert {"multi", "multi_smoothed", "legacy", "confidence", "score"}.issubset(history["samples"][0])
+
+
+def test_hysteresis_requires_confirmed_switches():
+    module = load_module()
+    samples = [
+        {"multi": "bull", "legacy": "bull", "confidence": 0.9},
+        {"multi": "bear", "legacy": "bear", "confidence": 0.9},
+        {"multi": "bull", "legacy": "bull", "confidence": 0.9},
+        {"multi": "bear", "legacy": "bear", "confidence": 0.9},
+        {"multi": "bear", "legacy": "bear", "confidence": 0.9},
+    ]
+
+    smoothed = module._apply_hysteresis(samples, confirmation_samples=2, min_confidence=0.6)
+
+    assert [row["multi_smoothed"] for row in smoothed] == ["bull", "bull", "bull", "bull", "bear"]

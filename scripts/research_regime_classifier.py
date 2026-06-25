@@ -434,6 +434,47 @@ def _sequence_summary(regimes: list[str]) -> dict[str, Any]:
     }
 
 
+def _apply_hysteresis(
+    samples: list[dict[str, Any]],
+    *,
+    confirmation_samples: int = 1,
+    min_confidence: float = 0.0,
+) -> list[dict[str, Any]]:
+    """Smooth multi-signal regime samples using confirmation + confidence gates."""
+    if not samples:
+        return []
+    confirmation_samples = max(1, confirmation_samples)
+    active = str(samples[0]["multi"])
+    candidate: str | None = None
+    candidate_count = 0
+    smoothed: list[dict[str, Any]] = []
+
+    for row in samples:
+        proposed = str(row["multi"])
+        confidence = float(row.get("confidence", 0.0))
+        if proposed == active:
+            candidate = None
+            candidate_count = 0
+        elif confidence < min_confidence:
+            candidate = None
+            candidate_count = 0
+        else:
+            if proposed == candidate:
+                candidate_count += 1
+            else:
+                candidate = proposed
+                candidate_count = 1
+            if candidate_count >= confirmation_samples:
+                active = proposed
+                candidate = None
+                candidate_count = 0
+
+        new_row = dict(row)
+        new_row["multi_smoothed"] = active
+        smoothed.append(new_row)
+    return smoothed
+
+
 def compare_regime_history(
     ohlcv_by_coin: dict[str, list[dict[str, float | int]]],
     *,
@@ -441,11 +482,25 @@ def compare_regime_history(
     breadth_coins: Iterable[str] = DEFAULT_BREADTH_COINS,
     step_hours: int = 4,
     warmup_hours: int = 60,
+    confirmation_samples: int = 1,
+    min_confidence: float = 0.0,
 ) -> dict[str, Any]:
     """Compare multi-signal regimes vs the current SOL-only classifier over history."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
     if not timestamps:
-        return {"samples": [], "multi": _sequence_summary([]), "legacy": _sequence_summary([]), "disagreement_pct": 0.0}
+        empty = _sequence_summary([])
+        return {
+            "samples": [],
+            "multi": empty,
+            "smoothed": empty,
+            "legacy": empty,
+            "disagreement_pct": 0.0,
+            "smoothed_disagreement_pct": 0.0,
+            "hysteresis": {
+                "confirmation_samples": max(1, confirmation_samples),
+                "min_confidence": min_confidence,
+            },
+        }
 
     step_ms = max(1, step_hours) * HOUR_MS
     warmup_ms = warmup_hours * HOUR_MS
@@ -473,14 +528,27 @@ def compare_regime_history(
             }
         )
 
+    smoothed_samples = _apply_hysteresis(
+        samples,
+        confirmation_samples=confirmation_samples,
+        min_confidence=min_confidence,
+    )
     multi_regimes = [row["multi"] for row in samples]
+    smoothed_regimes = [row["multi_smoothed"] for row in smoothed_samples]
     legacy_regimes = [row["legacy"] for row in samples]
     disagreements = sum(1 for row in samples if row["multi"] != row["legacy"])
+    smoothed_disagreements = sum(1 for row in smoothed_samples if row["multi_smoothed"] != row["legacy"])
     return {
-        "samples": samples,
+        "samples": smoothed_samples,
         "multi": _sequence_summary(multi_regimes),
+        "smoothed": _sequence_summary(smoothed_regimes),
         "legacy": _sequence_summary(legacy_regimes),
         "disagreement_pct": disagreements / len(samples) * 100.0 if samples else 0.0,
+        "smoothed_disagreement_pct": smoothed_disagreements / len(samples) * 100.0 if samples else 0.0,
+        "hysteresis": {
+            "confirmation_samples": max(1, confirmation_samples),
+            "min_confidence": min_confidence,
+        },
     }
 
 
@@ -665,6 +733,8 @@ def parse_args(argv=None):
     parser.add_argument("--history-compare", action="store_true", help="Compare multi-signal history with the current SOL-only classifier")
     parser.add_argument("--history-step-hours", type=int, default=4, help="Sample spacing for --history-compare")
     parser.add_argument("--history-warmup-hours", type=int, default=60, help="Initial warmup before --history-compare sampling")
+    parser.add_argument("--history-confirmation", type=int, default=1, help="Samples required before accepting a history regime switch")
+    parser.add_argument("--history-min-confidence", type=float, default=0.0, help="Minimum confidence required before accepting a history switch")
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     return parser.parse_args(argv)
 
@@ -691,6 +761,8 @@ def main(argv=None):
             breadth_coins=coins,
             step_hours=args.history_step_hours,
             warmup_hours=args.history_warmup_hours,
+            confirmation_samples=args.history_confirmation,
+            min_confidence=args.history_min_confidence,
         )
     if args.json:
         payload = result.to_dict()
@@ -723,9 +795,13 @@ def main(argv=None):
         print("\nHistory comparison vs current SOL-only classifier:")
         print(
             f"  samples={history['multi']['count']} disagreement={history['disagreement_pct']:.1f}% "
-            f"multi_flips={history['multi']['flips']} legacy_flips={history['legacy']['flips']}"
+            f"smoothed_disagreement={history['smoothed_disagreement_pct']:.1f}% "
+            f"multi_flips={history['multi']['flips']} smoothed_flips={history['smoothed']['flips']} "
+            f"legacy_flips={history['legacy']['flips']}"
         )
+        print(f"  hysteresis={history['hysteresis']}")
         print(f"  multi_distribution={history['multi']['distribution']}")
+        print(f"  smoothed_distribution={history['smoothed']['distribution']}")
         print(f"  legacy_distribution={history['legacy']['distribution']}")
     return result
 
