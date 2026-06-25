@@ -285,3 +285,96 @@ def test_evaluate_regime_v2_history_can_tune_route_objective_and_emit_diagnostic
     assert "regime_v2_route_tuned" in output["route_outcomes"]
     assert "route_failure_diagnostics" in output
     assert output["route_failure_diagnostics"]["regime_v2"]["worst_windows"]
+
+
+def base_guardrail_features():
+    return {
+        "reference_trend_score": 1.0,
+        "breadth_above_ema20_pct": 0.8,
+        "breadth_above_ema50_pct": 0.8,
+        "breadth_advancers_24h_pct": 0.8,
+        "basket_ret_24h": 3.0,
+        "basket_ret_4h": 1.0,
+        "basket_vs_btc_24h": 1.5,
+        "basket_vs_eth_24h": 1.0,
+        "basket_vs_sol_24h": 0.5,
+        "return_dispersion_24h": 1.0,
+        "median_vol_24h": 3.0,
+        "downside_vol_24h": 0.5,
+        "median_volume_change_24h": 1.0,
+        "futures_valid_symbols": 0,
+        "futures_funding_pct": 0.0,
+        "futures_basis_pct": 0.0,
+        "futures_oi_change_pct": 0.0,
+        "futures_taker_ratio": 1.0,
+    }
+
+
+def test_guardrails_block_false_bull_when_breadth_is_deteriorating_fast():
+    module = load_module()
+    features = base_guardrail_features()
+    features.update(
+        {
+            "basket_ret_4h": -3.2,
+            "breadth_advancers_24h_pct": 0.30,
+            "downside_vol_24h": 6.5,
+            "return_dispersion_24h": 7.5,
+        }
+    )
+
+    result = module.classify_v2_scorecard(features)
+
+    assert result["regime"] != module.BULL
+    assert any("false-bull" in reason for reason in result["reasons"])
+
+
+def test_guardrails_block_false_bear_when_rebound_risk_is_high():
+    module = load_module()
+    features = base_guardrail_features()
+    features.update(
+        {
+            "reference_trend_score": -1.0,
+            "breadth_above_ema50_pct": 0.25,
+            "breadth_advancers_24h_pct": 0.72,
+            "basket_ret_24h": -2.5,
+            "basket_ret_4h": 3.4,
+            "basket_vs_btc_24h": 1.2,
+            "futures_taker_ratio": 1.15,
+        }
+    )
+
+    result = module.classify_v2_scorecard(features)
+
+    assert result["regime"] != module.BEAR
+    assert any("rebound" in reason for reason in result["reasons"])
+
+
+def test_route_robustness_gates_require_multi_window_positive_returns():
+    module = load_module()
+    records = []
+    for idx, ret in enumerate([2.0, 2.0, -6.0, 2.0, 2.0, 2.0]):
+        records.append({"v2_smoothed": module.BULL, "future_basket_ret": ret, "future_btc_ret": ret / 2})
+
+    robustness = module.build_route_robustness_gates(records, "v2_smoothed", fee_bps=10, windows=3, min_window_return_pct=0.0, max_window_drawdown_pct=5.0)
+
+    assert robustness["passed"] is False
+    assert robustness["passing_windows"] < robustness["total_windows"]
+    assert any(window["total_return_pct"] < 0 for window in robustness["windows"])
+
+
+def test_evaluate_regime_v2_history_emits_route_robustness_gates():
+    module = load_module()
+    output = module.evaluate_regime_v2_history(
+        make_dataset(),
+        references=["BTC", "ETH", "SOL"],
+        breadth_coins=["SOL", "SUI", "AAVE", "LINK"],
+        step_hours=12,
+        warmup_hours=72,
+        forward_hours=12,
+        tune_route_objective=True,
+        train_fraction=0.5,
+    )
+
+    assert "route_robustness" in output
+    assert "regime_v2" in output["route_robustness"]
+    assert "passed" in output["route_robustness"]["regime_v2"]

@@ -289,6 +289,41 @@ def _scorecard_reasons(features: dict[str, float | int], components: dict[str, f
     return reasons[:6]
 
 
+def guardrail_reasons(features: dict[str, float | int], score: float, bull_threshold: float, bear_threshold: float) -> list[str]:
+    """Explain risk guardrails that override otherwise high-conviction raw scores."""
+    basket4 = float(features["basket_ret_4h"])
+    basket24 = float(features["basket_ret_24h"])
+    adv = float(features["breadth_advancers_24h_pct"])
+    vs_btc = float(features["basket_vs_btc_24h"])
+    down_vol = float(features["downside_vol_24h"])
+    dispersion = float(features["return_dispersion_24h"])
+    taker = float(features["futures_taker_ratio"])
+    reasons = []
+    if score >= bull_threshold and (
+        basket4 <= -2.0
+        or adv <= 0.35
+        or (down_vol >= 5.5 and dispersion >= 5.0)
+    ):
+        reasons.append("false-bull guardrail: fast deterioration/downside volatility blocks risk-on")
+    if score <= -bear_threshold and (
+        basket4 >= 2.5
+        or (adv >= 0.65 and vs_btc >= 0.5)
+        or taker >= 1.12
+    ):
+        reasons.append("rebound guardrail: fast breadth lift/short-squeeze risk blocks bearish route")
+    return reasons
+
+
+def apply_regime_guardrails(regime: str, features: dict[str, float | int], score: float, bull_threshold: float, bear_threshold: float) -> tuple[str, list[str]]:
+    reasons = guardrail_reasons(features, score, bull_threshold, bear_threshold)
+    guarded = regime
+    if regime == BULL and any("false-bull" in reason for reason in reasons):
+        guarded = STORMY if float(features["downside_vol_24h"]) >= 6.0 or float(features["basket_ret_4h"]) <= -3.0 else SIDEWAYS
+    if regime == BEAR and any("rebound" in reason for reason in reasons):
+        guarded = SIDEWAYS
+    return guarded, reasons
+
+
 def classify_v2_scorecard(features: dict[str, float | int], weights: dict[str, float] | None = None) -> dict[str, Any]:
     """Interpretable Regime v2 scorecard; research-only, no live routing."""
     weights = weights or DEFAULT_SCORE_WEIGHTS
@@ -316,8 +351,10 @@ def classify_v2_scorecard(features: dict[str, float | int], weights: dict[str, f
         regime = BEAR
     else:
         regime = SIDEWAYS
+    regime, guard_reasons = apply_regime_guardrails(regime, features, score, bull_threshold, bear_threshold)
     confidence = min(0.95, 0.45 + abs(score) / 6.0)
-    return {"regime": regime, "score": score, "confidence": confidence, "reasons": _scorecard_reasons(features, components)}
+    reasons = _scorecard_reasons(features, components) + guard_reasons
+    return {"regime": regime, "score": score, "confidence": confidence, "reasons": reasons[:8]}
 
 
 def score_records_with_weights(records: list[dict[str, Any]], weights: dict[str, float]) -> dict[str, Any]:
@@ -560,6 +597,56 @@ def route_failure_diagnostics(records: list[dict[str, Any]], route_key: str, *, 
     return {"route_key": route_key, "worst_windows": sorted(windows, key=lambda item: item["route_return_pct"])[:limit]}
 
 
+def build_route_robustness_gates(
+    records: list[dict[str, Any]],
+    route_key: str,
+    *,
+    fee_bps: float,
+    windows: int = 3,
+    min_window_return_pct: float = 0.25,
+    max_window_drawdown_pct: float = 20.0,
+) -> dict[str, Any]:
+    """Evaluate whether a route survives multiple chronological slices."""
+    if not records:
+        return {"route_key": route_key, "passed": False, "total_windows": 0, "passing_windows": 0, "windows": []}
+    windows = max(1, min(windows, len(records)))
+    chunk_size = math.ceil(len(records) / windows)
+    window_rows = []
+    for idx in range(windows):
+        chunk = records[idx * chunk_size : (idx + 1) * chunk_size]
+        if not chunk:
+            continue
+        returns = [
+            route_window_return(
+                str(row.get(route_key, SIDEWAYS)),
+                future_basket_ret=float(row.get("future_basket_ret", 0.0)),
+                future_btc_ret=float(row.get("future_btc_ret", 0.0)),
+                fee_bps=fee_bps,
+            )
+            for row in chunk
+        ]
+        result = _compound_returns(returns)
+        result.update(
+            {
+                "window_index": idx + 1,
+                "start_time": chunk[0].get("time"),
+                "end_time": chunk[-1].get("time"),
+                "passed": result["total_return_pct"] >= min_window_return_pct and result["max_drawdown_pct"] <= max_window_drawdown_pct,
+            }
+        )
+        window_rows.append(result)
+    passing = sum(1 for row in window_rows if row["passed"])
+    return {
+        "route_key": route_key,
+        "passed": bool(window_rows) and passing == len(window_rows),
+        "passing_windows": passing,
+        "total_windows": len(window_rows),
+        "min_window_return_pct": min_window_return_pct,
+        "max_window_drawdown_pct": max_window_drawdown_pct,
+        "windows": window_rows,
+    }
+
+
 def _build_leaderboard(records: list[dict[str, Any]], route_outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     legacy_acc = _accuracy(records, "legacy_regime")
     v1_acc = _accuracy(records, "v1_regime")
@@ -740,10 +827,17 @@ def evaluate_regime_v2_history(
         "research_v1": route_failure_diagnostics(raw_records, "v1_regime", fee_bps=fee_bps),
         "regime_v2": route_failure_diagnostics(raw_records, "v2_smoothed", fee_bps=fee_bps),
     }
+    route_robustness = {
+        "legacy_sol": build_route_robustness_gates(raw_records, "legacy_regime", fee_bps=fee_bps),
+        "research_v1": build_route_robustness_gates(raw_records, "v1_regime", fee_bps=fee_bps),
+        "regime_v2": build_route_robustness_gates(raw_records, "v2_smoothed", fee_bps=fee_bps),
+    }
     if raw_records and "v2_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_tuned"] = route_failure_diagnostics(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_tuned"] = build_route_robustness_gates(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
     if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_route_tuned"] = route_failure_diagnostics(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
 
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
@@ -779,6 +873,7 @@ def evaluate_regime_v2_history(
         "leaderboard": _build_leaderboard(raw_records, route_outcomes),
         "route_outcomes": route_outcomes,
         "route_failure_diagnostics": route_failure,
+        "route_robustness": route_robustness,
         "tuning": tuning,
         "route_tuning": route_tuning,
     }
