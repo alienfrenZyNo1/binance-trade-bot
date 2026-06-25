@@ -118,6 +118,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 
 3. Keep high-frequency failure logs deduped/non-spamming.
    - API errors in repeated scout loops should log once or at debug unless action is required.
+   - Status: notification handler already enforces exact-message dedupe and global rate limit; futures transfer `-5013` paths log `notification=False`.
 
 ### Phase 2 — Runtime strategy boundaries
 
@@ -127,15 +128,18 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 
 5. Extract regime detection input/output contract.
    - Keep ADX/EMA calculation separate from stateful hysteresis and DB logging.
+   - Status: complete through `indicators.py` and `regime_hysteresis.py`; live strategy calls pure helpers and only applies side effects after confirmed transition.
 
 ### Phase 3 — Persistence boundaries
 
 6. Split `database.py` into repositories behind the existing `Database` facade.
    - Start with `bot_state` and `deposits` because they already have tests.
    - Keep `Database` methods as delegating compatibility wrappers.
+   - Status: `BotStateRepository` and `DepositRepository` added behind `Database`; `Deposit.id` model fixed to match live INTEGER schema.
 
 7. Lazy-load optional runtime integrations.
    - Continue avoiding eager socketio/eventlet imports for pure helper imports.
+   - Status: Database keeps Socket.IO client lazy; import-safety tests cover pure helper imports.
 
 ### Phase 4 — Telegram maintainability
 
@@ -151,6 +155,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 10. Create a clear research package or docs index.
     - Do not move scripts until command compatibility and tests are in place.
     - Add wrapper scripts if paths change.
+    - Status: `docs/research-index.md` added; script paths intentionally preserved.
 
 ### Phase 6 — Documentation and developer experience
 
@@ -162,9 +167,11 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
     - testing commands
     - Telegram smoke testing
     - Binance API quirks
+    - Status: complete in `docs/developer-guide.md`.
 
 12. Add config validation documentation and eventually startup validation.
     - Start with warnings for invalid ranges before hard failures.
+    - Status: documented in `docs/developer-guide.md`; stricter runtime validation remains future work to avoid surprise production aborts.
 
 ## Current urgent bug-fix plan: futures `-5013` transfer failure
 
