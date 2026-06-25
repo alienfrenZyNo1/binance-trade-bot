@@ -36,6 +36,7 @@ from binance_trade_bot.indicators import (
     compute_rsi as _compute_rsi_func,
 )
 from binance_trade_bot.regime_hysteresis import RegimeHysteresis
+from binance_trade_bot.regime_transition_planner import plan_regime_transition
 
 # Regime constants
 BULL = "bull"
@@ -257,44 +258,61 @@ class Strategy(AutoTrader):
 
     def _handle_regime_transition(self, old_regime: str, new_regime: str):
         """Handle capital moves between spot and futures on regime changes."""
+        current_coin = None
+        has_spot_position = False
+        position_price = None
+
         if new_regime == BEAR and old_regime != BEAR:
-            # Moving INTO bear: sell spot holdings to USDC, transfer to futures
-            self.logger.info("Regime → BEAR: preparing for short trading")
             current_coin = self.db.get_current_coin()
             if current_coin:
                 balance = self.manager.get_currency_balance(current_coin.symbol)
-                price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
-                if balance and price and balance * price > 5.0:
-                    self.logger.info(f"Selling {current_coin} to {self.config.BRIDGE} for futures margin")
-                    result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
-                    if result is None:
-                        self.logger.error(
-                            f"BEAR transition blocked: failed to sell {current_coin}; "
-                            "will not transfer to futures/open shorts"
-                        )
-                        return
-                    # Verify spot exposure is gone before opening futures shorts.
-                    remaining = self.manager.get_currency_balance(current_coin.symbol)
-                    latest_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE) or price
-                    if remaining and remaining * latest_price > 5.0:
-                        self.logger.error(
-                            f"BEAR transition blocked: still holding {remaining} {current_coin} "
-                            f"(~${remaining * latest_price:.2f}) after sell"
-                        )
-                        return
+                position_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                has_spot_position = bool(balance and position_price and balance * position_price > 5.0)
+
+        plan = plan_regime_transition(
+            current_regime=old_regime,
+            target_regime=new_regime,
+            holding_coin=getattr(current_coin, "symbol", None) if current_coin else None,
+            has_spot_position=has_spot_position,
+            has_futures_position=getattr(self.futures_manager, "_open_position", None) is not None,
+            awaiting_reentry=self._awaiting_reentry,
+        )
+
+        if plan.target_regime == BEAR and plan.current_regime != BEAR:
+            # Moving INTO bear: sell spot holdings to USDC, transfer to futures
+            self.logger.info("Regime → BEAR: preparing for short trading")
+            if plan.requires_spot_exit and current_coin:
+                self.logger.info(f"Selling {current_coin} to {self.config.BRIDGE} for futures margin")
+                result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
+                if result is None:
+                    self.logger.error(
+                        f"BEAR transition blocked: failed to sell {current_coin}; "
+                        "will not transfer to futures/open shorts"
+                    )
+                    return
+                # Verify spot exposure is gone before opening futures shorts.
+                remaining = self.manager.get_currency_balance(current_coin.symbol)
+                latest_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE) or position_price
+                if remaining and latest_price and remaining * latest_price > 5.0:
+                    self.logger.error(
+                        f"BEAR transition blocked: still holding {remaining} {current_coin} "
+                        f"(~${remaining * latest_price:.2f}) after sell"
+                    )
+                    return
 
             # Transfer USDC to futures wallet
-            bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
-            if bridge_bal and bridge_bal > 5.0:
-                self.futures_manager.transfer_to_futures(bridge_bal)
+            if plan.requires_futures_transfer:
+                bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+                if bridge_bal and bridge_bal > 5.0:
+                    self.futures_manager.transfer_to_futures(bridge_bal)
 
             # Clear awaiting_reentry — we're in futures mode now, not waiting for spot re-entry
-            if self._awaiting_reentry:
+            if plan.clear_awaiting_reentry:
                 self._awaiting_reentry = False
                 self._persist_trade_state()
                 self.logger.info("Cleared awaiting_reentry flag — entering futures mode")
 
-        elif old_regime == BEAR and new_regime != BEAR:
+        elif plan.requires_futures_exit_check:
             # Moving OUT OF bear: close shorts, transfer back to spot
             self.logger.info("Regime ← BEAR: closing futures, returning to spot")
             close_result = self.futures_manager.manage_exit()

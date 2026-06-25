@@ -125,6 +125,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 4. Extract regime transition side effects from `momentum_strategy.py`.
    - Separate pure decision logic from side effects: sell spot, transfer wallet, open/close futures.
    - Keep tests around BEAR entry/exit safety before moving code.
+   - Status: pure transition planner extracted in `binance_trade_bot/regime_transition_planner.py`; `MomentumStrategy` still owns side effects, with regression tests covering BEAR entry/exit call order.
 
 5. Extract regime detection input/output contract.
    - Keep ADX/EMA calculation separate from stateful hysteresis and DB logging.

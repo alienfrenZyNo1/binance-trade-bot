@@ -22,6 +22,24 @@ assert 'eventlet' not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+def test_regime_transition_planner_import_does_not_import_socketio_or_eventlet():
+    code = """
+import sys
+from binance_trade_bot.regime_transition_planner import plan_regime_transition
+assert callable(plan_regime_transition)
+assert 'socketio' not in sys.modules
+assert 'eventlet' not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_database_send_update_default_does_not_import_socketio_or_eventlet():
     code = """
 import sys
