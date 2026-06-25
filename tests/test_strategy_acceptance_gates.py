@@ -60,6 +60,32 @@ def test_evaluate_strategy_fails_unprofitable_or_fragile_record():
     assert any("trades" in failure for failure in result.failures)
 
 
+def test_evaluate_strategy_can_gate_robust_window_pass_rate():
+    module = load_module()
+    result = module.evaluate_strategy(
+        {
+            "name": "lucky-bull-window",
+            "regime": "bull",
+            "oos_pnl": 9.0,
+            "baseline_pnl": 1.0,
+            "max_drawdown": 12.0,
+            "trades": 9,
+            "fee_pct": 2.0,
+            "sharpe": 0.8,
+            "robustness": {
+                "window_count": 4,
+                "passing_windows": 1,
+                "pass_rate_pct": 25.0,
+            },
+        },
+        gates={"min_passing_windows": 2, "min_window_pass_rate_pct": 50.0},
+    )
+
+    assert result.passed is False
+    assert any("passing windows" in failure for failure in result.failures)
+    assert any("window pass rate" in failure for failure in result.failures)
+
+
 def test_build_leaderboard_groups_by_regime_and_sorts_passes_first():
     module = load_module()
     leaderboard = module.build_leaderboard(
