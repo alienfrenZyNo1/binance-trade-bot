@@ -33,12 +33,14 @@ _ema = _indicators_mod.compute_ema
 _adx = _indicators_mod.compute_adx
 
 BINANCE_API = "https://api.binance.com/api/v3"
+BINANCE_FAPI = "https://fapi.binance.com"
 BRIDGE = "USDC"
 BULL = "bull"
 BEAR = "bear"
 SIDEWAYS = "sideways"
 STORMY = "stormy"
 DEFAULT_REFERENCES = ("BTC", "ETH", "SOL")
+DEFAULT_FUTURES_SYMBOLS = ("BTCUSDC", "ETHUSDC", "SOLUSDC")
 DEFAULT_BREADTH_COINS = (
     "SOL", "SUI", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE", "AVAX",
     "APT", "INJ", "TIA", "ENA", "PEPE", "JUP",
@@ -120,6 +122,151 @@ def fetch_market_data(
         out[coin] = fetch_klines(f"{coin}{bridge}", interval=interval, days=days)
         time.sleep(0.05)
     return out
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def fetch_futures_json(path: str, params: dict[str, Any]) -> Any:
+    """Fetch a Binance USDC-M/USDT-M public futures endpoint."""
+    resp = requests.get(f"{BINANCE_FAPI}{path}", params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_futures_signals(
+    symbols: Iterable[str] = DEFAULT_FUTURES_SYMBOLS,
+    *,
+    period: str = "1h",
+    limit: int = 24,
+) -> dict[str, dict[str, Any]]:
+    """Fetch public futures sentiment/risk signals for the given symbols.
+
+    Uses free Binance endpoints only. Missing symbols/endpoints are skipped so a
+    single unavailable futures market does not break the research classifier.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        symbol = symbol.strip().upper()
+        if not symbol:
+            continue
+        payload: dict[str, Any] = {}
+        endpoint_specs = {
+            "premium": ("/fapi/v1/premiumIndex", {"symbol": symbol}),
+            "funding": ("/fapi/v1/fundingRate", {"symbol": symbol, "limit": min(limit, 100)}),
+            "open_interest_hist": (
+                "/futures/data/openInterestHist",
+                {"symbol": symbol, "period": period, "limit": min(limit, 500)},
+            ),
+            "global_long_short": (
+                "/futures/data/globalLongShortAccountRatio",
+                {"symbol": symbol, "period": period, "limit": min(limit, 500)},
+            ),
+            "top_long_short": (
+                "/futures/data/topLongShortAccountRatio",
+                {"symbol": symbol, "period": period, "limit": min(limit, 500)},
+            ),
+            "taker_long_short": (
+                "/futures/data/takerlongshortRatio",
+                {"symbol": symbol, "period": period, "limit": min(limit, 500)},
+            ),
+        }
+        for key, (path, params) in endpoint_specs.items():
+            try:
+                payload[key] = fetch_futures_json(path, params)
+            except requests.RequestException as exc:
+                payload.setdefault("errors", {})[key] = str(exc)
+            time.sleep(0.05)
+        out[symbol] = payload
+    return out
+
+
+def _change_pct(values: list[float]) -> float:
+    values = [value for value in values if value > 0]
+    if len(values) < 2 or values[0] == 0:
+        return 0.0
+    return (values[-1] / values[0] - 1.0) * 100.0
+
+
+def _futures_metrics(futures_data: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    """Aggregate public futures signals into compact sentiment metrics."""
+    if not futures_data:
+        return {"valid_symbols": 0}
+
+    basis_values: list[float] = []
+    funding_values: list[float] = []
+    oi_value_changes: list[float] = []
+    global_lsr_values: list[float] = []
+    top_lsr_values: list[float] = []
+    taker_buy_sell_values: list[float] = []
+    per_symbol: dict[str, dict[str, float]] = {}
+
+    for symbol, payload in futures_data.items():
+        metrics: dict[str, float] = {}
+
+        premium = payload.get("premium") or {}
+        mark = _safe_float(premium.get("markPrice"))
+        index = _safe_float(premium.get("indexPrice"))
+        if mark and index:
+            basis_pct = (mark / index - 1.0) * 100.0
+            basis_values.append(basis_pct)
+            metrics["basis_pct"] = basis_pct
+        if premium.get("lastFundingRate") is not None:
+            funding_pct = _safe_float(premium.get("lastFundingRate")) * 100.0
+            funding_values.append(funding_pct)
+            metrics["funding_pct"] = funding_pct
+
+        funding = payload.get("funding") or []
+        if funding:
+            latest_funding_pct = _safe_float(funding[-1].get("fundingRate")) * 100.0
+            metrics["latest_funding_pct"] = latest_funding_pct
+            if "funding_pct" not in metrics:
+                funding_values.append(latest_funding_pct)
+
+        oi_hist = payload.get("open_interest_hist") or []
+        oi_values = [_safe_float(row.get("sumOpenInterestValue")) for row in oi_hist]
+        oi_change = _change_pct(oi_values)
+        if oi_values:
+            oi_value_changes.append(oi_change)
+            metrics["oi_value_change_pct"] = oi_change
+
+        global_lsr = payload.get("global_long_short") or []
+        if global_lsr:
+            value = _safe_float(global_lsr[-1].get("longShortRatio"))
+            global_lsr_values.append(value)
+            metrics["global_long_short_ratio"] = value
+
+        top_lsr = payload.get("top_long_short") or []
+        if top_lsr:
+            value = _safe_float(top_lsr[-1].get("longShortRatio"))
+            top_lsr_values.append(value)
+            metrics["top_long_short_ratio"] = value
+
+        taker_lsr = payload.get("taker_long_short") or []
+        if taker_lsr:
+            value = _safe_float(taker_lsr[-1].get("buySellRatio"))
+            taker_buy_sell_values.append(value)
+            metrics["taker_buy_sell_ratio"] = value
+
+        if metrics:
+            per_symbol[symbol] = metrics
+
+    return {
+        "valid_symbols": len(per_symbol),
+        "avg_basis_pct": sum(basis_values) / len(basis_values) if basis_values else 0.0,
+        "avg_funding_pct": sum(funding_values) / len(funding_values) if funding_values else 0.0,
+        "median_oi_value_change_pct": median(oi_value_changes) if oi_value_changes else 0.0,
+        "avg_global_long_short_ratio": sum(global_lsr_values) / len(global_lsr_values) if global_lsr_values else 0.0,
+        "avg_top_long_short_ratio": sum(top_lsr_values) / len(top_lsr_values) if top_lsr_values else 0.0,
+        "avg_taker_buy_sell_ratio": sum(taker_buy_sell_values) / len(taker_buy_sell_values) if taker_buy_sell_values else 0.0,
+        "symbols": per_symbol,
+    }
 
 
 def pct_change(closes: list[float], periods: int) -> float:
@@ -235,8 +382,9 @@ def classify_regime(
     *,
     references: Iterable[str] = DEFAULT_REFERENCES,
     breadth_coins: Iterable[str] = DEFAULT_BREADTH_COINS,
+    futures_data: dict[str, dict[str, Any]] | None = None,
 ) -> RegimeResult:
-    """Classify market regime using trend, breadth, return, and volatility signals."""
+    """Classify market regime using spot trend/breadth plus optional futures signals."""
     reasons: list[str] = []
     score = 0.0
     ref_metrics: dict[str, dict[str, float]] = {}
@@ -296,11 +444,64 @@ def classify_regime(
     btc_ret4 = float(btc.get("ret_4h", 0.0))
     btc_ret24 = float(btc.get("ret_24h", 0.0))
 
+    futures = _futures_metrics(futures_data)
+    futures_valid = int(futures.get("valid_symbols", 0) or 0)
+    avg_basis = float(futures.get("avg_basis_pct", 0.0) or 0.0)
+    avg_funding = float(futures.get("avg_funding_pct", 0.0) or 0.0)
+    oi_change = float(futures.get("median_oi_value_change_pct", 0.0) or 0.0)
+    global_lsr = float(futures.get("avg_global_long_short_ratio", 0.0) or 0.0)
+    top_lsr = float(futures.get("avg_top_long_short_ratio", 0.0) or 0.0)
+    taker_ratio = float(futures.get("avg_taker_buy_sell_ratio", 0.0) or 0.0)
+
+    if futures_valid:
+        # Rising open interest confirms moves when it agrees with spot/breadth;
+        # it raises storm risk when it builds into a falling market.
+        if oi_change >= 3.0 and (median24 > 1.0 or btc_ret24 > 1.0):
+            score += 0.5
+            reasons.append(f"futures confirmation: OI value +{oi_change:.1f}% into rising spot")
+        elif oi_change >= 3.0 and (median24 < -1.0 or btc_ret24 < -1.0):
+            score -= 0.5
+            reasons.append(f"futures risk-off confirmation: OI value +{oi_change:.1f}% into falling spot")
+
+        if avg_basis >= 0.03:
+            score += 0.25
+            reasons.append(f"futures basis positive: mark/index premium {avg_basis:+.3f}%")
+        elif avg_basis <= -0.03:
+            score -= 0.25
+            reasons.append(f"futures basis negative: mark/index discount {avg_basis:+.3f}%")
+
+        if taker_ratio >= 1.08:
+            score += 0.5
+            reasons.append(f"futures taker flow bullish: buy/sell ratio {taker_ratio:.2f}")
+        elif 0.0 < taker_ratio <= 0.92:
+            score -= 0.5
+            reasons.append(f"futures taker flow bearish: buy/sell ratio {taker_ratio:.2f}")
+
+        if avg_funding >= 0.02 and max(global_lsr, top_lsr) >= 1.8:
+            score -= 0.25
+            reasons.append(
+                f"crowded long risk: funding {avg_funding:+.3f}% and long/short ratio {max(global_lsr, top_lsr):.2f}"
+            )
+        elif avg_funding <= -0.02 and 0 < min(global_lsr or 99, top_lsr or 99) <= 0.8:
+            score += 0.25
+            reasons.append(
+                f"crowded short squeeze risk: funding {avg_funding:+.3f}% and long/short ratio {min(global_lsr or 99, top_lsr or 99):.2f}"
+            )
+
+    futures_storm_risk = bool(
+        futures_valid
+        and (
+            (oi_change >= 8.0 and (median24 <= -2.0 or btc_ret4 <= -2.0) and (taker_ratio == 0.0 or taker_ratio <= 0.95))
+            or (abs(avg_basis) >= 0.12 and oi_change >= 5.0)
+        )
+    )
+
     stormy_condition = (
         (vol24 >= 5.0 and median24 <= -3.0 and advancers <= 0.35)
         or (dispersion >= 8.0 and median24 <= -2.0)
         or (btc_ret4 <= -3.0 and advancers <= 0.35)
         or (btc_ret24 <= -5.0 and above50 <= 0.35)
+        or futures_storm_risk
     )
 
     metrics_out = {
@@ -308,6 +509,7 @@ def classify_regime(
         "reference_votes": ref_votes,
         "references": ref_metrics,
         "breadth": breadth,
+        "futures": futures,
         "btc_ret_4h": btc_ret4,
         "btc_ret_24h": btc_ret24,
     }
@@ -317,6 +519,10 @@ def classify_regime(
             f"storm risk: vol {vol24:.1f}%, dispersion {dispersion:.1f}%, "
             f"median24 {median24:+.1f}%, advancers {advancers:.0%}"
         )
+        if futures_storm_risk:
+            reasons.append(
+                f"futures storm risk: OI {oi_change:+.1f}%, basis {avg_basis:+.3f}%, taker buy/sell {taker_ratio:.2f}"
+            )
         confidence = min(0.95, 0.65 + min(0.25, abs(median24) / 20.0) + min(0.10, vol24 / 100.0))
         return RegimeResult(STORMY, round(confidence, 3), round(score, 3), reasons, metrics_out)
 
@@ -345,6 +551,10 @@ def parse_args(argv=None):
     parser.add_argument("--interval", default="1h", help="Binance kline interval")
     parser.add_argument("--coins", default=",".join(DEFAULT_BREADTH_COINS), help="Comma-separated breadth coins")
     parser.add_argument("--references", default=",".join(DEFAULT_REFERENCES), help="Comma-separated reference coins")
+    parser.add_argument("--include-futures", action="store_true", help="Fetch and include Binance public futures sentiment signals")
+    parser.add_argument("--futures-symbols", default=",".join(DEFAULT_FUTURES_SYMBOLS), help="Comma-separated futures symbols, e.g. BTCUSDC,ETHUSDC")
+    parser.add_argument("--futures-period", default="1h", help="Futures data period for OI/ratio endpoints")
+    parser.add_argument("--futures-limit", type=int, default=24, help="Rows to fetch from futures history endpoints")
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     return parser.parse_args(argv)
 
@@ -353,8 +563,16 @@ def main(argv=None):
     args = parse_args(argv)
     coins = [coin.strip().upper() for coin in args.coins.split(",") if coin.strip()]
     references = [coin.strip().upper() for coin in args.references.split(",") if coin.strip()]
+    futures_symbols = [symbol.strip().upper() for symbol in args.futures_symbols.split(",") if symbol.strip()]
     data = fetch_market_data(coins, references=references, interval=args.interval, days=args.days)
-    result = classify_regime(data, references=references, breadth_coins=coins)
+    futures_data = None
+    if args.include_futures:
+        futures_data = fetch_futures_signals(
+            futures_symbols,
+            period=args.futures_period,
+            limit=args.futures_limit,
+        )
+    result = classify_regime(data, references=references, breadth_coins=coins, futures_data=futures_data)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return result
@@ -370,6 +588,15 @@ def main(argv=None):
         f"advancers24h={breadth['advancers_24h_pct']:.0%} "
         f"median24h={breadth['median_ret_24h']:+.1f}% vol24h={breadth['median_vol_24h']:.1f}%"
     )
+    futures = result.metrics.get("futures", {})
+    if futures.get("valid_symbols", 0):
+        print("\nFutures:")
+        print(
+            f"  symbols={futures['valid_symbols']} basis={futures['avg_basis_pct']:+.3f}% "
+            f"funding={futures['avg_funding_pct']:+.3f}% "
+            f"OI={futures['median_oi_value_change_pct']:+.1f}% "
+            f"taker={futures['avg_taker_buy_sell_ratio']:.2f}"
+        )
     return result
 
 
