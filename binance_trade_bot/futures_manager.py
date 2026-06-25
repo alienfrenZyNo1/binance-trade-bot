@@ -61,6 +61,9 @@ class FuturesManager:
         self.bridge_symbol = config.BRIDGE.symbol  # "USDC"
         self.leverage = int(getattr(config, 'FUTURES_LEVERAGE', 1))
         self.max_margin_pct = float(getattr(config, 'FUTURES_MAX_MARGIN_PCT', 0.5))
+        self.margin_type = self._normalize_margin_type(
+            getattr(config, 'FUTURES_MARGIN_TYPE', 'CROSS')
+        )
         self.stop_loss_pct = float(getattr(config, 'FUTURES_STOP_LOSS_PCT', 15.0))
         self.trailing_stop_pct = float(getattr(config, 'FUTURES_TRAILING_STOP_PCT', 10.0))
         self.trailing_activation_pct = float(getattr(config, 'FUTURES_TRAILING_ACTIVATION_PCT', 3.0))
@@ -83,6 +86,74 @@ class FuturesManager:
         self._initialized = False
         self._exchange_info_cache = None
 
+    def _normalize_margin_type(self, value) -> str:
+        """Normalize configured futures margin type.
+
+        Binance rejected ISOLATED for this account with credit-status errors, so
+        CROSS is the production default. ISOLATED remains configurable for a
+        future account state where Binance allows it, but failure to set it must
+        abort the short instead of silently opening CROSS exposure.
+        """
+        margin_type = str(value or "CROSS").upper()
+        if margin_type not in {"CROSS", "ISOLATED"}:
+            self.logger.warning(
+                f"Unknown FUTURES_MARGIN_TYPE={margin_type!r}; defaulting to CROSS"
+            )
+            return "CROSS"
+        return margin_type
+
+    @staticmethod
+    def _is_margin_mode_noop_error(error: BinanceAPIException) -> bool:
+        """Return True when Binance says the requested margin mode is already set."""
+        message = str(getattr(error, "message", "") or error).lower()
+        return getattr(error, "code", None) == -4046 or "no need to change margin type" in message
+
+    def _ensure_margin_mode(self, futures_symbol: str) -> bool:
+        """Set leverage and the configured margin mode before opening a short."""
+        self.client.futures_change_leverage(
+            symbol=futures_symbol, leverage=self.leverage
+        )
+        try:
+            self.client.futures_change_margin_type(
+                symbol=futures_symbol, marginType=self.margin_type
+            )
+        except BinanceAPIException as e:
+            if self._is_margin_mode_noop_error(e):
+                self.logger.debug(
+                    f"Futures margin mode already {self.margin_type} for {futures_symbol}"
+                )
+                return True
+            self.logger.error(
+                f"Futures margin mode {self.margin_type} setup failed for {futures_symbol}; "
+                f"short aborted: {e}"
+            )
+            return False
+        return True
+
+    def _validate_position_margin_mode(self, futures_symbol: str):
+        """Warn if Binance reports a different margin mode than configured."""
+        try:
+            positions = self.client.futures_position_information(symbol=futures_symbol)
+        except Exception as e:
+            self.logger.debug(f"Could not verify margin mode for {futures_symbol}: {e}")
+            return
+        for pos in positions:
+            if pos.get("symbol") != futures_symbol:
+                continue
+            try:
+                if abs(float(pos.get("positionAmt", 0))) == 0:
+                    continue
+            except Exception:
+                continue
+            actual = str(pos.get("marginType") or "?").upper()
+            if actual != self.margin_type:
+                self.logger.warning(
+                    f"Futures margin mode mismatch for {futures_symbol}: "
+                    f"expected {self.margin_type}, exchange reports {actual}. "
+                    "Risk controls use conservative sizing and server-side stops."
+                )
+            return
+
     # ─────────────────────────────────────────────────────────────────────────
     #  INITIALIZATION
     # ─────────────────────────────────────────────────────────────────────────
@@ -100,6 +171,7 @@ class FuturesManager:
             self.logger.info(
                 f"FuturesManager initialized | "
                 f"Leverage: {self.leverage}x | "
+                f"Margin mode: {self.margin_type} | "
                 f"Max margin: {self.max_margin_pct*100:.0f}% | "
                 f"Stop: {self.stop_loss_pct}% | "
                 f"Open positions: {1 if self._open_position else 0}"
@@ -346,16 +418,12 @@ class FuturesManager:
         futures_symbol = f"{coin}{self.bridge_symbol}"
 
         try:
-            # Set leverage to 1x and isolated margin
-            self.client.futures_change_leverage(
-                symbol=futures_symbol, leverage=self.leverage
-            )
-            try:
-                self.client.futures_change_margin_type(
-                    symbol=futures_symbol, marginType="ISOLATED"
-                )
-            except BinanceAPIException:
-                pass  # already ISOLATED
+            # Set leverage and configured margin mode before sizing/opening.
+            # Default is CROSS because Binance currently rejects ISOLATED on
+            # this account; if ISOLATED is explicitly configured and cannot be
+            # set, abort instead of silently opening an unexpected cross short.
+            if not self._ensure_margin_mode(futures_symbol):
+                return 'idle'
 
             # Get current price for quantity calculation
             price = self._get_mark_price(futures_symbol)
@@ -425,10 +493,12 @@ class FuturesManager:
                     self._open_position = None
                 return 'idle'
 
+            self._validate_position_margin_mode(futures_symbol)
+
             self.logger.warning(
                 f" Futures SHORT opened: {futures_symbol} "
                 f"qty={quantity} entry={fill_price} "
-                f"margin=${margin:.2f} perf={perf_pct:+.1f}% "
+                f"margin=${margin:.2f} mode={self.margin_type} perf={perf_pct:+.1f}% "
                 f"funding={self._get_funding_rate(futures_symbol)}"
             )
             return 'opened'
