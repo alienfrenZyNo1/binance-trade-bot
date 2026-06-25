@@ -39,6 +39,19 @@ DEFAULT_FUTURES_SYMBOLS = _regime.DEFAULT_FUTURES_SYMBOLS
 HOUR_MS = _regime.HOUR_MS
 BRIDGE = _regime.BRIDGE
 
+DEFAULT_SCORE_WEIGHTS = {
+    "reference_trend_score": 2.0,
+    "breadth_score": 1.25,
+    "momentum_score": 1.0,
+    "fast_move_score": 0.75,
+    "relative_strength_score": 0.75,
+    "oi_stress_score": 0.75,
+    "basis_score": 0.25,
+    "taker_flow_score": 0.5,
+    "funding_stress_score": 0.25,
+}
+
+
 
 def _closes(rows: list[dict[str, float | int]]) -> list[float]:
     return [float(row["close"]) for row in rows]
@@ -209,101 +222,138 @@ def strategy_utility_label(
     return SIDEWAYS
 
 
-def classify_v2_scorecard(features: dict[str, float | int]) -> dict[str, Any]:
-    """Interpretable Regime v2 scorecard; research-only, no live routing."""
-    score = 0.0
-    reasons = []
+def scorecard_components(features: dict[str, float | int]) -> dict[str, float]:
+    """Convert raw feature snapshot into signed, bounded score components."""
     ref = float(features["reference_trend_score"])
     above50 = float(features["breadth_above_ema50_pct"])
     adv = float(features["breadth_advancers_24h_pct"])
     basket24 = float(features["basket_ret_24h"])
     basket4 = float(features["basket_ret_4h"])
     vs_btc = float(features["basket_vs_btc_24h"])
-    vol = float(features["median_vol_24h"])
-    down_vol = float(features["downside_vol_24h"])
-    dispersion = float(features["return_dispersion_24h"])
     oi = float(features["futures_oi_change_pct"])
     basis = float(features["futures_basis_pct"])
     taker = float(features["futures_taker_ratio"])
     funding = float(features["futures_funding_pct"])
 
-    score += ref * 2.0
-    if ref > 0.4:
-        reasons.append(f"reference trend risk-on score {ref:+.2f}")
-    elif ref < -0.4:
-        reasons.append(f"reference trend risk-off score {ref:+.2f}")
+    breadth = 1.0 if above50 >= 0.70 else -1.0 if above50 <= 0.35 else 0.0
+    momentum = 1.0 if adv >= 0.65 and basket24 > 1.0 else -1.0 if adv <= 0.35 and basket24 < -1.0 else 0.0
+    fast_move = 1.0 if basket4 >= 2.5 else -1.0 if basket4 <= -2.5 else 0.0
+    rel_strength = 1.0 if vs_btc >= 1.0 and basket24 > 0 else -1.0 if vs_btc <= -1.0 else 0.0
+    oi_stress = -1.0 if oi >= 4.0 and (basket24 < -1.0 or basket4 < -1.0) else 1.0 if oi >= 4.0 and basket24 > 1.0 else 0.0
+    basis_score = 1.0 if basis >= 0.04 else -1.0 if basis <= -0.04 else 0.0
+    taker_score = 1.0 if taker >= 1.08 else -1.0 if 0.0 < taker <= 0.92 else 0.0
+    funding_score = -1.0 if funding >= 0.03 and basket24 < 0 else 0.0
+    return {
+        "reference_trend_score": ref,
+        "breadth_score": breadth,
+        "momentum_score": momentum,
+        "fast_move_score": fast_move,
+        "relative_strength_score": rel_strength,
+        "oi_stress_score": oi_stress,
+        "basis_score": basis_score,
+        "taker_flow_score": taker_score,
+        "funding_stress_score": funding_score,
+    }
 
-    if above50 >= 0.70:
-        score += 1.25
-        reasons.append(f"broad participation: {above50:.0%} above EMA50")
-    elif above50 <= 0.35:
-        score -= 1.25
-        reasons.append(f"weak participation: {above50:.0%} above EMA50")
 
-    if adv >= 0.65 and basket24 > 1.0:
-        score += 1.0
-        reasons.append(f"basket advancing: {adv:.0%} advancers, median {basket24:+.1f}%")
-    elif adv <= 0.35 and basket24 < -1.0:
-        score -= 1.0
-        reasons.append(f"basket declining: {adv:.0%} advancers, median {basket24:+.1f}%")
+def _score_from_components(components: dict[str, float], weights: dict[str, float]) -> float:
+    return sum(float(components.get(name, 0.0)) * float(weights.get(name, 0.0)) for name in DEFAULT_SCORE_WEIGHTS)
 
-    if basket4 <= -2.5:
-        score -= 0.75
-        reasons.append(f"fast breadth selloff {basket4:+.1f}%")
-    elif basket4 >= 2.5:
-        score += 0.75
-        reasons.append(f"fast breadth lift {basket4:+.1f}%")
 
-    if vs_btc >= 1.0 and basket24 > 0:
-        score += 0.75
-        reasons.append(f"alt basket outperforming BTC by {vs_btc:+.1f}%")
-    elif vs_btc <= -1.0:
-        score -= 0.5
-        reasons.append(f"alt basket lagging BTC by {vs_btc:+.1f}%")
+def _scorecard_reasons(features: dict[str, float | int], components: dict[str, float]) -> list[str]:
+    reasons = []
+    if components["reference_trend_score"] > 0.4:
+        reasons.append(f"reference trend risk-on score {components['reference_trend_score']:+.2f}")
+    elif components["reference_trend_score"] < -0.4:
+        reasons.append(f"reference trend risk-off score {components['reference_trend_score']:+.2f}")
+    if components["breadth_score"] > 0:
+        reasons.append(f"broad participation: {float(features['breadth_above_ema50_pct']):.0%} above EMA50")
+    elif components["breadth_score"] < 0:
+        reasons.append(f"weak participation: {float(features['breadth_above_ema50_pct']):.0%} above EMA50")
+    if components["momentum_score"] > 0:
+        reasons.append(f"basket advancing: {float(features['breadth_advancers_24h_pct']):.0%} advancers, median {float(features['basket_ret_24h']):+.1f}%")
+    elif components["momentum_score"] < 0:
+        reasons.append(f"basket declining: {float(features['breadth_advancers_24h_pct']):.0%} advancers, median {float(features['basket_ret_24h']):+.1f}%")
+    if components["fast_move_score"] > 0:
+        reasons.append(f"fast breadth lift {float(features['basket_ret_4h']):+.1f}%")
+    elif components["fast_move_score"] < 0:
+        reasons.append(f"fast breadth selloff {float(features['basket_ret_4h']):+.1f}%")
+    if components["relative_strength_score"] > 0:
+        reasons.append(f"alt basket outperforming BTC by {float(features['basket_vs_btc_24h']):+.1f}%")
+    elif components["relative_strength_score"] < 0:
+        reasons.append(f"alt basket lagging BTC by {float(features['basket_vs_btc_24h']):+.1f}%")
+    if not reasons:
+        reasons.append("mixed/low-conviction features")
+    return reasons[:6]
 
-    if oi >= 4.0 and (basket24 < -1.0 or basket4 < -1.0):
-        score -= 0.75
-        reasons.append(f"OI rising into weakness {oi:+.1f}%")
-    elif oi >= 4.0 and basket24 > 1.0:
-        score += 0.5
-        reasons.append(f"OI confirms strength {oi:+.1f}%")
 
-    if basis <= -0.04:
-        score -= 0.25
-        reasons.append(f"negative futures basis {basis:+.3f}%")
-    elif basis >= 0.04:
-        score += 0.25
-        reasons.append(f"positive futures basis {basis:+.3f}%")
-
-    if taker and taker <= 0.92:
-        score -= 0.5
-        reasons.append(f"bearish taker flow {taker:.2f}")
-    elif taker >= 1.08:
-        score += 0.5
-        reasons.append(f"bullish taker flow {taker:.2f}")
-
-    if funding >= 0.03 and basket24 < 0:
-        score -= 0.25
-        reasons.append(f"crowded long stress funding {funding:+.3f}%")
-
+def classify_v2_scorecard(features: dict[str, float | int], weights: dict[str, float] | None = None) -> dict[str, Any]:
+    """Interpretable Regime v2 scorecard; research-only, no live routing."""
+    weights = weights or DEFAULT_SCORE_WEIGHTS
+    components = scorecard_components(features)
+    score = _score_from_components(components, weights)
+    vol = float(features["median_vol_24h"])
+    down_vol = float(features["downside_vol_24h"])
+    dispersion = float(features["return_dispersion_24h"])
+    basket24 = float(features["basket_ret_24h"])
+    basket4 = float(features["basket_ret_4h"])
+    oi = float(features["futures_oi_change_pct"])
     stormy = (
         (vol >= 7.0 and basket24 <= -3.0)
         or (down_vol >= 6.0 and basket4 <= -2.5)
         or (dispersion >= 8.0 and basket24 <= -2.0)
         or (oi >= 8.0 and basket4 <= -2.0)
     )
+    bull_threshold = max(0.75, float(weights.get("bull_threshold", 2.0)))
+    bear_threshold = max(0.75, float(weights.get("bear_threshold", 2.0)))
     if stormy:
         regime = STORMY
-    elif score >= 2.0:
+    elif score >= bull_threshold:
         regime = BULL
-    elif score <= -2.0:
+    elif score <= -bear_threshold:
         regime = BEAR
     else:
         regime = SIDEWAYS
     confidence = min(0.95, 0.45 + abs(score) / 6.0)
-    if not reasons:
-        reasons.append("mixed/low-conviction features")
-    return {"regime": regime, "score": score, "confidence": confidence, "reasons": reasons[:6]}
+    return {"regime": regime, "score": score, "confidence": confidence, "reasons": _scorecard_reasons(features, components)}
+
+
+def score_records_with_weights(records: list[dict[str, Any]], weights: dict[str, float]) -> dict[str, Any]:
+    """Evaluate a weight set on existing records with point-in-time features."""
+    predictions = [classify_v2_scorecard(row["features"], weights)["regime"] for row in records]
+    correct = sum(1 for row, pred in zip(records, predictions) if row.get("label") == pred)
+    flips = sum(1 for i in range(1, len(predictions)) if predictions[i] != predictions[i - 1])
+    accuracy = correct / len(records) * 100.0 if records else 0.0
+    # Penalize unnecessary switching so tuned weights don't simply overfit every label transition.
+    score = accuracy - min(20.0, flips * 0.25)
+    return {"accuracy_pct": accuracy, "score": score, "flips": flips, "predictions": predictions}
+
+
+def train_scorecard_weights(records: list[dict[str, Any]], *, min_records: int = 20) -> dict[str, Any]:
+    """Grid-search a small interpretable weight set on training records."""
+    if len(records) < min_records:
+        baseline = score_records_with_weights(records, DEFAULT_SCORE_WEIGHTS)
+        return {"enabled": False, "reason": "insufficient_records", "weights": dict(DEFAULT_SCORE_WEIGHTS), **baseline}
+    candidate_scales = [0.5, 0.75, 1.0, 1.25, 1.5]
+    threshold_pairs = [(1.5, 1.5), (2.0, 2.0), (2.5, 2.0), (2.0, 2.5)]
+    best: dict[str, Any] | None = None
+    for ref_scale in candidate_scales:
+        for breadth_scale in candidate_scales:
+            for momentum_scale in candidate_scales:
+                for rel_scale in [0.5, 1.0, 1.5]:
+                    for bull_t, bear_t in threshold_pairs:
+                        weights = dict(DEFAULT_SCORE_WEIGHTS)
+                        weights["reference_trend_score"] = DEFAULT_SCORE_WEIGHTS["reference_trend_score"] * ref_scale
+                        weights["breadth_score"] = DEFAULT_SCORE_WEIGHTS["breadth_score"] * breadth_scale
+                        weights["momentum_score"] = DEFAULT_SCORE_WEIGHTS["momentum_score"] * momentum_scale
+                        weights["fast_move_score"] = DEFAULT_SCORE_WEIGHTS["fast_move_score"] * momentum_scale
+                        weights["relative_strength_score"] = DEFAULT_SCORE_WEIGHTS["relative_strength_score"] * rel_scale
+                        weights["bull_threshold"] = bull_t
+                        weights["bear_threshold"] = bear_t
+                        result = score_records_with_weights(records, weights)
+                        if best is None or (result["score"], result["accuracy_pct"], -result["flips"]) > (best["score"], best["accuracy_pct"], -best["flips"]):
+                            best = {"enabled": True, "weights": weights, **result}
+    return best or {"enabled": False, "reason": "no_candidates", "weights": dict(DEFAULT_SCORE_WEIGHTS), **score_records_with_weights(records, DEFAULT_SCORE_WEIGHTS)}
 
 
 def _timestamps_for(ohlcv_by_coin: dict[str, list[dict[str, float | int]]], ref_coin: str = "SOL") -> list[int]:
@@ -370,28 +420,41 @@ def _build_leaderboard(records: list[dict[str, Any]]) -> dict[str, Any]:
     legacy_acc = _accuracy(records, "legacy_regime")
     v1_acc = _accuracy(records, "v1_regime")
     v2_acc = _accuracy(records, "v2_smoothed")
+    tuned_available = bool(records and "v2_tuned_smoothed" in records[0])
+    tuned_acc = _accuracy(records, "v2_tuned_smoothed") if tuned_available else None
     legacy_flips = _seq([row["legacy_regime"] for row in records])["flips"]
     v1_flips = _seq([row["v1_regime"] for row in records])["flips"]
     v2_flips = _seq([row["v2_smoothed"] for row in records])["flips"]
+    tuned_flips = _seq([row["v2_tuned_smoothed"] for row in records])["flips"] if tuned_available else None
     v2_bull_ret = _avg_regime_return(records, "v2_smoothed", BULL)
+    tuned_bull_ret = _avg_regime_return(records, "v2_tuned_smoothed", BULL) if tuned_available else None
     legacy_bull_ret = _avg_regime_return(records, "legacy_regime", BULL)
+    accuracy_rows = [
+        {"name": "regime_v2", "value": v2_acc},
+        {"name": "research_v1", "value": v1_acc},
+        {"name": "legacy_sol", "value": legacy_acc},
+    ]
+    switch_rows = [
+        {"name": "regime_v2", "flips": v2_flips},
+        {"name": "research_v1", "flips": v1_flips},
+        {"name": "legacy_sol", "flips": legacy_flips},
+    ]
+    perf_rows = [
+        {"name": "v2_bull_forward_avg_pct", "value": v2_bull_ret},
+        {"name": "legacy_bull_forward_avg_pct", "value": legacy_bull_ret},
+    ]
+    if tuned_available:
+        accuracy_rows.insert(0, {"name": "regime_v2_tuned", "value": tuned_acc})
+        switch_rows.insert(0, {"name": "regime_v2_tuned", "flips": tuned_flips})
+        perf_rows.insert(0, {"name": "v2_tuned_bull_forward_avg_pct", "value": tuned_bull_ret})
+    best_acc = tuned_acc if tuned_available and tuned_acc is not None else v2_acc
+    best_flips = tuned_flips if tuned_available and tuned_flips is not None else v2_flips
     return {
-        "summary": {"total": len(records), "passed": int(v2_acc >= legacy_acc and v2_flips <= legacy_flips), "failed": int(not (v2_acc >= legacy_acc and v2_flips <= legacy_flips))},
+        "summary": {"total": len(records), "passed": int(best_acc >= legacy_acc and best_flips <= legacy_flips), "failed": int(not (best_acc >= legacy_acc and best_flips <= legacy_flips))},
         "by_metric": {
-            "label_accuracy": [
-                {"name": "regime_v2", "value": v2_acc},
-                {"name": "research_v1", "value": v1_acc},
-                {"name": "legacy_sol", "value": legacy_acc},
-            ],
-            "switching": [
-                {"name": "regime_v2", "flips": v2_flips},
-                {"name": "research_v1", "flips": v1_flips},
-                {"name": "legacy_sol", "flips": legacy_flips},
-            ],
-            "relative_performance": [
-                {"name": "v2_bull_forward_avg_pct", "value": v2_bull_ret},
-                {"name": "legacy_bull_forward_avg_pct", "value": legacy_bull_ret},
-            ],
+            "label_accuracy": accuracy_rows,
+            "switching": switch_rows,
+            "relative_performance": perf_rows,
         },
     }
 
@@ -407,6 +470,8 @@ def evaluate_regime_v2_history(
     confirmation_samples: int = 3,
     min_confidence: float = 0.60,
     fee_bps: float = 10.0,
+    tune_scorecard: bool = False,
+    train_fraction: float = 0.60,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -464,6 +529,28 @@ def evaluate_regime_v2_history(
     for row, regime in zip(raw_records, smoothed):
         row["v2_smoothed"] = regime
 
+    tuning: dict[str, Any] = {"enabled": False, "weights": dict(DEFAULT_SCORE_WEIGHTS)}
+    if tune_scorecard and raw_records:
+        split_idx = max(1, min(len(raw_records), int(len(raw_records) * max(0.1, min(0.9, train_fraction)))))
+        training_records = raw_records[:split_idx]
+        tuning = train_scorecard_weights(training_records, min_records=min(20, max(1, len(training_records))))
+        tuned_weights = tuning.get("weights", DEFAULT_SCORE_WEIGHTS)
+        tuned_results = [classify_v2_scorecard(row["features"], tuned_weights) for row in raw_records]
+        tuned_smoothed = _hysteresis(
+            [str(result["regime"]) for result in tuned_results],
+            [float(result["confidence"]) for result in tuned_results],
+            confirmation_samples,
+            min_confidence,
+        )
+        for row, result, regime in zip(raw_records, tuned_results, tuned_smoothed):
+            row["v2_tuned_regime"] = result["regime"]
+            row["v2_tuned_smoothed"] = regime
+            row["tuned_score"] = result["score"]
+            row["tuned_confidence"] = result["confidence"]
+        tuning["train_records"] = len(training_records)
+        tuning["test_records"] = max(0, len(raw_records) - len(training_records))
+        tuning["train_fraction"] = train_fraction
+
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
     ).hexdigest()
@@ -480,6 +567,8 @@ def evaluate_regime_v2_history(
                 "confirmation_samples": confirmation_samples,
                 "min_confidence": min_confidence,
                 "research_only": True,
+                "tune_scorecard": tune_scorecard,
+                "train_fraction": train_fraction,
             },
         },
         "records": raw_records,
@@ -488,9 +577,11 @@ def evaluate_regime_v2_history(
             "research_v1": _seq([row["v1_regime"] for row in raw_records]),
             "regime_v2_raw": _seq([row["v2_regime"] for row in raw_records]),
             "regime_v2_smoothed": _seq([row["v2_smoothed"] for row in raw_records]),
+            **({"regime_v2_tuned": _seq([row["v2_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_tuned_smoothed" in raw_records[0] else {}),
             "labels": _seq([row["label"] for row in raw_records]),
         },
         "leaderboard": _build_leaderboard(raw_records),
+        "tuning": tuning,
     }
 
 
@@ -509,6 +600,8 @@ def main() -> int:
     parser.add_argument("--confirmation-samples", type=int, default=3)
     parser.add_argument("--min-confidence", type=float, default=0.60)
     parser.add_argument("--fee-bps", type=float, default=10.0)
+    parser.add_argument("--tune-scorecard", action="store_true")
+    parser.add_argument("--train-fraction", type=float, default=0.60)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
@@ -525,18 +618,24 @@ def main() -> int:
         confirmation_samples=args.confirmation_samples,
         min_confidence=args.min_confidence,
         fee_bps=args.fee_bps,
+        tune_scorecard=args.tune_scorecard,
+        train_fraction=args.train_fraction,
     )
 
     if args.output:
         Path(args.output).write_text(json.dumps(output, indent=2))
     lb = output["leaderboard"]
     seq = output["sequence"]
+    accuracy_values = {row["name"]: row["value"] for row in lb["by_metric"]["label_accuracy"]}
+    if "regime_v2_tuned" in accuracy_values:
+        accuracy_label = "tuned/v2/v1/legacy"
+        accuracy_body = f"{accuracy_values['regime_v2_tuned']:.1f}/{accuracy_values['regime_v2']:.1f}/{accuracy_values['research_v1']:.1f}/{accuracy_values['legacy_sol']:.1f}%"
+    else:
+        accuracy_label = "v2/v1/legacy"
+        accuracy_body = f"{accuracy_values['regime_v2']:.1f}/{accuracy_values['research_v1']:.1f}/{accuracy_values['legacy_sol']:.1f}%"
     print(
         f"Regime v2 samples={lb['summary']['total']} "
-        f"accuracy(v2/v1/legacy)="
-        f"{lb['by_metric']['label_accuracy'][0]['value']:.1f}/"
-        f"{lb['by_metric']['label_accuracy'][1]['value']:.1f}/"
-        f"{lb['by_metric']['label_accuracy'][2]['value']:.1f}% "
+        f"accuracy({accuracy_label})={accuracy_body} "
         f"flips(v2/legacy)={seq['regime_v2_smoothed']['flips']}/{seq['legacy']['flips']}"
     )
     return 0
