@@ -416,7 +416,87 @@ def _avg_regime_return(records: list[dict[str, Any]], key: str, regime: str) -> 
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def _build_leaderboard(records: list[dict[str, Any]]) -> dict[str, Any]:
+def route_window_return(
+    regime: str,
+    *,
+    future_basket_ret: float,
+    future_btc_ret: float,
+    fee_bps: float,
+    bear_capture: float = 0.45,
+    sideways_capture: float = 0.0,
+) -> float:
+    """Map a regime decision to a route return for the next window.
+
+    Research proxy only:
+    - BULL routes to spot/basket exposure after round-trip fee.
+    - BEAR routes to a conservative short/cash proxy: captures part of basket downside,
+      loses a smaller amount if the basket rallies, after fees.
+    - SIDEWAYS/STORMY stay in cash unless a future version wires a proven chop strategy.
+    """
+    fee_pct = fee_bps / 100.0
+    if regime == BULL:
+        return future_basket_ret - fee_pct
+    if regime == BEAR:
+        return (-future_basket_ret * bear_capture) - fee_pct
+    if regime == SIDEWAYS:
+        return max(0.0, future_basket_ret * sideways_capture)
+    if regime == STORMY:
+        return 0.0
+    return 0.0
+
+
+def _compound_returns(returns_pct: list[float]) -> dict[str, Any]:
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    curve = []
+    for ret in returns_pct:
+        equity *= max(0.0, 1.0 + ret / 100.0)
+        peak = max(peak, equity)
+        drawdown = (peak - equity) / peak * 100.0 if peak > 0 else 0.0
+        max_dd = max(max_dd, drawdown)
+        curve.append(equity)
+    wins = sum(1 for ret in returns_pct if ret > 0)
+    return {
+        "total_return_pct": (equity - 1.0) * 100.0,
+        "max_drawdown_pct": max_dd,
+        "avg_window_return_pct": sum(returns_pct) / len(returns_pct) if returns_pct else 0.0,
+        "win_rate_pct": wins / len(returns_pct) * 100.0 if returns_pct else 0.0,
+        "windows": len(returns_pct),
+        "equity_curve": curve,
+    }
+
+
+def build_route_outcomes(records: list[dict[str, Any]], *, fee_bps: float) -> dict[str, dict[str, Any]]:
+    """Build routed equity outcomes for each available regime sequence."""
+    route_keys = {
+        "cash": None,
+        "buy_and_hold_basket": "__basket__",
+        "legacy_sol": "legacy_regime",
+        "research_v1": "v1_regime",
+        "regime_v2": "v2_smoothed",
+    }
+    if records and "v2_tuned_smoothed" in records[0]:
+        route_keys["regime_v2_tuned"] = "v2_tuned_smoothed"
+    outcomes: dict[str, dict[str, Any]] = {}
+    for name, key in route_keys.items():
+        returns = []
+        for row in records:
+            basket_ret = float(row.get("future_basket_ret", 0.0))
+            btc_ret = float(row.get("future_btc_ret", 0.0))
+            if key is None:
+                returns.append(0.0)
+            elif key == "__basket__":
+                returns.append(basket_ret - fee_bps / 100.0)
+            else:
+                returns.append(route_window_return(str(row.get(key, SIDEWAYS)), future_basket_ret=basket_ret, future_btc_ret=btc_ret, fee_bps=fee_bps))
+        result = _compound_returns(returns)
+        result["route"] = name
+        outcomes[name] = result
+    return outcomes
+
+
+def _build_leaderboard(records: list[dict[str, Any]], route_outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     legacy_acc = _accuracy(records, "legacy_regime")
     v1_acc = _accuracy(records, "v1_regime")
     v2_acc = _accuracy(records, "v2_smoothed")
@@ -449,12 +529,28 @@ def _build_leaderboard(records: list[dict[str, Any]]) -> dict[str, Any]:
         perf_rows.insert(0, {"name": "v2_tuned_bull_forward_avg_pct", "value": tuned_bull_ret})
     best_acc = tuned_acc if tuned_available and tuned_acc is not None else v2_acc
     best_flips = tuned_flips if tuned_available and tuned_flips is not None else v2_flips
+    route_rows = []
+    if route_outcomes:
+        route_rows = sorted(
+            [
+                {
+                    "name": name,
+                    "total_return_pct": metrics["total_return_pct"],
+                    "max_drawdown_pct": metrics["max_drawdown_pct"],
+                    "win_rate_pct": metrics["win_rate_pct"],
+                }
+                for name, metrics in route_outcomes.items()
+            ],
+            key=lambda row: (row["total_return_pct"], -row["max_drawdown_pct"]),
+            reverse=True,
+        )
     return {
         "summary": {"total": len(records), "passed": int(best_acc >= legacy_acc and best_flips <= legacy_flips), "failed": int(not (best_acc >= legacy_acc and best_flips <= legacy_flips))},
         "by_metric": {
             "label_accuracy": accuracy_rows,
             "switching": switch_rows,
             "relative_performance": perf_rows,
+            "route_outcomes": route_rows,
         },
     }
 
@@ -551,6 +647,8 @@ def evaluate_regime_v2_history(
         tuning["test_records"] = max(0, len(raw_records) - len(training_records))
         tuning["train_fraction"] = train_fraction
 
+    route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
+
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
     ).hexdigest()
@@ -580,7 +678,8 @@ def evaluate_regime_v2_history(
             **({"regime_v2_tuned": _seq([row["v2_tuned_smoothed"] for row in raw_records])} if raw_records and "v2_tuned_smoothed" in raw_records[0] else {}),
             "labels": _seq([row["label"] for row in raw_records]),
         },
-        "leaderboard": _build_leaderboard(raw_records),
+        "leaderboard": _build_leaderboard(raw_records, route_outcomes),
+        "route_outcomes": route_outcomes,
         "tuning": tuning,
     }
 
@@ -638,6 +737,13 @@ def main() -> int:
         f"accuracy({accuracy_label})={accuracy_body} "
         f"flips(v2/legacy)={seq['regime_v2_smoothed']['flips']}/{seq['legacy']['flips']}"
     )
+    route_rows = lb["by_metric"].get("route_outcomes") or []
+    if route_rows:
+        best_route = route_rows[0]
+        print(
+            f"Best route={best_route['name']} return={best_route['total_return_pct']:+.2f}% "
+            f"maxDD={best_route['max_drawdown_pct']:.2f}%"
+        )
     return 0
 
 
