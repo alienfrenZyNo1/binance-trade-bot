@@ -106,3 +106,26 @@ def test_build_default_settings_can_batch_multiple_windows():
         "60d_step12_sel6",
         "60d_step12_sel12",
     }
+
+
+def test_build_default_settings_can_batch_drawdown_guards():
+    module = load_module()
+    settings = module.build_default_settings(
+        days=[60],
+        step_hours=[6],
+        selector_lookbacks=[3],
+        selector_max_trailing_drawdowns=[0.0, 15.0],
+        selector_equity_stop_drawdowns=[0.0, 18.0],
+    )
+
+    assert len(settings) == 4
+    assert settings[0]["name"] == "60d_step6_sel3"
+    assert settings[0]["selector_max_trailing_drawdown_pct"] == 0.0
+    assert settings[0]["selector_equity_stop_drawdown_pct"] == 0.0
+    assert settings[1]["name"] == "60d_step6_sel3_eqstop18"
+    assert settings[1]["selector_equity_stop_drawdown_pct"] == 18.0
+    assert settings[2]["name"] == "60d_step6_sel3_dd15"
+    assert settings[2]["selector_max_trailing_drawdown_pct"] == 15.0
+    assert settings[3]["name"] == "60d_step6_sel3_dd15_eqstop18"
+    assert settings[3]["selector_max_trailing_drawdown_pct"] == 15.0
+    assert settings[3]["selector_equity_stop_drawdown_pct"] == 18.0

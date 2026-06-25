@@ -558,6 +558,9 @@ def build_selector_route(
     fee_bps: float,
     lookback: int = 12,
     min_trailing_objective: float = 0.0,
+    max_trailing_drawdown_pct: float = 0.0,
+    selector_equity_stop_drawdown_pct: float = 0.0,
+    selector_equity_stop_cooldown_windows: int = 1,
 ) -> list[dict[str, Any]]:
     """Select a route using only prior realized route windows.
 
@@ -566,24 +569,69 @@ def build_selector_route(
     """
     selected: list[dict[str, Any]] = []
     lookback = max(1, lookback)
+    selector_equity = 1.0
+    selector_peak = 1.0
+    selector_drawdown = 0.0
+    stop_cooldown_remaining = 0
+    selector_equity_stop_cooldown_windows = max(1, int(selector_equity_stop_cooldown_windows or 1))
     for idx, row in enumerate(records):
+        if idx > 0 and selected:
+            prev = selected[-1]
+            prev_ret = route_window_return(
+                str(prev.get("selector_smoothed", SIDEWAYS)),
+                future_basket_ret=float(prev.get("future_basket_ret", 0.0)),
+                future_btc_ret=float(prev.get("future_btc_ret", 0.0)),
+                fee_bps=fee_bps,
+            )
+            selector_equity *= max(0.0, 1.0 + prev_ret / 100.0)
+            selector_peak = max(selector_peak, selector_equity)
+            selector_drawdown = (selector_peak - selector_equity) / selector_peak * 100.0 if selector_peak > 0 else 0.0
         history = records[max(0, idx - lookback) : idx]
         choice_name = "cash"
         choice_key = ""
         choice_objective = 0.0
+        choice_drawdown = 0.0
+        block_reason = ""
         if history:
             scored = []
             for name, key in route_candidates.items():
                 returns = _route_returns_for_key(history, key, fee_bps=fee_bps)
                 outcome = _compound_returns(returns)
                 objective = outcome["total_return_pct"] - 0.35 * outcome["max_drawdown_pct"]
-                scored.append((objective, outcome["total_return_pct"], -outcome["max_drawdown_pct"], name, key))
+                scored.append((objective, outcome["total_return_pct"], -outcome["max_drawdown_pct"], name, key, outcome["max_drawdown_pct"]))
             scored.sort(reverse=True)
             best = scored[0]
+            choice_drawdown = float(best[5])
             if best[0] >= min_trailing_objective:
-                choice_objective = best[0]
-                choice_name = best[3]
-                choice_key = best[4]
+                if max_trailing_drawdown_pct > 0 and choice_drawdown > max_trailing_drawdown_pct:
+                    block_reason = (
+                        f"trailing drawdown {choice_drawdown:.2f}% > "
+                        f"{max_trailing_drawdown_pct:.2f}%"
+                    )
+                else:
+                    choice_objective = best[0]
+                    choice_name = best[3]
+                    choice_key = best[4]
+            else:
+                block_reason = (
+                    f"trailing objective {best[0]:.2f} < "
+                    f"{min_trailing_objective:.2f}"
+                )
+        if stop_cooldown_remaining > 0:
+            choice_name = "cash"
+            choice_key = ""
+            choice_objective = 0.0
+            block_reason = f"equity drawdown cooldown ({stop_cooldown_remaining} windows remaining)"
+            stop_cooldown_remaining -= 1
+        elif selector_equity_stop_drawdown_pct > 0 and selector_drawdown > selector_equity_stop_drawdown_pct:
+            choice_name = "cash"
+            choice_key = ""
+            choice_objective = 0.0
+            block_reason = (
+                f"equity drawdown {selector_drawdown:.2f}% > "
+                f"{selector_equity_stop_drawdown_pct:.2f}%"
+            )
+            stop_cooldown_remaining = selector_equity_stop_cooldown_windows - 1
         selected_regime = SIDEWAYS if choice_name == "cash" else str(row.get(choice_key, SIDEWAYS))
         selected.append(
             {
@@ -591,6 +639,9 @@ def build_selector_route(
                 "selector_route_key": choice_name,
                 "selector_route_source": choice_key,
                 "selector_trailing_objective": choice_objective,
+                "selector_trailing_drawdown_pct": choice_drawdown,
+                "selector_equity_drawdown_pct": selector_drawdown,
+                "selector_block_reason": block_reason,
                 "selector_smoothed": selected_regime,
             }
         )
@@ -782,6 +833,9 @@ def evaluate_regime_v2_history(
     train_fraction: float = 0.60,
     selector_lookback: int = 12,
     selector_min_objective: float = 0.0,
+    selector_max_trailing_drawdown_pct: float = 0.0,
+    selector_equity_stop_drawdown_pct: float = 0.0,
+    selector_equity_stop_cooldown_windows: int = 1,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -896,6 +950,9 @@ def evaluate_regime_v2_history(
         "enabled": bool(raw_records),
         "lookback": selector_lookback,
         "min_trailing_objective": selector_min_objective,
+        "max_trailing_drawdown_pct": selector_max_trailing_drawdown_pct,
+        "equity_stop_drawdown_pct": selector_equity_stop_drawdown_pct,
+        "equity_stop_cooldown_windows": selector_equity_stop_cooldown_windows,
         "candidates": selector_candidates,
         "no_lookahead": True,
     }
@@ -905,6 +962,9 @@ def evaluate_regime_v2_history(
         fee_bps=fee_bps,
         lookback=selector_lookback,
         min_trailing_objective=selector_min_objective,
+        max_trailing_drawdown_pct=selector_max_trailing_drawdown_pct,
+        selector_equity_stop_drawdown_pct=selector_equity_stop_drawdown_pct,
+        selector_equity_stop_cooldown_windows=selector_equity_stop_cooldown_windows,
     )
 
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
@@ -949,6 +1009,9 @@ def evaluate_regime_v2_history(
                 "train_fraction": train_fraction,
                 "selector_lookback": selector_lookback,
                 "selector_min_objective": selector_min_objective,
+                "selector_max_trailing_drawdown_pct": selector_max_trailing_drawdown_pct,
+                "selector_equity_stop_drawdown_pct": selector_equity_stop_drawdown_pct,
+                "selector_equity_stop_cooldown_windows": selector_equity_stop_cooldown_windows,
             },
         },
         "records": raw_records,
@@ -992,6 +1055,9 @@ def main() -> int:
     parser.add_argument("--train-fraction", type=float, default=0.60)
     parser.add_argument("--selector-lookback", type=int, default=12)
     parser.add_argument("--selector-min-objective", type=float, default=0.0)
+    parser.add_argument("--selector-max-trailing-drawdown-pct", type=float, default=0.0)
+    parser.add_argument("--selector-equity-stop-drawdown-pct", type=float, default=0.0)
+    parser.add_argument("--selector-equity-stop-cooldown-windows", type=int, default=1)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
@@ -1013,6 +1079,9 @@ def main() -> int:
         train_fraction=args.train_fraction,
         selector_lookback=args.selector_lookback,
         selector_min_objective=args.selector_min_objective,
+        selector_max_trailing_drawdown_pct=args.selector_max_trailing_drawdown_pct,
+        selector_equity_stop_drawdown_pct=args.selector_equity_stop_drawdown_pct,
+        selector_equity_stop_cooldown_windows=args.selector_equity_stop_cooldown_windows,
     )
 
     if args.output:

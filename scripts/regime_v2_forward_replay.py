@@ -94,28 +94,44 @@ def _slice_last_days(data: dict[str, list[dict[str, Any]]], days: int) -> dict[s
     return {coin: [row for row in rows if int(row["ts"]) >= start_ts] for coin, rows in data.items()}
 
 
-def build_default_settings(*, days: list[int], step_hours: list[int], selector_lookbacks: list[int]) -> list[dict[str, Any]]:
+def build_default_settings(
+    *,
+    days: list[int],
+    step_hours: list[int],
+    selector_lookbacks: list[int],
+    selector_max_trailing_drawdowns: list[float] | None = None,
+    selector_equity_stop_drawdowns: list[float] | None = None,
+) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
+    drawdowns = selector_max_trailing_drawdowns or [0.0]
+    equity_stops = selector_equity_stop_drawdowns or [0.0]
     for day in days:
         for step in step_hours:
             for selector in selector_lookbacks:
-                settings.append(
-                    {
-                        "name": f"{day}d_step{step}_sel{selector}",
-                        "days": day,
-                        "step_hours": step,
-                        "warmup_hours": 72 if day <= 30 else 120,
-                        "forward_hours": 24,
-                        "confirmation_samples": 3 if day <= 30 else 2,
-                        "min_confidence": 0.60,
-                        "tune_scorecard": True,
-                        "tune_route_objective": True,
-                        "train_fraction": 0.60,
-                        "selector_lookback": selector,
-                        "selector_min_objective": 0.0,
-                    }
-                )
+                for drawdown_cap in drawdowns:
+                    for equity_stop in equity_stops:
+                        dd_suffix = "" if float(drawdown_cap) <= 0 else f"_dd{float(drawdown_cap):g}"
+                        stop_suffix = "" if float(equity_stop) <= 0 else f"_eqstop{float(equity_stop):g}"
+                        settings.append(
+                            {
+                                "name": f"{day}d_step{step}_sel{selector}{dd_suffix}{stop_suffix}",
+                                "days": day,
+                                "step_hours": step,
+                                "warmup_hours": 72 if day <= 30 else 120,
+                                "forward_hours": 24,
+                                "confirmation_samples": 3 if day <= 30 else 2,
+                                "min_confidence": 0.60,
+                                "tune_scorecard": True,
+                                "tune_route_objective": True,
+                                "train_fraction": 0.60,
+                                "selector_lookback": selector,
+                                "selector_min_objective": 0.0,
+                                "selector_max_trailing_drawdown_pct": float(drawdown_cap),
+                                "selector_equity_stop_drawdown_pct": float(equity_stop),
+                                "selector_equity_stop_cooldown_windows": 1,
+                            }
+                        )
     return settings
 
 
@@ -157,6 +173,9 @@ def evaluate_settings_grid(
             train_fraction=float(setting.get("train_fraction", 0.60)),
             selector_lookback=int(setting.get("selector_lookback", 12)),
             selector_min_objective=float(setting.get("selector_min_objective", 0.0)),
+            selector_max_trailing_drawdown_pct=float(setting.get("selector_max_trailing_drawdown_pct", 0.0)),
+            selector_equity_stop_drawdown_pct=float(setting.get("selector_equity_stop_drawdown_pct", 0.0)),
+            selector_equity_stop_cooldown_windows=int(setting.get("selector_equity_stop_cooldown_windows", 1)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -207,6 +226,10 @@ def _parse_int_csv(value: str) -> list[int]:
     return [int(item.strip()) for item in value.split(",") if item.strip()]
 
 
+def _parse_float_csv(value: str) -> list[float]:
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Cached Regime v2 forward replay research harness")
     parser.add_argument("--days", default="30,60,90", help="Comma-separated replay windows")
@@ -215,6 +238,16 @@ def main() -> int:
     parser.add_argument("--references", default="BTC,ETH,SOL")
     parser.add_argument("--step-hours", default="12", help="Comma-separated step-hours grid")
     parser.add_argument("--selector-lookbacks", default="6,12,24", help="Comma-separated selector lookback grid")
+    parser.add_argument(
+        "--selector-max-trailing-drawdowns",
+        default="0",
+        help="Comma-separated selector trailing drawdown caps; 0 disables the guard",
+    )
+    parser.add_argument(
+        "--selector-equity-stop-drawdowns",
+        default="0",
+        help="Comma-separated selector equity stop drawdown caps; 0 disables the guard",
+    )
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
@@ -223,6 +256,8 @@ def main() -> int:
     days = _parse_int_csv(args.days)
     step_hours = _parse_int_csv(args.step_hours)
     selector_lookbacks = _parse_int_csv(args.selector_lookbacks)
+    selector_max_trailing_drawdowns = _parse_float_csv(args.selector_max_trailing_drawdowns)
+    selector_equity_stop_drawdowns = _parse_float_csv(args.selector_equity_stop_drawdowns)
     coins = _parse_csv(args.coins)
     references = _parse_csv(args.references)
     fetch_days = max([args.fetch_days, *days])
@@ -234,7 +269,13 @@ def main() -> int:
         references=references,
         force_refresh=args.force_refresh,
     )
-    settings = build_default_settings(days=days, step_hours=step_hours, selector_lookbacks=selector_lookbacks)
+    settings = build_default_settings(
+        days=days,
+        step_hours=step_hours,
+        selector_lookbacks=selector_lookbacks,
+        selector_max_trailing_drawdowns=selector_max_trailing_drawdowns,
+        selector_equity_stop_drawdowns=selector_equity_stop_drawdowns,
+    )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta
     payload["manifest"].update({"days": days, "fetch_days": fetch_days, "coins": coins, "references": references})
