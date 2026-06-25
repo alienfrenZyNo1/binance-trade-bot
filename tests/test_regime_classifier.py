@@ -140,3 +140,19 @@ def test_futures_metrics_are_aggregated_and_explained():
     assert futures["avg_taker_buy_sell_ratio"] == 0.8
     assert any("futures basis negative" in reason for reason in result.reasons)
     assert any("futures taker flow bearish" in reason for reason in result.reasons)
+
+
+def test_history_comparison_summarizes_multi_vs_legacy_sequences():
+    module = load_module()
+    history = module.compare_regime_history(
+        mixed_dataset(),
+        breadth_coins=["SOL", "SUI", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE"],
+        step_hours=12,
+        warmup_hours=60,
+    )
+
+    assert history["samples"]
+    assert history["multi"]["count"] == len(history["samples"])
+    assert history["legacy"]["count"] == len(history["samples"])
+    assert 0.0 <= history["disagreement_pct"] <= 100.0
+    assert {"multi", "legacy", "confidence", "score"}.issubset(history["samples"][0])
