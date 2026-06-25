@@ -40,6 +40,25 @@ assert 'eventlet' not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+def test_config_validation_import_does_not_import_runtime_dependencies():
+    code = """
+import sys
+from binance_trade_bot.config_validation import validate_runtime_config
+assert callable(validate_runtime_config)
+assert 'socketio' not in sys.modules
+assert 'eventlet' not in sys.modules
+assert 'binance' not in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_database_send_update_default_does_not_import_socketio_or_eventlet():
     code = """
 import sys

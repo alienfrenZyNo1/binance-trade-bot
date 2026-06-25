@@ -5,6 +5,7 @@ import traceback
 
 from .binance_api_manager import BinanceAPIManager
 from .config import Config
+from .config_validation import log_runtime_config_validation
 from .database import Database
 from .logger import Logger
 from .scheduler import SafeScheduler
@@ -158,6 +159,7 @@ def main():
         return
 
     config = Config()
+    log_runtime_config_validation(config, logger)
     db = Database(logger, config)
     manager = BinanceAPIManager(config, db, logger, config.TESTNET)
     # check if we can access API feature that require valid config
