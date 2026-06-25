@@ -509,3 +509,72 @@ def test_selector_equity_stop_forces_cash_after_own_drawdown_breach():
     assert selected[2]["selector_smoothed"] == module.SIDEWAYS
     assert selected[2]["selector_equity_drawdown_pct"] > 10.0
     assert "equity drawdown" in selected[2]["selector_block_reason"]
+
+
+def test_selector_quality_gates_choose_lower_return_route_that_passes_constraints():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 50.0, "future_btc_ret": 5.0},
+        {"a_regime": module.BULL, "b_regime": module.SIDEWAYS, "future_basket_ret": -20.0, "future_btc_ret": -5.0},
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 5.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 1.0, "future_btc_ret": 0.5},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime", "b": "b_regime"},
+        fee_bps=10,
+        lookback=3,
+        min_trailing_objective=-999,
+        max_trailing_drawdown_pct=10.0,
+    )
+
+    assert selected[3]["selector_route_key"] == "b"
+    assert selected[3]["selector_smoothed"] == module.BULL
+    assert selected[3]["selector_trailing_drawdown_pct"] <= 10.0
+
+
+def test_selector_quality_gates_choose_cash_when_no_candidate_passes():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "future_basket_ret": 5.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "future_basket_ret": -4.0, "future_btc_ret": -1.0},
+        {"a_regime": module.BULL, "future_basket_ret": 2.0, "future_btc_ret": 0.5},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime"},
+        fee_bps=10,
+        lookback=3,
+        min_trailing_objective=-999,
+        selector_min_trailing_win_rate_pct=90.0,
+    )
+
+    assert selected[2]["selector_route_key"] == "cash"
+    assert selected[2]["selector_smoothed"] == module.SIDEWAYS
+    assert "quality gates" in selected[2]["selector_block_reason"]
+
+
+def test_selector_trailing_robustness_gate_requires_passing_subwindows():
+    module = load_module()
+    records = [
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 50.0, "future_btc_ret": 5.0},
+        {"a_regime": module.BULL, "b_regime": module.SIDEWAYS, "future_basket_ret": -20.0, "future_btc_ret": -5.0},
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 5.0, "future_btc_ret": 1.0},
+        {"a_regime": module.BULL, "b_regime": module.BULL, "future_basket_ret": 1.0, "future_btc_ret": 0.5},
+    ]
+
+    selected = module.build_selector_route(
+        records,
+        route_candidates={"a": "a_regime", "b": "b_regime"},
+        fee_bps=10,
+        lookback=3,
+        min_trailing_objective=-999,
+        selector_trailing_robust_windows=3,
+        selector_min_passing_trailing_windows=3,
+        selector_trailing_window_max_drawdown_pct=10.0,
+    )
+
+    assert selected[3]["selector_route_key"] == "b"
+    assert selected[3]["selector_trailing_passing_windows"] == 3

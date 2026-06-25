@@ -551,6 +551,29 @@ def _route_returns_for_key(records: list[dict[str, Any]], route_key: str, *, fee
     ]
 
 
+def _trailing_window_passes(
+    returns: list[float],
+    *,
+    windows: int,
+    min_window_return_pct: float,
+    max_window_drawdown_pct: float,
+) -> tuple[int, int]:
+    """Count chronological trailing subwindows that pass return/drawdown gates."""
+    if not returns or windows <= 0:
+        return 0, 0
+    windows = min(windows, len(returns))
+    passing = 0
+    for idx in range(windows):
+        start = idx * len(returns) // windows
+        end = (idx + 1) * len(returns) // windows
+        if end <= start:
+            continue
+        outcome = _compound_returns(returns[start:end])
+        if outcome["total_return_pct"] >= min_window_return_pct and outcome["max_drawdown_pct"] <= max_window_drawdown_pct:
+            passing += 1
+    return passing, windows
+
+
 def build_selector_route(
     records: list[dict[str, Any]],
     *,
@@ -561,6 +584,12 @@ def build_selector_route(
     max_trailing_drawdown_pct: float = 0.0,
     selector_equity_stop_drawdown_pct: float = 0.0,
     selector_equity_stop_cooldown_windows: int = 1,
+    selector_min_trailing_return_pct: float = -999999.0,
+    selector_min_trailing_win_rate_pct: float = 0.0,
+    selector_trailing_robust_windows: int = 0,
+    selector_min_passing_trailing_windows: int = 0,
+    selector_trailing_window_min_return_pct: float = 0.0,
+    selector_trailing_window_max_drawdown_pct: float = 20.0,
 ) -> list[dict[str, Any]]:
     """Select a route using only prior realized route windows.
 
@@ -591,32 +620,76 @@ def build_selector_route(
         choice_key = ""
         choice_objective = 0.0
         choice_drawdown = 0.0
+        choice_return = 0.0
+        choice_win_rate = 0.0
+        choice_passing_windows = 0
+        choice_total_windows = 0
         block_reason = ""
         if history:
             scored = []
+            rejected = []
             for name, key in route_candidates.items():
                 returns = _route_returns_for_key(history, key, fee_bps=fee_bps)
                 outcome = _compound_returns(returns)
                 objective = outcome["total_return_pct"] - 0.35 * outcome["max_drawdown_pct"]
-                scored.append((objective, outcome["total_return_pct"], -outcome["max_drawdown_pct"], name, key, outcome["max_drawdown_pct"]))
+                passing_windows, total_windows = _trailing_window_passes(
+                    returns,
+                    windows=selector_trailing_robust_windows,
+                    min_window_return_pct=selector_trailing_window_min_return_pct,
+                    max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct,
+                )
+                candidate = (
+                    objective,
+                    outcome["total_return_pct"],
+                    -outcome["max_drawdown_pct"],
+                    name,
+                    key,
+                    outcome["max_drawdown_pct"],
+                    outcome["win_rate_pct"],
+                    passing_windows,
+                    total_windows,
+                )
+                if outcome["total_return_pct"] < selector_min_trailing_return_pct:
+                    rejected.append((name, "return", outcome["total_return_pct"]))
+                    continue
+                if selector_min_trailing_win_rate_pct > 0 and outcome["win_rate_pct"] < selector_min_trailing_win_rate_pct:
+                    rejected.append((name, "win_rate", outcome["win_rate_pct"]))
+                    continue
+                if max_trailing_drawdown_pct > 0 and outcome["max_drawdown_pct"] > max_trailing_drawdown_pct:
+                    rejected.append((name, "drawdown", outcome["max_drawdown_pct"]))
+                    continue
+                if selector_min_passing_trailing_windows > 0 and passing_windows < selector_min_passing_trailing_windows:
+                    rejected.append((name, "passing_windows", float(passing_windows)))
+                    continue
+                scored.append(candidate)
             scored.sort(reverse=True)
-            best = scored[0]
-            choice_drawdown = float(best[5])
-            if best[0] >= min_trailing_objective:
-                if max_trailing_drawdown_pct > 0 and choice_drawdown > max_trailing_drawdown_pct:
-                    block_reason = (
-                        f"trailing drawdown {choice_drawdown:.2f}% > "
-                        f"{max_trailing_drawdown_pct:.2f}%"
-                    )
-                else:
+            if scored:
+                best = scored[0]
+                choice_drawdown = float(best[5])
+                choice_return = float(best[1])
+                choice_win_rate = float(best[6])
+                choice_passing_windows = int(best[7])
+                choice_total_windows = int(best[8])
+                if best[0] >= min_trailing_objective:
                     choice_objective = best[0]
                     choice_name = best[3]
                     choice_key = best[4]
+                else:
+                    block_reason = (
+                        f"trailing objective {best[0]:.2f} < "
+                        f"{min_trailing_objective:.2f}"
+                    )
             else:
-                block_reason = (
-                    f"trailing objective {best[0]:.2f} < "
-                    f"{min_trailing_objective:.2f}"
-                )
+                block_reason = "selector quality gates rejected all candidates"
+                if rejected:
+                    reject_name, reject_reason, reject_value = rejected[0]
+                    if reject_reason == "drawdown":
+                        choice_drawdown = float(reject_value)
+                    elif reject_reason == "return":
+                        choice_return = float(reject_value)
+                    elif reject_reason == "win_rate":
+                        choice_win_rate = float(reject_value)
+                    block_reason += f" ({reject_name} {reject_reason}={reject_value:.2f})"
         if stop_cooldown_remaining > 0:
             choice_name = "cash"
             choice_key = ""
@@ -639,7 +712,11 @@ def build_selector_route(
                 "selector_route_key": choice_name,
                 "selector_route_source": choice_key,
                 "selector_trailing_objective": choice_objective,
+                "selector_trailing_return_pct": choice_return,
                 "selector_trailing_drawdown_pct": choice_drawdown,
+                "selector_trailing_win_rate_pct": choice_win_rate,
+                "selector_trailing_passing_windows": choice_passing_windows,
+                "selector_trailing_total_windows": choice_total_windows,
                 "selector_equity_drawdown_pct": selector_drawdown,
                 "selector_block_reason": block_reason,
                 "selector_smoothed": selected_regime,
@@ -836,6 +913,12 @@ def evaluate_regime_v2_history(
     selector_max_trailing_drawdown_pct: float = 0.0,
     selector_equity_stop_drawdown_pct: float = 0.0,
     selector_equity_stop_cooldown_windows: int = 1,
+    selector_min_trailing_return_pct: float = -999999.0,
+    selector_min_trailing_win_rate_pct: float = 0.0,
+    selector_trailing_robust_windows: int = 0,
+    selector_min_passing_trailing_windows: int = 0,
+    selector_trailing_window_min_return_pct: float = 0.0,
+    selector_trailing_window_max_drawdown_pct: float = 20.0,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -953,6 +1036,12 @@ def evaluate_regime_v2_history(
         "max_trailing_drawdown_pct": selector_max_trailing_drawdown_pct,
         "equity_stop_drawdown_pct": selector_equity_stop_drawdown_pct,
         "equity_stop_cooldown_windows": selector_equity_stop_cooldown_windows,
+        "min_trailing_return_pct": selector_min_trailing_return_pct,
+        "min_trailing_win_rate_pct": selector_min_trailing_win_rate_pct,
+        "trailing_robust_windows": selector_trailing_robust_windows,
+        "min_passing_trailing_windows": selector_min_passing_trailing_windows,
+        "trailing_window_min_return_pct": selector_trailing_window_min_return_pct,
+        "trailing_window_max_drawdown_pct": selector_trailing_window_max_drawdown_pct,
         "candidates": selector_candidates,
         "no_lookahead": True,
     }
@@ -965,6 +1054,12 @@ def evaluate_regime_v2_history(
         max_trailing_drawdown_pct=selector_max_trailing_drawdown_pct,
         selector_equity_stop_drawdown_pct=selector_equity_stop_drawdown_pct,
         selector_equity_stop_cooldown_windows=selector_equity_stop_cooldown_windows,
+        selector_min_trailing_return_pct=selector_min_trailing_return_pct,
+        selector_min_trailing_win_rate_pct=selector_min_trailing_win_rate_pct,
+        selector_trailing_robust_windows=selector_trailing_robust_windows,
+        selector_min_passing_trailing_windows=selector_min_passing_trailing_windows,
+        selector_trailing_window_min_return_pct=selector_trailing_window_min_return_pct,
+        selector_trailing_window_max_drawdown_pct=selector_trailing_window_max_drawdown_pct,
     )
 
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
@@ -1012,6 +1107,12 @@ def evaluate_regime_v2_history(
                 "selector_max_trailing_drawdown_pct": selector_max_trailing_drawdown_pct,
                 "selector_equity_stop_drawdown_pct": selector_equity_stop_drawdown_pct,
                 "selector_equity_stop_cooldown_windows": selector_equity_stop_cooldown_windows,
+                "selector_min_trailing_return_pct": selector_min_trailing_return_pct,
+                "selector_min_trailing_win_rate_pct": selector_min_trailing_win_rate_pct,
+                "selector_trailing_robust_windows": selector_trailing_robust_windows,
+                "selector_min_passing_trailing_windows": selector_min_passing_trailing_windows,
+                "selector_trailing_window_min_return_pct": selector_trailing_window_min_return_pct,
+                "selector_trailing_window_max_drawdown_pct": selector_trailing_window_max_drawdown_pct,
             },
         },
         "records": raw_records,
@@ -1058,6 +1159,12 @@ def main() -> int:
     parser.add_argument("--selector-max-trailing-drawdown-pct", type=float, default=0.0)
     parser.add_argument("--selector-equity-stop-drawdown-pct", type=float, default=0.0)
     parser.add_argument("--selector-equity-stop-cooldown-windows", type=int, default=1)
+    parser.add_argument("--selector-min-trailing-return-pct", type=float, default=-999999.0)
+    parser.add_argument("--selector-min-trailing-win-rate-pct", type=float, default=0.0)
+    parser.add_argument("--selector-trailing-robust-windows", type=int, default=0)
+    parser.add_argument("--selector-min-passing-trailing-windows", type=int, default=0)
+    parser.add_argument("--selector-trailing-window-min-return-pct", type=float, default=0.0)
+    parser.add_argument("--selector-trailing-window-max-drawdown-pct", type=float, default=20.0)
     parser.add_argument("--output", default="")
     args = parser.parse_args()
 
@@ -1082,6 +1189,12 @@ def main() -> int:
         selector_max_trailing_drawdown_pct=args.selector_max_trailing_drawdown_pct,
         selector_equity_stop_drawdown_pct=args.selector_equity_stop_drawdown_pct,
         selector_equity_stop_cooldown_windows=args.selector_equity_stop_cooldown_windows,
+        selector_min_trailing_return_pct=args.selector_min_trailing_return_pct,
+        selector_min_trailing_win_rate_pct=args.selector_min_trailing_win_rate_pct,
+        selector_trailing_robust_windows=args.selector_trailing_robust_windows,
+        selector_min_passing_trailing_windows=args.selector_min_passing_trailing_windows,
+        selector_trailing_window_min_return_pct=args.selector_trailing_window_min_return_pct,
+        selector_trailing_window_max_drawdown_pct=args.selector_trailing_window_max_drawdown_pct,
     )
 
     if args.output:

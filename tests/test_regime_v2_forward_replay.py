@@ -116,16 +116,25 @@ def test_build_default_settings_can_batch_drawdown_guards():
         selector_lookbacks=[3],
         selector_max_trailing_drawdowns=[0.0, 15.0],
         selector_equity_stop_drawdowns=[0.0, 18.0],
+        selector_min_trailing_win_rates=[0.0, 60.0],
+        selector_trailing_robust_windows=3,
+        selector_min_passing_trailing_windows=2,
     )
 
-    assert len(settings) == 4
+    assert len(settings) == 8
     assert settings[0]["name"] == "60d_step6_sel3"
     assert settings[0]["selector_max_trailing_drawdown_pct"] == 0.0
     assert settings[0]["selector_equity_stop_drawdown_pct"] == 0.0
-    assert settings[1]["name"] == "60d_step6_sel3_eqstop18"
-    assert settings[1]["selector_equity_stop_drawdown_pct"] == 18.0
-    assert settings[2]["name"] == "60d_step6_sel3_dd15"
-    assert settings[2]["selector_max_trailing_drawdown_pct"] == 15.0
-    assert settings[3]["name"] == "60d_step6_sel3_dd15_eqstop18"
-    assert settings[3]["selector_max_trailing_drawdown_pct"] == 15.0
-    assert settings[3]["selector_equity_stop_drawdown_pct"] == 18.0
+    assert settings[0]["selector_min_trailing_win_rate_pct"] == 0.0
+    assert settings[0]["selector_trailing_robust_windows"] == 3
+    assert settings[0]["selector_min_passing_trailing_windows"] == 2
+    assert settings[1]["name"] == "60d_step6_sel3_wr60"
+    assert settings[1]["selector_min_trailing_win_rate_pct"] == 60.0
+    assert settings[2]["name"] == "60d_step6_sel3_eqstop18"
+    assert settings[2]["selector_equity_stop_drawdown_pct"] == 18.0
+    assert settings[4]["name"] == "60d_step6_sel3_dd15"
+    assert settings[4]["selector_max_trailing_drawdown_pct"] == 15.0
+    assert settings[7]["name"] == "60d_step6_sel3_dd15_eqstop18_wr60"
+    assert settings[7]["selector_max_trailing_drawdown_pct"] == 15.0
+    assert settings[7]["selector_equity_stop_drawdown_pct"] == 18.0
+    assert settings[7]["selector_min_trailing_win_rate_pct"] == 60.0
