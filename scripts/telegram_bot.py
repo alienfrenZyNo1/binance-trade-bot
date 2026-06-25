@@ -242,6 +242,60 @@ def get_portfolio_value(holdings):
     return total
 
 
+def _holding_fields(holding):
+    """Return normalized symbol/balance/price/value fields for a holding row."""
+    if isinstance(holding, dict):
+        symbol = holding.get("coin_id")
+        balance = float(holding.get("balance") or 0)
+        price = float(holding.get("usd_price") or 0)
+    else:
+        symbol = holding["coin_id"]
+        balance = float(holding["balance"] or 0)
+        price = float(holding["usd_price"] or 0)
+    return symbol, balance, price, balance * price
+
+
+def build_spot_open_position(current_coin, holdings, last_buy):
+    """Build open spot-position unrealized P&L from the latest buy and live holding.
+
+    The account-level P&L already includes spot mark-to-market value, but /profit
+    also needs an explicit open-position line so unrealized spot gains/losses are
+    not hidden behind the headline equity number.
+    """
+    if not current_coin or current_coin == "?" or not last_buy:
+        return None
+
+    holding = None
+    for candidate in holdings:
+        symbol, balance, price, value = _holding_fields(candidate)
+        if symbol == current_coin and balance > 0 and price > 0 and value > 0.01:
+            holding = (symbol, balance, price, value)
+            break
+    if holding is None:
+        return None
+
+    symbol, balance, mark, value = holding
+    bought_qty = float(last_buy["alt_trade_amount"] or 0)
+    cost = float(last_buy["crypto_trade_amount"] or 0)
+    if bought_qty <= 0 or cost <= 0:
+        return None
+
+    entry = cost / bought_qty
+    cost_basis = balance * entry
+    pnl_usd = value - cost_basis
+    pnl_pct = (pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+    return {
+        "symbol": symbol,
+        "qty": balance,
+        "entry": entry,
+        "mark": mark,
+        "cost_basis": cost_basis,
+        "value": value,
+        "pnl_usd": pnl_usd,
+        "pnl_pct": pnl_pct,
+    }
+
+
 def get_live_price(symbol):
     """Get live price from Binance."""
     try:
@@ -1945,10 +1999,23 @@ def cmd_profit():
     fut_wallet = fut_balance["balance"] if fut_balance else 0
 
     positions = get_futures_positions()
-    unrealized_pnl = sum(p["pnl_usd"] for p in positions) if positions else 0.0
+    futures_unrealized_pnl = sum(p["pnl_usd"] for p in positions) if positions else 0.0
 
-    # True equity = spot + futures wallet + unrealized P&L
-    current_value = spot_value + fut_wallet + unrealized_pnl
+    current_coin = get_current_coin()
+    last_spot_buy = conn.execute(
+        """SELECT alt_coin_id, alt_trade_amount, crypto_trade_amount, datetime
+           FROM trade_history
+           WHERE state = 'COMPLETE' AND selling = 0 AND alt_coin_id = ?
+           ORDER BY id DESC LIMIT 1""",
+        (current_coin,),
+    ).fetchone()
+    spot_position = build_spot_open_position(current_coin, holdings, last_spot_buy)
+    spot_unrealized_pnl = spot_position["pnl_usd"] if spot_position else 0.0
+    unrealized_pnl = spot_unrealized_pnl + futures_unrealized_pnl
+
+    # True equity = spot mark-to-market value + futures wallet + futures unrealized P&L.
+    # Spot unrealized is already included in spot_value, so don't add it twice.
+    current_value = spot_value + fut_wallet + futures_unrealized_pnl
 
     completed = conn.execute(
         "SELECT * FROM trade_history WHERE state = 'COMPLETE' ORDER BY id ASC"
@@ -2011,16 +2078,18 @@ def cmd_profit():
         ["Deposited", money(total_deposited)],
         ["Current equity", money(current_value)],
         ["Spot wallet", money(spot_value)],
-        ["Futures equity", money(fut_wallet + unrealized_pnl)],
+        ["Futures equity", money(fut_wallet + futures_unrealized_pnl)],
         ["Futures wallet", money(fut_wallet)],
-        ["Unrealized P&L", money(unrealized_pnl, signed=True)],
+        ["Unrealized total", money(unrealized_pnl, signed=True)],
+        ["Spot unrealized", money(spot_unrealized_pnl, signed=True)],
+        ["Futures unrealized", money(futures_unrealized_pnl, signed=True)],
         ["Uptime", uptime_str],
         ["Clean hops", str(len(real_trips))],
     ]))
 
     fut_realized = get_futures_realized()
     if positions:
-        lines.append(section("🔻 Open Position"))
+        lines.append(section("🔻 Open Futures Position"))
         pos_rows = []
         for p in positions:
             pos_rows.append([
@@ -2033,6 +2102,18 @@ def cmd_profit():
             pos_rows,
             aligns=["l", "l", "r", "d", "d", "d", "d"],
             pnl_values=[p["pnl_usd"] for p in positions],
+        ))
+    elif spot_position:
+        lines.append(section("🟢 Open Spot Position"))
+        lines.append(pre_table(
+            ["COIN", "TYPE", "QTY", "ENTRY", "MARK", "P&L%", "P&L$"],
+            [[
+                spot_position["symbol"], "SPOT", f"{spot_position['qty']:.6g}",
+                money(spot_position["entry"], 4), money(spot_position["mark"], 4),
+                pct(spot_position["pnl_pct"]), money(spot_position["pnl_usd"], signed=True),
+            ]],
+            aligns=["l", "l", "r", "d", "d", "d", "d"],
+            pnl_values=[spot_position["pnl_usd"]],
         ))
     else:
         lines.append("\n🔻 <b>Open Position:</b> 💤 none")
