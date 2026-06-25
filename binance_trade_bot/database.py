@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Config
 from .logger import Logger
 from .models import *  # pylint: disable=wildcard-import
-from .repositories import BotStateRepository, CoinRepository, DepositRepository, RegimeRepository
+from .repositories import (
+    BotStateRepository,
+    CoinRepository,
+    DepositRepository,
+    RegimeRepository,
+    ScoutHistoryRepository,
+)
 
 
 class Database:
@@ -27,6 +33,7 @@ class Database:
         )
         self.SessionMaker = sessionmaker(bind=self.engine)
         self.coins = CoinRepository(self.SessionMaker)
+        self.scout_history = ScoutHistoryRepository(self.SessionMaker)
         self.regimes = RegimeRepository(self.SessionMaker)
         self.bot_state = BotStateRepository(self.SessionMaker)
         self.deposits = DepositRepository(self.SessionMaker, self.bot_state, self.logger)
@@ -121,18 +128,16 @@ class Database:
         current_coin_price: float,
         other_coin_price: float,
     ):
-        session: Session
-        with self.db_session() as session:
-            pair = session.merge(pair)
-            sh = ScoutHistory(pair, target_ratio, current_coin_price, other_coin_price)
-            session.add(sh)
-            self.send_update(sh)
+        scout_history = self.scout_history.log_scout(
+            pair,
+            target_ratio,
+            current_coin_price,
+            other_coin_price,
+        )
+        self.send_update(scout_history)
 
     def prune_scout_history(self):
-        time_diff = datetime.now() - timedelta(hours=self.config.SCOUT_HISTORY_PRUNE_TIME)
-        session: Session
-        with self.db_session() as session:
-            session.query(ScoutHistory).filter(ScoutHistory.datetime < time_diff).delete()
+        self.scout_history.prune_scout_history(self.config.SCOUT_HISTORY_PRUNE_TIME)
 
     def prune_value_history(self):
         session: Session

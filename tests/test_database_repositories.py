@@ -7,12 +7,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from binance_trade_bot.database import Database
-from binance_trade_bot.models import Base, Coin, Deposit, MarketRegimeLog, Pair
+from binance_trade_bot.models import Base, Coin, Deposit, MarketRegimeLog, Pair, ScoutHistory
 from binance_trade_bot.repositories import (
     BotStateRepository,
     CoinRepository,
     DepositRepository,
     RegimeRepository,
+    ScoutHistoryRepository,
 )
 
 
@@ -92,6 +93,56 @@ def test_database_facade_delegates_coin_methods_and_sends_current_coin_update():
         ("SOL", "JUP"),
         ("JUP", "SOL"),
     }
+
+
+def test_scout_history_repository_logs_detached_event_and_prunes_old_rows():
+    sessions = make_session_factory()
+    coins = CoinRepository(sessions)
+    coins.set_coins(["SOL", "JUP"])
+    pair = coins.get_pair("SOL", "JUP")
+    repo = ScoutHistoryRepository(sessions)
+
+    event = repo.log_scout(
+        pair,
+        target_ratio=1.25,
+        current_coin_price=100.0,
+        other_coin_price=80.0,
+    )
+
+    assert event.info()["from_coin"] == {"symbol": "SOL", "enabled": True}
+    assert event.info()["to_coin"] == {"symbol": "JUP", "enabled": True}
+    assert event.current_ratio == 1.25
+
+    with sessions() as session:
+        old = session.query(ScoutHistory).one()
+        old.datetime = datetime.utcnow() - timedelta(hours=5)
+        session.commit()
+
+    repo.prune_scout_history(hours_to_keep=1)
+
+    with sessions() as session:
+        assert session.query(ScoutHistory).count() == 0
+
+
+def test_database_facade_delegates_scout_history_methods():
+    logger = FakeLogger()
+    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False, SCOUT_HISTORY_PRUNE_TIME=1)
+    db = Database(logger, config, uri="sqlite:///:memory:")
+    db.create_database()
+    db.set_coins(["SOL", "JUP"])
+    pair = db.get_pair("SOL", "JUP")
+
+    db.log_scout(pair, target_ratio=2.0, current_coin_price=6.0, other_coin_price=3.0)
+
+    with db.db_session() as session:
+        row = session.query(ScoutHistory).one()
+        assert row.target_ratio == 2.0
+        row.datetime = datetime.utcnow() - timedelta(hours=2)
+
+    db.prune_scout_history()
+
+    with db.db_session() as session:
+        assert session.query(ScoutHistory).count() == 0
 
 
 def test_regime_repository_logs_latest_and_hour_filtered_history():
