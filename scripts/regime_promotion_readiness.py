@@ -44,8 +44,15 @@ def _best_non_cash_route(artifact: dict[str, Any]) -> dict[str, Any]:
     return {"name": "none", "total_return_pct": 0.0, "max_drawdown_pct": 0.0, "win_rate_pct": 0.0}
 
 
-def summarize_window(window: str, artifact: dict[str, Any]) -> dict[str, Any]:
-    best = _best_non_cash_route(artifact)
+def _route_by_name(artifact: dict[str, Any], route_name: str) -> dict[str, Any]:
+    for row in _route_rows(artifact):
+        if row.get("name") == route_name:
+            return row
+    return {"name": route_name, "total_return_pct": 0.0, "max_drawdown_pct": 999.0, "win_rate_pct": 0.0}
+
+
+def summarize_window(window: str, artifact: dict[str, Any], *, required_route: str = "") -> dict[str, Any]:
+    best = _route_by_name(artifact, required_route) if required_route else _best_non_cash_route(artifact)
     route_name = str(best.get("name", "none"))
     robustness = artifact.get("route_robustness", {}).get(route_name, {}) or {}
     sequence = artifact.get("sequence", {}) or {}
@@ -68,29 +75,38 @@ def summarize_window(window: str, artifact: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate_readiness(artifacts: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def evaluate_readiness(
+    artifacts: dict[str, dict[str, Any]],
+    *,
+    max_allowed_drawdown_pct: float = 18.0,
+    required_route: str = "",
+) -> dict[str, Any]:
     ordered = sorted(artifacts.items(), key=lambda item: int("".join(ch for ch in item[0] if ch.isdigit()) or 0))
-    windows = [summarize_window(name, artifact) for name, artifact in ordered]
+    windows = [summarize_window(name, artifact, required_route=required_route) for name, artifact in ordered]
     blockers: list[str] = []
     if not windows:
         blockers.append("No research artifacts supplied")
     non_positive = [row["window"] for row in windows if row["best_return_pct"] <= 0]
     weak_robustness = [row["window"] for row in windows if not row["best_route_robust"]]
+    high_drawdown = [row["window"] for row in windows if row["best_max_drawdown_pct"] > max_allowed_drawdown_pct]
     if non_positive:
         blockers.append(f"Non-positive best route in: {', '.join(non_positive)}")
     if weak_robustness:
         blockers.append(f"Route robustness failed in: {', '.join(weak_robustness)}")
+    if high_drawdown:
+        blockers.append(f"Max drawdown above {max_allowed_drawdown_pct:.1f}% in: {', '.join(high_drawdown)}")
 
     positive_count = sum(1 for row in windows if row["best_return_pct"] > 0)
     robust_count = sum(1 for row in windows if row["best_route_robust"])
-    if windows and positive_count == len(windows) and robust_count == len(windows):
+    drawdown_ok_count = sum(1 for row in windows if row["best_max_drawdown_pct"] <= max_allowed_drawdown_pct)
+    if windows and positive_count == len(windows) and robust_count == len(windows) and drawdown_ok_count == len(windows):
         verdict = "🟢"
         status = "Eligible to draft promotion PR"
         next_action = "Draft a small explicit promotion PR only after fresh shadow observation confirms the same route/regime."
     elif positive_count > 0:
         verdict = "🟡"
         status = "Keep shadowing"
-        next_action = "Continue report-only shadowing; do not promote live until every required window passes robustness."
+        next_action = "Continue report-only shadowing; do not promote live until every required window passes robustness and drawdown gates."
     else:
         verdict = "🔴"
         status = "Not ready"
@@ -103,6 +119,8 @@ def evaluate_readiness(artifacts: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "next_action": next_action,
         "blockers": blockers,
         "windows": windows,
+        "max_allowed_drawdown_pct": max_allowed_drawdown_pct,
+        "required_route": required_route,
         "research_only": True,
     }
 
@@ -114,10 +132,14 @@ def render_markdown_report(result: dict[str, Any]) -> str:
         "",
         f"Verdict: {result['verdict']} **{result['status']}**",
         f"Next: {result['next_action']}",
+    ]
+    if result.get("required_route"):
+        lines.append(f"Required route: `{result['required_route']}`")
+    lines.extend([
         "",
         "| Window | Best route | Return | Max DD | Robust |",
         "|---|---|---:|---:|---|",
-    ]
+    ])
     for row in result.get("windows", []):
         robust = "✅" if row["best_route_robust"] else f"❌ {row['passing_windows']}/{row['total_windows']}"
         lines.append(
@@ -175,6 +197,15 @@ def run_fresh_artifacts(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
             train_fraction=args.train_fraction,
             selector_lookback=args.selector_lookback,
             selector_min_objective=args.selector_min_objective,
+            selector_max_trailing_drawdown_pct=args.selector_max_trailing_drawdown_pct,
+            selector_equity_stop_drawdown_pct=args.selector_equity_stop_drawdown_pct,
+            selector_equity_stop_cooldown_windows=args.selector_equity_stop_cooldown_windows,
+            selector_min_trailing_return_pct=args.selector_min_trailing_return_pct,
+            selector_min_trailing_win_rate_pct=args.selector_min_trailing_win_rate_pct,
+            selector_trailing_robust_windows=args.selector_trailing_robust_windows,
+            selector_min_passing_trailing_windows=args.selector_min_passing_trailing_windows,
+            selector_trailing_window_min_return_pct=args.selector_trailing_window_min_return_pct,
+            selector_trailing_window_max_drawdown_pct=args.selector_trailing_window_max_drawdown_pct,
         )
     return artifacts
 
@@ -192,6 +223,17 @@ def main() -> int:
     parser.add_argument("--train-fraction", type=float, default=0.60)
     parser.add_argument("--selector-lookback", type=int, default=12)
     parser.add_argument("--selector-min-objective", type=float, default=0.0)
+    parser.add_argument("--selector-max-trailing-drawdown-pct", type=float, default=0.0)
+    parser.add_argument("--selector-equity-stop-drawdown-pct", type=float, default=0.0)
+    parser.add_argument("--selector-equity-stop-cooldown-windows", type=int, default=1)
+    parser.add_argument("--selector-min-trailing-return-pct", type=float, default=-999999.0)
+    parser.add_argument("--selector-min-trailing-win-rate-pct", type=float, default=0.0)
+    parser.add_argument("--selector-trailing-robust-windows", type=int, default=0)
+    parser.add_argument("--selector-min-passing-trailing-windows", type=int, default=0)
+    parser.add_argument("--selector-trailing-window-min-return-pct", type=float, default=0.0)
+    parser.add_argument("--selector-trailing-window-max-drawdown-pct", type=float, default=20.0)
+    parser.add_argument("--max-allowed-drawdown-pct", type=float, default=18.0)
+    parser.add_argument("--required-route", default="", help="Evaluate this route instead of whichever non-cash route has highest return")
     parser.add_argument("--json-output", default="")
     args = parser.parse_args()
 
@@ -202,7 +244,11 @@ def main() -> int:
     else:
         parser.error("provide --fresh or at least one --artifact WINDOW=PATH")
 
-    result = evaluate_readiness(artifacts)
+    result = evaluate_readiness(
+        artifacts,
+        max_allowed_drawdown_pct=args.max_allowed_drawdown_pct,
+        required_route=args.required_route,
+    )
     if args.json_output:
         Path(args.json_output).write_text(json.dumps(result, indent=2))
     print(render_markdown_report(result))
