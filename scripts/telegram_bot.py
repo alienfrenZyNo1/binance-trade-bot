@@ -1682,6 +1682,9 @@ def cmd_config():
         except Exception:
             return val
 
+    def cfg_yes_no(key, fallback="no"):
+        return str(cfg(key, fallback)).strip().lower() in ("yes", "true", "1", "on")
+
     lines = ["⚙️ <b>Bot Configuration</b> 🎛\n"]
 
     lines.append(section("🧭 Trading"))
@@ -1716,6 +1719,15 @@ def cmd_config():
         ["Server callback", cfg_pct_plain("futures_server_trailing_callback_rate", "1.0")],
         ["Funding guard", cfg_funding("futures_max_funding_rate", "0.0001")],
         ["Check interval", f"{cfg('futures_check_interval', '60')}s"],
+    ]))
+
+    lines.append(section("🟡 Canary Capital Guard"))
+    canary_enabled = cfg_yes_no("canary_mode_enabled", "no")
+    lines.append(kv_table([
+        ["Mode", "enabled" if canary_enabled else "disabled"],
+        ["Spot trade cap", money(float(cfg("canary_max_spot_trade_usdc", "0") or 0))],
+        ["Futures margin cap", cfg_pct_fraction("canary_futures_max_margin_pct", "0")],
+        ["Futures absolute cap", money(float(cfg("canary_max_futures_margin_usdc", "0") or 0))],
     ]))
 
     conn = get_db()
