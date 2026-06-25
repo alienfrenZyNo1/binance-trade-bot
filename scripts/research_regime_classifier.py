@@ -377,6 +377,113 @@ def _breadth_metrics(
     }
 
 
+def _timestamps_for(ohlcv_by_coin: dict[str, list[dict[str, float | int]]], ref_coin: str = "SOL") -> list[int]:
+    return [int(row["ts"]) for row in ohlcv_by_coin.get(ref_coin, [])]
+
+
+def _truncate_to_ts(
+    ohlcv_by_coin: dict[str, list[dict[str, float | int]]],
+    ts: int,
+) -> dict[str, list[dict[str, float | int]]]:
+    return {
+        coin: [row for row in candles if int(row["ts"]) <= ts]
+        for coin, candles in ohlcv_by_coin.items()
+    }
+
+
+def legacy_sol_regime(ohlcv_by_coin: dict[str, list[dict[str, float | int]]]) -> str:
+    """Approximate the current SOL-only ADX/EMA live regime rule for comparison."""
+    candles = ohlcv_by_coin.get("SOL", [])
+    if len(candles) < 60:
+        return SIDEWAYS
+    recent = candles[-60:]
+    highs = [float(row["high"]) for row in recent]
+    lows = [float(row["low"]) for row in recent]
+    closes = [float(row["close"]) for row in recent]
+    adx, plus_di, minus_di = _adx(highs, lows, closes, 14)
+    ema_long = _ema(closes, 50)
+    current_price = closes[-1]
+    if adx >= 25:
+        if current_price > ema_long and plus_di > minus_di:
+            return BULL
+        if current_price < ema_long and minus_di > plus_di:
+            return BEAR
+    return SIDEWAYS
+
+
+def _sequence_summary(regimes: list[str]) -> dict[str, Any]:
+    if not regimes:
+        return {"count": 0, "flips": 0, "distribution": {}, "median_dwell": 0.0}
+    distribution = {regime: regimes.count(regime) for regime in sorted(set(regimes))}
+    flips = sum(1 for i in range(1, len(regimes)) if regimes[i] != regimes[i - 1])
+    dwell_lengths: list[int] = []
+    current_len = 1
+    for i in range(1, len(regimes)):
+        if regimes[i] == regimes[i - 1]:
+            current_len += 1
+        else:
+            dwell_lengths.append(current_len)
+            current_len = 1
+    dwell_lengths.append(current_len)
+    return {
+        "count": len(regimes),
+        "flips": flips,
+        "flip_rate": flips / max(1, len(regimes) - 1),
+        "distribution": distribution,
+        "median_dwell": median(dwell_lengths),
+    }
+
+
+def compare_regime_history(
+    ohlcv_by_coin: dict[str, list[dict[str, float | int]]],
+    *,
+    references: Iterable[str] = DEFAULT_REFERENCES,
+    breadth_coins: Iterable[str] = DEFAULT_BREADTH_COINS,
+    step_hours: int = 4,
+    warmup_hours: int = 60,
+) -> dict[str, Any]:
+    """Compare multi-signal regimes vs the current SOL-only classifier over history."""
+    timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
+    if not timestamps:
+        return {"samples": [], "multi": _sequence_summary([]), "legacy": _sequence_summary([]), "disagreement_pct": 0.0}
+
+    step_ms = max(1, step_hours) * HOUR_MS
+    warmup_ms = warmup_hours * HOUR_MS
+    start_ts = timestamps[0] + warmup_ms
+    selected: list[int] = []
+    next_ts = start_ts
+    for ts in timestamps:
+        if ts >= next_ts:
+            selected.append(ts)
+            next_ts = ts + step_ms
+
+    samples = []
+    for ts in selected:
+        window = _truncate_to_ts(ohlcv_by_coin, ts)
+        multi = classify_regime(window, references=references, breadth_coins=breadth_coins)
+        legacy = legacy_sol_regime(window)
+        samples.append(
+            {
+                "ts": ts,
+                "time": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "multi": multi.regime,
+                "legacy": legacy,
+                "confidence": multi.confidence,
+                "score": multi.score,
+            }
+        )
+
+    multi_regimes = [row["multi"] for row in samples]
+    legacy_regimes = [row["legacy"] for row in samples]
+    disagreements = sum(1 for row in samples if row["multi"] != row["legacy"])
+    return {
+        "samples": samples,
+        "multi": _sequence_summary(multi_regimes),
+        "legacy": _sequence_summary(legacy_regimes),
+        "disagreement_pct": disagreements / len(samples) * 100.0 if samples else 0.0,
+    }
+
+
 def classify_regime(
     ohlcv_by_coin: dict[str, list[dict[str, float | int]]],
     *,
@@ -555,6 +662,9 @@ def parse_args(argv=None):
     parser.add_argument("--futures-symbols", default=",".join(DEFAULT_FUTURES_SYMBOLS), help="Comma-separated futures symbols, e.g. BTCUSDC,ETHUSDC")
     parser.add_argument("--futures-period", default="1h", help="Futures data period for OI/ratio endpoints")
     parser.add_argument("--futures-limit", type=int, default=24, help="Rows to fetch from futures history endpoints")
+    parser.add_argument("--history-compare", action="store_true", help="Compare multi-signal history with the current SOL-only classifier")
+    parser.add_argument("--history-step-hours", type=int, default=4, help="Sample spacing for --history-compare")
+    parser.add_argument("--history-warmup-hours", type=int, default=60, help="Initial warmup before --history-compare sampling")
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     return parser.parse_args(argv)
 
@@ -573,8 +683,20 @@ def main(argv=None):
             limit=args.futures_limit,
         )
     result = classify_regime(data, references=references, breadth_coins=coins, futures_data=futures_data)
+    history = None
+    if args.history_compare:
+        history = compare_regime_history(
+            data,
+            references=references,
+            breadth_coins=coins,
+            step_hours=args.history_step_hours,
+            warmup_hours=args.history_warmup_hours,
+        )
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        payload = result.to_dict()
+        if history is not None:
+            payload = {"current": payload, "history_compare": history}
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return result
 
     print(f"Regime: {result.regime.upper()}  confidence={result.confidence:.0%}  score={result.score:+.2f}")
@@ -597,6 +719,14 @@ def main(argv=None):
             f"OI={futures['median_oi_value_change_pct']:+.1f}% "
             f"taker={futures['avg_taker_buy_sell_ratio']:.2f}"
         )
+    if history is not None:
+        print("\nHistory comparison vs current SOL-only classifier:")
+        print(
+            f"  samples={history['multi']['count']} disagreement={history['disagreement_pct']:.1f}% "
+            f"multi_flips={history['multi']['flips']} legacy_flips={history['legacy']['flips']}"
+        )
+        print(f"  multi_distribution={history['multi']['distribution']}")
+        print(f"  legacy_distribution={history['legacy']['distribution']}")
     return result
 
 
