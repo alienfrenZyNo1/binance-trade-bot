@@ -1,13 +1,13 @@
 """Small persistence repositories used behind the Database facade."""
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
 
 from .accounting import evaluate_deposit_delta
-from .models import BotState, Coin, CurrentCoin, Deposit, Pair
+from .models import BotState, Coin, CurrentCoin, Deposit, MarketRegimeLog, Pair
 
 
 MIN_DEPOSIT_THRESHOLD = 1.0
@@ -146,6 +146,83 @@ class CoinRepository:
                 pair.to_coin.symbol
             session.expunge_all()
             return pairs
+
+
+class RegimeRepository:
+    """Repository for market-regime history persistence."""
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.session_factory = session_factory
+
+    @contextmanager
+    def _session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def log(
+        self,
+        regime: str,
+        adx_value: Optional[float] = None,
+        avg_volatility: Optional[float] = None,
+        btc_correlation: Optional[float] = None,
+        ema_short: Optional[float] = None,
+        ema_long: Optional[float] = None,
+    ) -> None:
+        with self._session() as session:
+            session.add(
+                MarketRegimeLog(
+                    regime,
+                    adx_value,
+                    avg_volatility,
+                    btc_correlation,
+                    ema_short,
+                    ema_long,
+                )
+            )
+
+    @staticmethod
+    def _latest_payload(entry: MarketRegimeLog) -> dict[str, Any]:
+        return {
+            "regime": entry.regime,
+            "adx_value": entry.adx_value,
+            "avg_volatility": entry.avg_volatility,
+            "btc_correlation": entry.btc_correlation,
+            "datetime": entry.datetime.isoformat() if entry.datetime else None,
+        }
+
+    @staticmethod
+    def _history_payload(entry: MarketRegimeLog) -> dict[str, Any]:
+        return {
+            "regime": entry.regime,
+            "adx": entry.adx_value,
+            "vol": entry.avg_volatility,
+            "datetime": entry.datetime.isoformat() if entry.datetime else None,
+        }
+
+    def get_latest(self) -> Optional[dict[str, Any]]:
+        with self._session() as session:
+            entry = session.query(MarketRegimeLog).order_by(MarketRegimeLog.datetime.desc()).first()
+            if entry is None:
+                return None
+            return self._latest_payload(entry)
+
+    def get_history(self, hours: int = 24) -> list[dict[str, Any]]:
+        time_diff = datetime.now() - timedelta(hours=hours)
+        with self._session() as session:
+            entries = (
+                session.query(MarketRegimeLog)
+                .filter(MarketRegimeLog.datetime >= time_diff)
+                .order_by(MarketRegimeLog.datetime.desc())
+                .all()
+            )
+            return [self._history_payload(entry) for entry in entries]
 
 
 class BotStateRepository:

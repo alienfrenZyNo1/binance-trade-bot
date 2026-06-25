@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import Config
 from .logger import Logger
 from .models import *  # pylint: disable=wildcard-import
-from .repositories import BotStateRepository, CoinRepository, DepositRepository
+from .repositories import BotStateRepository, CoinRepository, DepositRepository, RegimeRepository
 
 
 class Database:
@@ -27,6 +27,7 @@ class Database:
         )
         self.SessionMaker = sessionmaker(bind=self.engine)
         self.coins = CoinRepository(self.SessionMaker)
+        self.regimes = RegimeRepository(self.SessionMaker)
         self.bot_state = BotStateRepository(self.SessionMaker)
         self.deposits = DepositRepository(self.SessionMaker, self.bot_state, self.logger)
         # Lazily created by socketio_connect(). Importing python-socketio at
@@ -319,50 +320,15 @@ class Database:
     def log_market_regime(self, regime, adx_value=None, avg_volatility=None,
                           btc_correlation=None, ema_short=None, ema_long=None):
         """Log a market regime classification."""
-        from .models import MarketRegimeLog
-        session: Session
-        with self.db_session() as session:
-            entry = MarketRegimeLog(
-                regime, adx_value, avg_volatility, btc_correlation, ema_short, ema_long
-            )
-            session.add(entry)
+        self.regimes.log(regime, adx_value, avg_volatility, btc_correlation, ema_short, ema_long)
 
     def get_latest_regime(self):
         """Get the most recent regime log entry. Returns dict or None."""
-        from .models import MarketRegimeLog
-        session: Session
-        with self.db_session() as session:
-            entry = session.query(MarketRegimeLog).order_by(
-                MarketRegimeLog.datetime.desc()
-            ).first()
-            if entry:
-                return {
-                    "regime": entry.regime,
-                    "adx_value": entry.adx_value,
-                    "avg_volatility": entry.avg_volatility,
-                    "btc_correlation": entry.btc_correlation,
-                    "datetime": entry.datetime.isoformat() if entry.datetime else None,
-                }
-            return None
+        return self.regimes.get_latest()
 
     def get_regime_history(self, hours=24):
         """Get regime history for the last N hours."""
-        from .models import MarketRegimeLog
-        time_diff = datetime.now() - timedelta(hours=hours)
-        session: Session
-        with self.db_session() as session:
-            entries = session.query(MarketRegimeLog).filter(
-                MarketRegimeLog.datetime >= time_diff
-            ).order_by(MarketRegimeLog.datetime.desc()).all()
-            return [
-                {
-                    "regime": e.regime,
-                    "adx": e.adx_value,
-                    "vol": e.avg_volatility,
-                    "datetime": e.datetime.isoformat() if e.datetime else None,
-                }
-                for e in entries
-            ]
+        return self.regimes.get_history(hours=hours)
 
     def start_trade_log(self, from_coin: Coin, to_coin: Coin, selling: bool):
         return TradeLog(self, from_coin, to_coin, selling)

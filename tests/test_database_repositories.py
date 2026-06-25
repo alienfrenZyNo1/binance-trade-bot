@@ -1,13 +1,19 @@
 """Repository seam tests for database state/deposit persistence."""
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from binance_trade_bot.database import Database
-from binance_trade_bot.models import Base, Coin, Deposit, Pair
-from binance_trade_bot.repositories import BotStateRepository, CoinRepository, DepositRepository
+from binance_trade_bot.models import Base, Coin, Deposit, MarketRegimeLog, Pair
+from binance_trade_bot.repositories import (
+    BotStateRepository,
+    CoinRepository,
+    DepositRepository,
+    RegimeRepository,
+)
 
 
 class FakeLogger:
@@ -86,6 +92,50 @@ def test_database_facade_delegates_coin_methods_and_sends_current_coin_update():
         ("SOL", "JUP"),
         ("JUP", "SOL"),
     }
+
+
+def test_regime_repository_logs_latest_and_hour_filtered_history():
+    sessions = make_session_factory()
+    repo = RegimeRepository(sessions)
+
+    repo.log("BULL", adx_value=31.5, avg_volatility=2.25, btc_correlation=0.72)
+    repo.log("BEAR", adx_value=42.0, avg_volatility=-6.0, ema_short=88.0, ema_long=91.0)
+
+    latest = repo.get_latest()
+    assert latest["regime"] == "BEAR"
+    assert latest["adx_value"] == 42.0
+    assert latest["avg_volatility"] == -6.0
+    assert latest["btc_correlation"] is None
+    assert latest["datetime"] is not None
+
+    with sessions() as session:
+        older = session.query(MarketRegimeLog).filter(MarketRegimeLog.regime == "BULL").one()
+        older.datetime = datetime.utcnow() - timedelta(hours=3)
+        session.commit()
+
+    recent_history = repo.get_history(hours=1)
+    assert recent_history == [
+        {
+            "regime": "BEAR",
+            "adx": 42.0,
+            "vol": -6.0,
+            "datetime": recent_history[0]["datetime"],
+        }
+    ]
+
+
+def test_database_facade_delegates_regime_methods():
+    logger = FakeLogger()
+    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False)
+    db = Database(logger, config, uri="sqlite:///:memory:")
+    db.create_database()
+
+    db.log_market_regime("SIDEWAYS", adx_value=18.0, avg_volatility=0.4, btc_correlation=0.3)
+
+    latest = db.get_latest_regime()
+    assert latest["regime"] == "SIDEWAYS"
+    assert latest["adx_value"] == 18.0
+    assert db.get_regime_history(hours=1)[0]["regime"] == "SIDEWAYS"
 
 
 def test_bot_state_repository_get_set_and_default():
