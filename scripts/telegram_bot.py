@@ -10,6 +10,7 @@ Commands:
   /price    — Current coin live price + 24h stats
   /profit   — Performance dashboard & P&L
   /regime   — Market regime + what the bot is doing
+  /shadow   — Research-only regime/candidate shadow report
   /futures  — Futures wallet balance, open shorts, P&L
   /health   — System health: DB, backups, bot process
   /config   — Current bot configuration
@@ -1024,6 +1025,180 @@ def get_momentum_context():
         "stats": stats,
         "candidates": candidates,
     }
+
+
+def _regime_result_dict(result):
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    if hasattr(result, "to_dict"):
+        return result.to_dict()
+    return {
+        "regime": getattr(result, "regime", "unknown"),
+        "confidence": getattr(result, "confidence", 0.0),
+        "score": getattr(result, "score", 0.0),
+        "reasons": getattr(result, "reasons", []),
+        "metrics": getattr(result, "metrics", {}),
+    }
+
+
+def collect_shadow_regime(days=3, include_futures=True):
+    """Run the research-only classifier for Telegram shadow reporting.
+
+    This uses public Binance endpoints only and returns a dict; it never places
+    orders, writes bot state, or changes the live strategy.
+    """
+    from scripts import research_regime_classifier as regime_research
+
+    coins = get_coins()
+    references = list(regime_research.DEFAULT_REFERENCES)
+    data = regime_research.fetch_market_data(
+        coins,
+        references=references,
+        bridge=BRIDGE_SYMBOL,
+        days=days,
+    )
+    futures_data = None
+    if include_futures:
+        futures_data = regime_research.fetch_futures_signals(
+            regime_research.DEFAULT_FUTURES_SYMBOLS,
+            limit=6,
+        )
+    result = regime_research.classify_regime(
+        data,
+        references=references,
+        breadth_coins=coins,
+        futures_data=futures_data,
+    )
+    return result.to_dict()
+
+
+def _shadow_action(regime, ctx):
+    candidates = list(ctx.get("candidates") or [])
+    lookback = ctx.get("lookback", "?")
+    if regime == "stormy":
+        return "STANDBY / protect capital - no new risk until storm clears"
+    if regime == "bear":
+        futures = [c for c in candidates if c.get("futures") and c.get("perf") is not None]
+        falling = [c for c in futures if c.get("perf", 0) < 0]
+        if falling:
+            weakest = sorted(falling, key=lambda c: c.get("perf", 0))[0]
+            return f"Would scout SHORT {weakest['coin']} ({lookback}h {pct(weakest.get('perf'), 1)})"
+        return f"Would hold USDC / wait - no futures-eligible coin is negative enough"
+    clear = [
+        c for c in candidates
+        if not c.get("blockers") and c.get("perf") is not None and c.get("perf", 0) > 0
+    ]
+    if clear:
+        best = clear[0]
+        return f"Would watch SPOT hop to {best['coin']} after {ctx.get('confirmation_cycles', '?')} confirmations"
+    if candidates:
+        best = candidates[0]
+        blockers = ",".join(best.get("blockers") or []) or "waiting"
+        return f"Would wait - closest {best.get('coin', '?')} blocked by {blockers}"
+    return "Would wait - momentum data still building"
+
+
+def _shadow_candidate_rows(regime, ctx, limit=5):
+    candidates = list(ctx.get("candidates") or [])
+    if regime in ("bear", "stormy"):
+        candidates = [c for c in candidates if c.get("futures") and c.get("perf") is not None]
+        candidates.sort(key=lambda c: c.get("perf", 0))
+    rows = []
+    pnl_vals = []
+    for c in candidates[:limit]:
+        status = "CLEAR" if not c.get("blockers") else ",".join(c.get("blockers")[:2])
+        action = "SHORT" if regime == "bear" and c.get("perf", 0) < 0 else ("WATCH" if not c.get("blockers") else "WAIT")
+        rows.append([
+            c.get("coin", "?"),
+            pct(c.get("perf"), 2) if c.get("perf") is not None else "-",
+            pct(c.get("edge"), 2) if c.get("edge") is not None else "-",
+            pct(c.get("one_h"), 1) if c.get("one_h") is not None else "-",
+            f"{c.get('rsi'):.0f}" if c.get("rsi") is not None else "-",
+            action,
+            status,
+        ])
+        pnl_vals.append(c.get("edge") if regime not in ("bear", "stormy") else c.get("perf"))
+    return rows, pnl_vals
+
+
+def build_shadow_report(regime_result, momentum_ctx, *, live_regime=None):
+    """Build compact Telegram HTML for research shadow mode."""
+    result = _regime_result_dict(regime_result)
+    regime = str(result.get("regime", "unknown")).lower()
+    confidence = float(result.get("confidence", 0.0) or 0.0)
+    score = float(result.get("score", 0.0) or 0.0)
+    reasons = list(result.get("reasons") or [])
+    metrics = result.get("metrics") or {}
+    breadth = metrics.get("breadth") or {}
+    futures = metrics.get("futures") or {}
+    live = (live_regime or "unknown").lower()
+    action = _shadow_action(regime, momentum_ctx)
+    compare = "matches live" if live == regime else "DIFFERS from live"
+    emoji_map = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "stormy": "🟠"}
+
+    lines = [f"🧪 <b>Shadow Regime Report</b> {emoji_map.get(regime, '❓')}\n"]
+    lines.append("⚠️ <b>SHADOW ONLY — NO LIVE ORDERS</b>")
+    lines.append(kv_table([
+        ["Research regime", f"{regime.upper()} ({confidence:.0%})"],
+        ["Live bot", live.upper()],
+        ["Compare", compare],
+        ["Score", f"{score:+.2f}"],
+        ["Hypothetical", action],
+    ], key_header="ITEM", value_header="VALUE"))
+
+    signal_rows = []
+    if breadth:
+        signal_rows.extend([
+            ["Above EMA50", f"{float(breadth.get('above_ema50_pct', 0)):.0%}"],
+            ["Advancers 24h", f"{float(breadth.get('advancers_24h_pct', 0)):.0%}"],
+            ["Median 24h", pct(breadth.get("median_ret_24h", 0), 1)],
+            ["Median vol", pct(breadth.get("median_vol_24h", 0), 1, signed=False)],
+        ])
+    if futures and futures.get("valid_symbols", 0):
+        signal_rows.extend([
+            ["Futures symbols", str(futures.get("valid_symbols", 0))],
+            ["Funding", pct(futures.get("avg_funding_pct", 0), 3)],
+            ["OI value", pct(futures.get("median_oi_value_change_pct", 0), 1)],
+            ["Taker buy/sell", f"{float(futures.get('avg_taker_buy_sell_ratio', 0) or 0):.2f}"],
+        ])
+    if signal_rows:
+        lines.append(section("📊 Top Signals"))
+        lines.append(pre_table(["SIGNAL", "VALUE"], signal_rows[:8], aligns=["l", "l"]))
+
+    if reasons:
+        lines.append(section("🧾 Why"))
+        reason_rows = [[str(i + 1), reason] for i, reason in enumerate(reasons[:4])]
+        lines.append(pre_table(["#", "REASON"], reason_rows, aligns=["r", "l"]))
+
+    rows, pnl_vals = _shadow_candidate_rows(regime, momentum_ctx)
+    if rows:
+        lines.append(section("🎯 Candidate Actions"))
+        lines.append(pre_table(
+            ["COIN", f"{momentum_ctx.get('lookback', '?')}H%", "EDGE", "1H", "RSI", "HYP", "BLOCK"],
+            rows,
+            aligns=["l", "d", "d", "d", "r", "l", "l"],
+            pnl_values=pnl_vals,
+        ))
+    else:
+        lines.append("\n🎯 <b>Candidate Actions:</b> <i>momentum data still building</i>")
+
+    lines.append("<i>Shadow mode compares research signals with live behavior; it never places trades.</i>")
+    return "\n".join(lines)
+
+
+def cmd_shadow():
+    """Research-only shadow regime/candidate report."""
+    try:
+        result = collect_shadow_regime()
+        ctx = get_momentum_context()
+        live_row = get_latest_regime()
+        live_regime = live_row["regime"] if live_row else "unknown"
+        return build_shadow_report(result, ctx, live_regime=live_regime)
+    except Exception as e:
+        log.warning(f"Could not build shadow report: {e}")
+        return f"❌ <b>Shadow Regime Report</b>\n\nCould not build shadow report: {html_escape(e)}"
 
 
 def cmd_status():
@@ -2354,6 +2529,7 @@ def cmd_help():
         ["Market", "/price", "live spot + futures context"],
         ["Market", "/hop", "next hop / short radar"],
         ["Market", "/regime", "bull/bear/sideways state"],
+        ["Market", "/shadow", "research-only what-if report"],
         ["Market", "/coins", "monitored coin universe"],
         ["Futures", "/futures", "wallet, shorts, funding"],
         ["System", "/health", "DB, bot, APIs"],
@@ -2388,6 +2564,7 @@ COMMANDS = {
     "/price": cmd_price,
     "/profit": cmd_profit,
     "/regime": cmd_regime,
+    "/shadow": cmd_shadow,
     "/futures": cmd_futures,
     "/health": cmd_health,
     "/config": cmd_config,
