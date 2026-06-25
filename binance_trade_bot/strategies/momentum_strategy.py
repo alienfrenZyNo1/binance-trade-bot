@@ -76,6 +76,29 @@ class Strategy(AutoTrader):
             except Exception:
                 self._recently_held = {}
 
+        # If the bot restarted with stale re-entry state but reconciliation shows
+        # we are already holding a spot position, resume normal position
+        # management instead of looping forever in bridge re-entry mode.
+        if self._awaiting_reentry:
+            try:
+                current_coin = self.db.get_current_coin()
+                if current_coin:
+                    coin_balance = self.manager.get_currency_balance(current_coin.symbol) or 0
+                    current_price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                    min_notional = self.manager.get_min_notional(current_coin.symbol, self.config.BRIDGE.symbol)
+                    if current_price and coin_balance * current_price > min_notional:
+                        self._awaiting_reentry = False
+                        self._persist_trade_state()
+                        self.logger.info(
+                            f"Cleared stale awaiting_reentry flag — holding {coin_balance} {current_coin.symbol}",
+                            notification=False,
+                        )
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not validate stale awaiting_reentry state: {e}",
+                    notification=False,
+                )
+
         # Confirmation delay — require edge to persist N cycles before trading
         self._pending_rotation = None  # (from_coin, to_coin, edge, first_seen_time)
         self._confirmation_cycles = getattr(self.config, 'CONFIRMATION_CYCLES', 3)
@@ -330,7 +353,7 @@ class Strategy(AutoTrader):
             closes = [float(k[4]) for k in klines]
             rsi = _compute_rsi_func(closes, 14)
             if rsi is not None and rsi > max_rsi:
-                self.logger.info(f"Skipping {coin_symbol}: RSI {rsi:.1f} > {max_rsi:.1f}")
+                self.logger.debug(f"Skipping {coin_symbol}: RSI {rsi:.1f} > {max_rsi:.1f}")
                 return False
             return True
         except Exception:
@@ -351,7 +374,7 @@ class Strategy(AutoTrader):
         # because the current holding is down -20%.
         min_target_perf = float(getattr(self.config, 'MOMENTUM_MIN_TARGET_PERF', 0.0))
         if perf_pct <= min_target_perf:
-            self.logger.info(
+            self.logger.debug(
                 f"Skipping {coin_symbol}: momentum {perf_pct:+.2f}% <= "
                 f"minimum {min_target_perf:+.2f}%"
             )
@@ -377,7 +400,7 @@ class Strategy(AutoTrader):
                 if open_price > 0:
                     one_hour_perf = ((close_price / open_price) - 1.0) * 100
                     if one_hour_perf < -max_drop:
-                        self.logger.info(
+                        self.logger.debug(
                             f"Skipping {coin_symbol}: 1h crash {one_hour_perf:+.2f}% "
                             f"< -{max_drop:.2f}%"
                         )
