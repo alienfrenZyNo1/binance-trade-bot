@@ -58,6 +58,15 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.BINANCE_API_SECRET_KEY = os.environ.get("API_SECRET_KEY") or config.get(USER_CFG_SECTION, "api_secret_key")
         self.BINANCE_TLD = os.environ.get("TLD") or config.get(USER_CFG_SECTION, "tld")
 
+        # Optional legacy Flask-SocketIO dashboard updates. Disabled by default
+        # in the live trading bot because importing python-socketio pulls in
+        # eventlet/zmq on this dependency set, creating noisy runtime warnings
+        # even when the API dashboard sidecar is not running.
+        self.SOCKETIO_UPDATES_ENABLED = (
+            os.environ.get("SOCKETIO_UPDATES_ENABLED")
+            or config.get(USER_CFG_SECTION, "socketio_updates_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+
         # Get supported coin list from the environment
         supported_coin_list = [
             coin.strip() for coin in os.environ.get("SUPPORTED_COIN_LIST", "").split() if coin.strip()
