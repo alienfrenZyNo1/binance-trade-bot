@@ -35,7 +35,12 @@ import re
 import subprocess
 import requests
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlencode
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
