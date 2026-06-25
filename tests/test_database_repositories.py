@@ -7,12 +7,22 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from binance_trade_bot.database import Database
-from binance_trade_bot.models import Base, Coin, Deposit, MarketRegimeLog, Pair, ScoutHistory
+from binance_trade_bot.models import (
+    Base,
+    Coin,
+    Deposit,
+    MarketRegimeLog,
+    Pair,
+    PairStat,
+    RatioSample,
+    ScoutHistory,
+)
 from binance_trade_bot.repositories import (
     BotStateRepository,
     CoinRepository,
     DepositRepository,
     RegimeRepository,
+    RatioStatsRepository,
     ScoutHistoryRepository,
 )
 
@@ -27,6 +37,27 @@ class FakeLogger:
 
     def debug(self, message, *args, **kwargs):
         self.debugs.append(str(message))
+
+
+class FakeManager:
+    def __init__(self, prices):
+        self.prices = prices
+        self.requested_symbols = []
+
+    def get_ticker_price(self, symbol):
+        self.requested_symbols.append(symbol)
+        return self.prices.get(symbol)
+
+
+def make_config(**overrides):
+    values = {
+        "SOCKETIO_UPDATES_ENABLED": False,
+        "SCOUT_HISTORY_PRUNE_TIME": 1,
+        "RATIO_SAMPLE_RETENTION_DAYS": 1,
+        "BRIDGE": SimpleNamespace(symbol="USDC"),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def make_session_factory():
@@ -80,7 +111,7 @@ def test_coin_repository_tracks_current_coin_and_pair_lookup():
 
 def test_database_facade_delegates_coin_methods_and_sends_current_coin_update():
     logger = FakeLogger()
-    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False)
+    config = make_config()
     db = Database(logger, config, uri="sqlite:///:memory:")
     db.create_database()
 
@@ -126,7 +157,7 @@ def test_scout_history_repository_logs_detached_event_and_prunes_old_rows():
 
 def test_database_facade_delegates_scout_history_methods():
     logger = FakeLogger()
-    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False, SCOUT_HISTORY_PRUNE_TIME=1)
+    config = make_config(SCOUT_HISTORY_PRUNE_TIME=1)
     db = Database(logger, config, uri="sqlite:///:memory:")
     db.create_database()
     db.set_coins(["SOL", "JUP"])
@@ -143,6 +174,85 @@ def test_database_facade_delegates_scout_history_methods():
 
     with db.db_session() as session:
         assert session.query(ScoutHistory).count() == 0
+
+
+def test_ratio_stats_repository_samples_updates_prunes_and_reads_stats():
+    sessions = make_session_factory()
+    coins = CoinRepository(sessions)
+    coins.set_coins(["SOL", "JUP"])
+    logger = FakeLogger()
+    repo = RatioStatsRepository(sessions, logger, bridge_symbol="USDC")
+
+    manager = FakeManager({"SOLUSDC": 100.0, "JUPUSDC": 50.0})
+    sampled = repo.sample_ratios(manager)
+
+    assert sampled == 2
+    assert set(manager.requested_symbols) == {"SOLUSDC", "JUPUSDC"}
+    with sessions() as session:
+        samples = session.query(RatioSample).order_by(RatioSample.pair_id).all()
+        assert len(samples) == 2
+        assert {sample.ratio for sample in samples} == {2.0, 0.5}
+
+    pair_id = None
+    with sessions() as session:
+        pair_id = session.query(Pair).filter(Pair.from_coin_id == "SOL", Pair.to_coin_id == "JUP").one().id
+
+    for offset, ratio in enumerate([1.0, 1.1, 1.2, 1.3, 1.4]):
+        with sessions() as session:
+            sample = RatioSample(pair_id, ratio)
+            sample.datetime = datetime.utcnow() - timedelta(minutes=offset)
+            session.add(sample)
+            session.commit()
+
+    updated = repo.update_pair_stats()
+
+    assert updated >= 1
+    ema, std = repo.get_pair_stat(pair_id)
+    assert ema is not None
+    assert std is not None
+    with sessions() as session:
+        pair = session.query(Pair).filter(Pair.id == pair_id).one()
+        stat = session.query(PairStat).filter(PairStat.pair_id == pair_id).one()
+        assert pair.ratio == stat.ema_ratio
+        old_sample = session.query(RatioSample).first()
+        old_sample.datetime = datetime.utcnow() - timedelta(days=10)
+        session.commit()
+
+    deleted = repo.prune_ratio_samples(retention_days=1)
+
+    assert deleted >= 1
+    assert any("Sampled 2 pair ratios" in message for message in logger.infos)
+    assert any("Updated rolling stats" in message for message in logger.infos)
+    assert any("Pruned" in message for message in logger.infos)
+
+
+def test_database_facade_delegates_ratio_stat_methods():
+    logger = FakeLogger()
+    config = make_config(RATIO_SAMPLE_RETENTION_DAYS=1, BRIDGE=SimpleNamespace(symbol="USDC"))
+    db = Database(logger, config, uri="sqlite:///:memory:")
+    db.create_database()
+    db.set_coins(["SOL", "JUP"])
+    manager = FakeManager({"SOLUSDC": 90.0, "JUPUSDC": 30.0})
+
+    db.sample_ratios(manager)
+    with db.db_session() as session:
+        pair_id = session.query(Pair).filter(Pair.from_coin_id == "SOL", Pair.to_coin_id == "JUP").one().id
+        for ratio in [1.0, 1.05, 1.1, 1.15, 1.2]:
+            session.add(RatioSample(pair_id, ratio))
+
+    db.update_pair_stats()
+
+    ema, std = db.get_pair_stat(pair_id)
+    assert ema is not None
+    assert std is not None
+
+    with db.db_session() as session:
+        old_sample = session.query(RatioSample).first()
+        old_sample.datetime = datetime.utcnow() - timedelta(days=2)
+
+    db.prune_ratio_samples()
+    with db.db_session() as session:
+        assert session.query(RatioSample).filter(RatioSample.datetime < datetime.utcnow() - timedelta(days=1)).count() == 0
 
 
 def test_regime_repository_logs_latest_and_hour_filtered_history():
@@ -177,7 +287,7 @@ def test_regime_repository_logs_latest_and_hour_filtered_history():
 
 def test_database_facade_delegates_regime_methods():
     logger = FakeLogger()
-    config = SimpleNamespace(SOCKETIO_UPDATES_ENABLED=False)
+    config = make_config()
     db = Database(logger, config, uri="sqlite:///:memory:")
     db.create_database()
 

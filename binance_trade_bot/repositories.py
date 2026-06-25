@@ -1,5 +1,6 @@
 """Small persistence repositories used behind the Database facade."""
 
+import statistics as stats_mod
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
@@ -7,7 +8,17 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from .accounting import evaluate_deposit_delta
-from .models import BotState, Coin, CurrentCoin, Deposit, MarketRegimeLog, Pair, ScoutHistory
+from .models import (
+    BotState,
+    Coin,
+    CurrentCoin,
+    Deposit,
+    MarketRegimeLog,
+    Pair,
+    PairStat,
+    RatioSample,
+    ScoutHistory,
+)
 
 
 MIN_DEPOSIT_THRESHOLD = 1.0
@@ -191,6 +202,127 @@ class ScoutHistoryRepository:
         time_diff = datetime.now() - timedelta(hours=hours_to_keep)
         with self._session() as session:
             session.query(ScoutHistory).filter(ScoutHistory.datetime < time_diff).delete()
+
+
+class RatioStatsRepository:
+    """Repository for rolling ratio samples and pair statistics."""
+
+    def __init__(self, session_factory: Callable[[], Session], logger, bridge_symbol: str):
+        self.session_factory = session_factory
+        self.logger = logger
+        self.bridge_symbol = bridge_symbol
+
+    @contextmanager
+    def _session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def sample_ratios(self, manager) -> int:
+        with self._session() as session:
+            coins = session.query(Coin).filter(Coin.enabled.is_(True)).all()
+            if len(coins) < 2:
+                return 0
+
+            prices = {}
+            for coin in coins:
+                price = manager.get_ticker_price(coin.symbol + self.bridge_symbol)
+                if price is not None and price > 0:
+                    prices[coin.symbol] = price
+
+            if len(prices) < 2:
+                self.logger.info("Not enough prices to sample ratios")
+                return 0
+
+            pair_count = 0
+            for from_coin in coins:
+                for to_coin in coins:
+                    if from_coin.symbol == to_coin.symbol:
+                        continue
+                    if from_coin.symbol not in prices or to_coin.symbol not in prices:
+                        continue
+
+                    pair = (
+                        session.query(Pair)
+                        .filter(
+                            Pair.from_coin_id == from_coin.symbol,
+                            Pair.to_coin_id == to_coin.symbol,
+                        )
+                        .first()
+                    )
+                    if pair is None:
+                        continue
+
+                    ratio = prices[from_coin.symbol] / prices[to_coin.symbol]
+                    session.add(RatioSample(pair.id, ratio))
+                    pair_count += 1
+
+            self.logger.info(f"Sampled {pair_count} pair ratios")
+            return pair_count
+
+    def update_pair_stats(self) -> int:
+        with self._session() as session:
+            pairs = session.query(Pair).all()
+            updated = 0
+
+            for pair in pairs:
+                samples = (
+                    session.query(RatioSample)
+                    .filter(RatioSample.pair_id == pair.id)
+                    .order_by(RatioSample.datetime.desc())
+                    .limit(1008)
+                    .all()
+                )
+
+                if len(samples) < 5:
+                    continue
+
+                ratios = [sample.ratio for sample in samples]
+                ratios.reverse()
+
+                span = min(144, len(ratios))
+                alpha = 2.0 / (span + 1)
+                ema = ratios[0]
+                for ratio in ratios[1:]:
+                    ema = alpha * ratio + (1 - alpha) * ema
+
+                std = stats_mod.pstdev(ratios) if len(ratios) > 1 else 0.0
+
+                stat = session.query(PairStat).filter(PairStat.pair_id == pair.id).first()
+                if stat:
+                    stat.ema_ratio = ema
+                    stat.std_ratio = std
+                    stat.sample_count = len(ratios)
+                    stat.last_updated = datetime.utcnow()
+                else:
+                    session.add(PairStat(pair.id, ema, std, len(ratios)))
+
+                pair.ratio = ema
+                updated += 1
+
+            self.logger.info(f"Updated rolling stats for {updated} pairs")
+            return updated
+
+    def prune_ratio_samples(self, retention_days: int | float) -> int:
+        time_diff = datetime.now() - timedelta(days=retention_days)
+        with self._session() as session:
+            deleted = session.query(RatioSample).filter(RatioSample.datetime < time_diff).delete()
+            if deleted:
+                self.logger.info(f"Pruned {deleted} old ratio samples")
+            return deleted
+
+    def get_pair_stat(self, pair_id) -> tuple[Optional[float], Optional[float]]:
+        with self._session() as session:
+            stat = session.query(PairStat).filter(PairStat.pair_id == pair_id).first()
+            if stat and stat.sample_count >= 5:
+                return stat.ema_ratio, stat.std_ratio
+            return None, None
 
 
 class RegimeRepository:
