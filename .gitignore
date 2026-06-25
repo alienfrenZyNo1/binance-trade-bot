@@ -19,5 +19,6 @@ apprise.yml
 .env.telegram
 .hermes/
 research/
+.cache/
 *.env
 config/apprise.yml.bak
