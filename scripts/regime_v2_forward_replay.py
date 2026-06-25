@@ -101,37 +101,48 @@ def build_default_settings(
     selector_lookbacks: list[int],
     selector_max_trailing_drawdowns: list[float] | None = None,
     selector_equity_stop_drawdowns: list[float] | None = None,
+    selector_min_trailing_win_rates: list[float] | None = None,
+    selector_trailing_robust_windows: int = 0,
+    selector_min_passing_trailing_windows: int = 0,
+    selector_trailing_window_max_drawdown_pct: float = 20.0,
 ) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
     drawdowns = selector_max_trailing_drawdowns or [0.0]
     equity_stops = selector_equity_stop_drawdowns or [0.0]
+    win_rates = selector_min_trailing_win_rates or [0.0]
     for day in days:
         for step in step_hours:
             for selector in selector_lookbacks:
                 for drawdown_cap in drawdowns:
                     for equity_stop in equity_stops:
-                        dd_suffix = "" if float(drawdown_cap) <= 0 else f"_dd{float(drawdown_cap):g}"
-                        stop_suffix = "" if float(equity_stop) <= 0 else f"_eqstop{float(equity_stop):g}"
-                        settings.append(
-                            {
-                                "name": f"{day}d_step{step}_sel{selector}{dd_suffix}{stop_suffix}",
-                                "days": day,
-                                "step_hours": step,
-                                "warmup_hours": 72 if day <= 30 else 120,
-                                "forward_hours": 24,
-                                "confirmation_samples": 3 if day <= 30 else 2,
-                                "min_confidence": 0.60,
-                                "tune_scorecard": True,
-                                "tune_route_objective": True,
-                                "train_fraction": 0.60,
-                                "selector_lookback": selector,
-                                "selector_min_objective": 0.0,
-                                "selector_max_trailing_drawdown_pct": float(drawdown_cap),
-                                "selector_equity_stop_drawdown_pct": float(equity_stop),
-                                "selector_equity_stop_cooldown_windows": 1,
-                            }
-                        )
+                        for win_rate in win_rates:
+                            dd_suffix = "" if float(drawdown_cap) <= 0 else f"_dd{float(drawdown_cap):g}"
+                            stop_suffix = "" if float(equity_stop) <= 0 else f"_eqstop{float(equity_stop):g}"
+                            win_suffix = "" if float(win_rate) <= 0 else f"_wr{float(win_rate):g}"
+                            settings.append(
+                                {
+                                    "name": f"{day}d_step{step}_sel{selector}{dd_suffix}{stop_suffix}{win_suffix}",
+                                    "days": day,
+                                    "step_hours": step,
+                                    "warmup_hours": 72 if day <= 30 else 120,
+                                    "forward_hours": 24,
+                                    "confirmation_samples": 3 if day <= 30 else 2,
+                                    "min_confidence": 0.60,
+                                    "tune_scorecard": True,
+                                    "tune_route_objective": True,
+                                    "train_fraction": 0.60,
+                                    "selector_lookback": selector,
+                                    "selector_min_objective": 0.0,
+                                    "selector_max_trailing_drawdown_pct": float(drawdown_cap),
+                                    "selector_equity_stop_drawdown_pct": float(equity_stop),
+                                    "selector_equity_stop_cooldown_windows": 1,
+                                    "selector_min_trailing_win_rate_pct": float(win_rate),
+                                    "selector_trailing_robust_windows": int(selector_trailing_robust_windows),
+                                    "selector_min_passing_trailing_windows": int(selector_min_passing_trailing_windows),
+                                    "selector_trailing_window_max_drawdown_pct": float(selector_trailing_window_max_drawdown_pct),
+                                }
+                            )
     return settings
 
 
@@ -176,6 +187,11 @@ def evaluate_settings_grid(
             selector_max_trailing_drawdown_pct=float(setting.get("selector_max_trailing_drawdown_pct", 0.0)),
             selector_equity_stop_drawdown_pct=float(setting.get("selector_equity_stop_drawdown_pct", 0.0)),
             selector_equity_stop_cooldown_windows=int(setting.get("selector_equity_stop_cooldown_windows", 1)),
+            selector_min_trailing_return_pct=float(setting.get("selector_min_trailing_return_pct", -999999.0)),
+            selector_min_trailing_win_rate_pct=float(setting.get("selector_min_trailing_win_rate_pct", 0.0)),
+            selector_trailing_robust_windows=int(setting.get("selector_trailing_robust_windows", 0)),
+            selector_min_passing_trailing_windows=int(setting.get("selector_min_passing_trailing_windows", 0)),
+            selector_trailing_window_max_drawdown_pct=float(setting.get("selector_trailing_window_max_drawdown_pct", 20.0)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -248,6 +264,14 @@ def main() -> int:
         default="0",
         help="Comma-separated selector equity stop drawdown caps; 0 disables the guard",
     )
+    parser.add_argument(
+        "--selector-min-trailing-win-rates",
+        default="0",
+        help="Comma-separated minimum trailing win rates for selector candidates; 0 disables the guard",
+    )
+    parser.add_argument("--selector-trailing-robust-windows", type=int, default=0)
+    parser.add_argument("--selector-min-passing-trailing-windows", type=int, default=0)
+    parser.add_argument("--selector-trailing-window-max-drawdown-pct", type=float, default=20.0)
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
@@ -258,6 +282,7 @@ def main() -> int:
     selector_lookbacks = _parse_int_csv(args.selector_lookbacks)
     selector_max_trailing_drawdowns = _parse_float_csv(args.selector_max_trailing_drawdowns)
     selector_equity_stop_drawdowns = _parse_float_csv(args.selector_equity_stop_drawdowns)
+    selector_min_trailing_win_rates = _parse_float_csv(args.selector_min_trailing_win_rates)
     coins = _parse_csv(args.coins)
     references = _parse_csv(args.references)
     fetch_days = max([args.fetch_days, *days])
@@ -275,6 +300,10 @@ def main() -> int:
         selector_lookbacks=selector_lookbacks,
         selector_max_trailing_drawdowns=selector_max_trailing_drawdowns,
         selector_equity_stop_drawdowns=selector_equity_stop_drawdowns,
+        selector_min_trailing_win_rates=selector_min_trailing_win_rates,
+        selector_trailing_robust_windows=args.selector_trailing_robust_windows,
+        selector_min_passing_trailing_windows=args.selector_min_passing_trailing_windows,
+        selector_trailing_window_max_drawdown_pct=args.selector_trailing_window_max_drawdown_pct,
     )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta
