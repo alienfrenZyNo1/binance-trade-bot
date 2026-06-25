@@ -97,8 +97,46 @@ def mixed_dataset():
     return data
 
 
+def futures_payload(*, basis=-0.01, funding=0.0003, oi_start=100.0, oi_end=110.0, taker=0.8, lsr=2.1):
+    mark = 100.0 * (1.0 + basis)
+    return {
+        "BTCUSDC": {
+            "premium": {
+                "markPrice": str(mark),
+                "indexPrice": "100.0",
+                "lastFundingRate": str(funding),
+            },
+            "funding": [{"fundingRate": str(funding)}],
+            "open_interest_hist": [
+                {"sumOpenInterestValue": str(oi_start)},
+                {"sumOpenInterestValue": str(oi_end)},
+            ],
+            "global_long_short": [{"longShortRatio": str(lsr)}],
+            "top_long_short": [{"longShortRatio": str(lsr)}],
+            "taker_long_short": [{"buySellRatio": str(taker)}],
+        }
+    }
+
+
 def test_classifies_sideways_on_mixed_low_conviction_market():
     module = load_module()
     result = module.classify_regime(mixed_dataset(), breadth_coins=["SOL", "SUI", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE"])
 
     assert result.regime == module.SIDEWAYS
+
+
+def test_futures_metrics_are_aggregated_and_explained():
+    module = load_module()
+    result = module.classify_regime(
+        mixed_dataset(),
+        breadth_coins=["SOL", "SUI", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE"],
+        futures_data=futures_payload(),
+    )
+
+    futures = result.metrics["futures"]
+    assert futures["valid_symbols"] == 1
+    assert futures["avg_basis_pct"] < -0.5
+    assert abs(futures["median_oi_value_change_pct"] - 10.0) < 1e-9
+    assert futures["avg_taker_buy_sell_ratio"] == 0.8
+    assert any("futures basis negative" in reason for reason in result.reasons)
+    assert any("futures taker flow bearish" in reason for reason in result.reasons)
