@@ -5,14 +5,17 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .accounting import evaluate_deposit_delta
 from .models import (
     BotState,
     Coin,
+    CoinValue,
     CurrentCoin,
     Deposit,
+    Interval,
     MarketRegimeLog,
     Pair,
     PairStat,
@@ -323,6 +326,62 @@ class RatioStatsRepository:
             if stat and stat.sample_count >= 5:
                 return stat.ema_ratio, stat.std_ratio
             return None, None
+
+
+class ValueHistoryRepository:
+    """Repository for pruning and rolling up coin value history."""
+
+    def __init__(self, session_factory: Callable[[], Session]):
+        self.session_factory = session_factory
+
+    @contextmanager
+    def _session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def prune_value_history(self, reference_time: Optional[datetime] = None) -> None:
+        """Promote retained value snapshots and delete expired fine-grained rows."""
+        reference_time = reference_time or datetime.now()
+        with self._session() as session:
+            hourly_entries: list[CoinValue] = (
+                session.query(CoinValue).group_by(CoinValue.coin_id, func.strftime("%H", CoinValue.datetime)).all()
+            )
+            for entry in hourly_entries:
+                entry.interval = Interval.HOURLY
+
+            daily_entries: list[CoinValue] = (
+                session.query(CoinValue).group_by(CoinValue.coin_id, func.date(CoinValue.datetime)).all()
+            )
+            for entry in daily_entries:
+                entry.interval = Interval.DAILY
+
+            weekly_entries: list[CoinValue] = (
+                session.query(CoinValue).group_by(CoinValue.coin_id, func.strftime("%Y-%W", CoinValue.datetime)).all()
+            )
+            for entry in weekly_entries:
+                entry.interval = Interval.WEEKLY
+
+            session.query(CoinValue).filter(
+                CoinValue.interval == Interval.MINUTELY,
+                CoinValue.datetime < reference_time - timedelta(hours=24),
+            ).delete()
+
+            session.query(CoinValue).filter(
+                CoinValue.interval == Interval.HOURLY,
+                CoinValue.datetime < reference_time - timedelta(days=28),
+            ).delete()
+
+            session.query(CoinValue).filter(
+                CoinValue.interval == Interval.DAILY,
+                CoinValue.datetime < reference_time - timedelta(days=365),
+            ).delete()
 
 
 class RegimeRepository:
