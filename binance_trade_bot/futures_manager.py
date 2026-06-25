@@ -35,6 +35,10 @@ FUTURES_ELIGIBLE_COINS = {
     # "BTC", "ETH", "BNB"
 }
 
+FUTURES_TRANSFER_DUST_BUFFER = Decimal("0.10")
+FUTURES_TRANSFER_MIN_AMOUNT = Decimal("1.00")
+FUTURES_TRANSFER_STEP = Decimal("0.01")
+
 
 class FuturesPosition:
     """Tracks an open short position in memory."""
@@ -977,19 +981,74 @@ class FuturesManager:
             self.logger.error(f"Transfer to futures failed: {e}")
             return False
 
+    @staticmethod
+    def _safe_transfer_amount(amount: float) -> float:
+        """Floor transfer amount to cents and leave a small futures dust buffer."""
+        raw = Decimal(str(amount or 0)) - FUTURES_TRANSFER_DUST_BUFFER
+        if raw < FUTURES_TRANSFER_MIN_AMOUNT:
+            return 0.0
+        safe = raw.quantize(FUTURES_TRANSFER_STEP, rounding=ROUND_DOWN)
+        return float(safe)
+
+    @staticmethod
+    def _is_insufficient_balance_error(error: Optional[Exception]) -> bool:
+        return isinstance(error, BinanceAPIException) and getattr(error, "code", None) == -5013
+
     def transfer_to_spot(self, amount: float) -> bool:
-        """Transfer USDC from futures wallet to spot wallet."""
-        try:
-            self.client.futures_account_transfer(
-                asset=self.bridge_symbol,
-                amount=amount,
-                type=2,  # 2 = USDT-M/USDC-M futures to spot
+        """Transfer USDC from futures wallet to spot wallet.
+
+        Binance can reject an exact max-withdrawable amount with -5013 even
+        when account fields show funds present. Transfer conservatively: leave
+        small dust, floor to cents, and retry once with a freshly-read lower
+        withdrawable balance. Insufficient-balance failures are logged without
+        Telegram notification spam; funds remain safely in futures for the next
+        cycle/manual inspection.
+        """
+        first_amount = self._safe_transfer_amount(amount)
+        if first_amount <= 0:
+            self.logger.debug(
+                f"Futures→spot transfer skipped: {amount:.8f} {self.bridge_symbol} "
+                "is below transferable threshold after dust buffer"
             )
-            self.logger.info(f"Transferred {amount} {self.bridge_symbol} to spot")
-            return True
-        except Exception as e:
-            self.logger.error(f"Transfer from futures failed: {e}")
             return False
+
+        attempts = [first_amount]
+        last_error = None
+        for idx, transfer_amount in enumerate(attempts):
+            try:
+                self.client.futures_account_transfer(
+                    asset=self.bridge_symbol,
+                    amount=transfer_amount,
+                    type=2,  # 2 = USDT-M/USDC-M futures to spot
+                )
+                self.logger.info(f"Transferred {transfer_amount:.2f} {self.bridge_symbol} to spot")
+                return True
+            except Exception as e:
+                last_error = e
+                if idx == 0 and self._is_insufficient_balance_error(e):
+                    refreshed_amount = min(
+                        self._safe_transfer_amount(self._get_futures_usdc_balance()),
+                        self._safe_transfer_amount(transfer_amount),
+                    )
+                    if refreshed_amount > 0 and refreshed_amount < transfer_amount:
+                        self.logger.warning(
+                            f"Retrying futures→spot transfer after insufficient balance: "
+                            f"{transfer_amount:.2f} → {refreshed_amount:.2f} {self.bridge_symbol}",
+                            notification=False,
+                        )
+                        attempts.append(refreshed_amount)
+                        continue
+                break
+
+        if self._is_insufficient_balance_error(last_error):
+            self.logger.warning(
+                f"Futures→spot transfer unavailable after conservative retry; "
+                f"leaving funds in futures ({last_error})",
+                notification=False,
+            )
+        else:
+            self.logger.error(f"Transfer from futures failed: {last_error}")
+        return False
 
     # ─────────────────────────────────────────────────────────────────────────
     #  STATUS
