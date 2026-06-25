@@ -147,6 +147,7 @@ This is a direction, not a one-shot migration. Keep compatibility shims during m
 8. Move Telegram table/card formatting to `binance_trade_bot/formatting/telegram_html.py`.
    - Keep `scripts/telegram_bot.py` command names and responses stable.
    - Run local smoke tests and actual HTML send/delete validation after changes.
+   - Status: implemented via pure `binance_trade_bot/formatting/telegram_html.py`; `scripts/telegram_bot.py` imports helpers while command handlers remain in place.
 
 9. Move Telegram data collection into small service functions.
    - Separate command rendering from Binance/DB calls so output can be tested with fixtures.

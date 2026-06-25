@@ -42,6 +42,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from binance_trade_bot.formatting.telegram_html import (
+    format_duration,
+    format_table,
+    funding_flow,
+    html_escape,
+    kv_table,
+    money,
+    pct,
+    pnl_emoji,
+    pre_table,
+    section,
+    status_word,
+)
+
 # ── Config ──────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_CHAT_IDS = set(
@@ -77,220 +91,6 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
-def html_escape(text):
-    """HTML-escape text for safe insertion into Telegram HTML messages.
-
-    Telegram's HTML parse_mode requires <, >, & to be escaped in text content
-    (including inside <pre>/<code> blocks).
-    """
-    return html.escape(str(text), quote=False)
-
-
-def format_table(headers, rows, aligns=None):
-    """Build a clean, aligned monospace table string.
-
-    Args:
-        headers: list of column header strings.
-        rows: list of lists; each inner list is one data row of cell values
-            (numbers are coerced to str automatically).
-        aligns: optional list of per-column alignment specifiers, one per
-            column.  Accepted values:
-              'l'  – left-justify  (default; text columns)
-              'r'  – right-justify (numeric columns; aligns by last char)
-              'd'  – decimal-align (splits on last '.', pads integer part
-                     left and fractional part right so decimal points line up)
-
-    Returns:
-        A multi-line string with a header row, a '──' separator line, and
-        aligned data rows.  Column widths are computed from the actual data
-        so padding always fits.  The result is NOT html-escaped; the caller
-        must html_escape() it and wrap it in <pre>...</pre>.
-    """
-    ncols = len(headers)
-    if aligns is None:
-        aligns = ["l"] * ncols
-    # Pad aligns to match ncols
-    while len(aligns) < ncols:
-        aligns.append("l")
-
-    # Normalise every cell to a string and pad short rows to ncols.
-    str_rows = []
-    for row in rows:
-        cells = [str(c) for c in row]
-        while len(cells) < ncols:
-            cells.append("")
-        str_rows.append(cells[:ncols])
-
-    # ── Decimal-align pass: split each cell at the last '.' and pad ──
-    # For each 'd' column we split every cell into left_of_dot and
-    # right_of_dot, then left-pad the left side to the column max and
-    # right-pad the right side.  This lines up ALL decimal points perfectly
-    # regardless of sign, currency symbol, or magnitude.
-    for col_idx in range(ncols):
-        if aligns[col_idx] != "d":
-            continue
-        lefts = []
-        rights = []
-        has_dot = []
-        for row in str_rows:
-            cell = row[col_idx]
-            if "." in cell:
-                # Split on LAST dot (handles values like $1,234.56)
-                idx = cell.rfind(".")
-                lefts.append(cell[:idx])
-                rights.append(cell[idx + 1:])
-                has_dot.append(True)
-            else:
-                # No decimal — whole cell is the left part
-                lefts.append(cell)
-                rights.append("")
-                has_dot.append(False)
-
-        max_left = max((len(l) for l in lefts), default=0)
-        max_right = max((len(r) for r in rights if r), default=0)
-
-        for row_idx in range(len(str_rows)):
-            left = lefts[row_idx].rjust(max_left)
-            if has_dot[row_idx] and rights[row_idx]:
-                right = rights[row_idx].ljust(max_right)
-                str_rows[row_idx][col_idx] = left + "." + right
-            elif has_dot[row_idx]:
-                # Has dot but nothing after (e.g. "42.")
-                str_rows[row_idx][col_idx] = left + "." + " " * max_right
-            else:
-                # No decimal point — pad right side with spaces to match
-                str_rows[row_idx][col_idx] = left + " " * (max_right + 1 if max_right > 0 else 0)
-
-    # Column widths from headers + data
-    widths = [len(h) for h in headers]
-    for row in str_rows:
-        for i in range(ncols):
-            widths[i] = max(widths[i], len(row[i]))
-
-    sep = "  "
-    # Header: right-align headers for 'r'/'d' columns, left for 'l'
-    header_cells = []
-    for i in range(ncols):
-        if aligns[i] in ("r", "d"):
-            header_cells.append(headers[i].rjust(widths[i]))
-        else:
-            header_cells.append(headers[i].ljust(widths[i]))
-    header_line = sep.join(header_cells)
-    divider_line = sep.join("\u2500" * widths[i] for i in range(ncols))
-
-    data_lines = []
-    for row in str_rows:
-        cells = []
-        for i in range(ncols):
-            if aligns[i] in ("r", "d"):
-                cells.append(row[i].rjust(widths[i]))
-            else:
-                cells.append(row[i].ljust(widths[i]))
-        data_lines.append(sep.join(cells))
-    return "\n".join([header_line, divider_line] + data_lines)
-
-
-def _annotate_pnl_emoji(table, pnl_values):
-    """Prefix each data row of an aligned table with a 🟢/🔴 profit marker.
-
-    The circle emoji render as two monospace cells, so the header and divider
-    lines receive a matching 3-cell blank spacer ("   ") and every data row
-    gets the emoji plus a trailing space.
-
-    Args:
-        table: output string from format_table() (header, divider, data rows).
-        pnl_values: numeric P&L value for each data row, in row order.
-            >= 0 is shown green (🟢), negative is red (🔴).
-            Pass None for rows that should get a blank spacer (summary lines).
-
-    Returns:
-        A new multi-line string with the indicators prepended.
-    """
-    lines = table.split("\n")
-    spacer = "   "  # 2 cells (emoji) + 1 trailing spacer
-    out = []
-    for i, line in enumerate(lines):
-        if i < 2:
-            out.append(spacer + line)
-        else:
-            idx = i - 2
-            if idx < len(pnl_values):
-                val = pnl_values[idx]
-                if val is None:
-                    out.append(spacer + line)
-                else:
-                    marker = "🟢" if val >= 0 else "🔴"
-                    out.append(f"{marker} {line}")
-            else:
-                out.append(spacer + line)
-    return "\n".join(out)
-
-
-def pre_table(headers, rows, aligns=None, pnl_values=None):
-    """Format, optionally P&L-annotate, HTML-escape, and wrap a table."""
-    table = format_table(headers, rows, aligns=aligns)
-    if pnl_values is not None:
-        table = _annotate_pnl_emoji(table, pnl_values)
-    return f"<pre>{html_escape(table)}</pre>"
-
-
-def kv_table(rows, key_header="ITEM", value_header="VALUE"):
-    """Two-column key/value table for Telegram HTML dashboards."""
-    return pre_table([key_header, value_header], rows, aligns=["l", "l"])
-
-
-def money(value, digits=2, signed=False):
-    """Format a USDC-ish money value."""
-    try:
-        val = float(value)
-    except Exception:
-        return "$-"
-    sign = "+" if signed else ""
-    return f"${val:{sign}.{digits}f}"
-
-
-def pct(value, digits=1, signed=True):
-    """Format a percentage value."""
-    try:
-        val = float(value)
-    except Exception:
-        return "-"
-    sign = "+" if signed else ""
-    return f"{val:{sign}.{digits}f}%"
-
-
-def pnl_emoji(value):
-    try:
-        return "🟢" if float(value) >= 0 else "🔴"
-    except Exception:
-        return "⚪"
-
-
-def funding_flow(funding):
-    """Return readable funding direction for a short position."""
-    if funding is None:
-        return "-"
-    if funding > 0:
-        return "GET"
-    if funding < 0:
-        return "PAY"
-    return "FLAT"
-
-
-def status_word(ok=None, warn=False):
-    """Plain monospace-safe status token for tables."""
-    if warn:
-        return "WARN"
-    if ok is True:
-        return "OK"
-    if ok is False:
-        return "ERR"
-    return "INFO"
-
-
-def section(label):
-    return f"\n<b>{html_escape(label)}</b>"
 
 
 # ── DB Helpers ───────────────────────────────────────────────────────────────
@@ -786,21 +586,6 @@ def cfg_value(config, key, fallback=""):
         return env_val
     return config.get(key, fallback)
 
-
-def format_duration(seconds):
-    try:
-        sec = int(float(seconds))
-    except Exception:
-        return str(seconds)
-    if sec < 60:
-        return f"{sec}s"
-    if sec < 3600:
-        return f"{sec // 60}m"
-    if sec < 86400:
-        hours = sec / 3600
-        return f"{hours:.1f}h" if sec % 3600 else f"{sec // 3600}h"
-    days = sec / 86400
-    return f"{days:.1f}d" if sec % 86400 else f"{sec // 86400}d"
 
 
 def get_bot_state(key, default=None):
