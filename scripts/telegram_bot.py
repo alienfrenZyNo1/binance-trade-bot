@@ -2036,36 +2036,40 @@ def cmd_profit():
         "SELECT COUNT(*) as cnt FROM trade_history WHERE state = 'FAILED'"
     ).fetchone()["cnt"]
 
-    # ── Round-trip hop analysis ──
-    round_trips = []
-    pending_sell = None
+    # ── Per-coin hold-period returns (buy price → sell price) ──
+    # A hop itself (coin→USDC→coin at one tick) is structurally ~0 P&L, so
+    # win/loss counted on hops was meaningless. Real P&L comes from holding a
+    # coin that appreciated between rotations. Pair each sell of a coin with its
+    # most recent buy to measure the actual hold return.
+    hold_returns = []
+    last_buy = {}  # coin -> (usdc_cost, datetime_str)
     for t in completed:
+        coin = t["alt_coin_id"]
+        usdc = float(t["crypto_trade_amount"] or 0)
         if t["selling"]:
-            pending_sell = t
-        elif pending_sell:
-            sold_usdc = float(pending_sell["crypto_trade_amount"] or 0)
-            bought_usdc = float(t["crypto_trade_amount"] or 0)
-            hop_pnl = bought_usdc - sold_usdc
-            round_trips.append({
-                "from_coin": pending_sell["alt_coin_id"],
-                "to_coin": t["alt_coin_id"],
-                "sold_usdc": sold_usdc,
-                "bought_usdc": bought_usdc,
-                "pnl": hop_pnl,
-                "datetime": t["datetime"],
-            })
-            pending_sell = None
+            buy = last_buy.pop(coin, None)
+            if buy and buy[0] > 0.01 and usdc > 0.01:
+                cost = buy[0]
+                hold_returns.append({
+                    "coin": coin,
+                    "buy_dt": buy[1],
+                    "sell_dt": t["datetime"],
+                    "cost": cost,
+                    "proceeds": usdc,
+                    "return_pct": (usdc / cost - 1) * 100,
+                })
+        else:
+            if usdc > 0.01:
+                last_buy[coin] = (usdc, t["datetime"])
 
-    # Flag phantom hops (deposit contamination)
-    for rt in round_trips:
-        sell = max(rt["sold_usdc"], 0.01)
-        rt["phantom"] = abs(rt["bought_usdc"] - rt["sold_usdc"]) / sell > 0.25
-
-    real_trips = [rt for rt in round_trips if not rt.get("phantom")]
-    wins = sum(1 for rt in real_trips if rt["pnl"] > 0.01)
-    losses = sum(1 for rt in real_trips if rt["pnl"] < -0.01)
-    flat = sum(1 for rt in real_trips if abs(rt["pnl"]) <= 0.01)
-    realized_from_hops = sum(rt["pnl"] for rt in real_trips)
+    hold_wins = sum(1 for h in hold_returns if h["return_pct"] > 0.1)
+    hold_losses = sum(1 for h in hold_returns if h["return_pct"] < -0.1)
+    hold_win_rate = (hold_wins / len(hold_returns) * 100) if hold_returns else 0.0
+    avg_hold_ret = (
+        sum(h["return_pct"] for h in hold_returns) / len(hold_returns)
+        if hold_returns else 0.0
+    )
+    realized_hold_pnl = sum(h["proceeds"] - h["cost"] for h in hold_returns)
 
     # ── Account-level P&L ──
     total_pnl = current_value - total_deposited
@@ -2096,7 +2100,7 @@ def cmd_profit():
         ["Spot unrealized", money(spot_unrealized_pnl, signed=True)],
         ["Futures unrealized", money(futures_unrealized_pnl, signed=True)],
         ["Uptime", uptime_str],
-        ["Clean hops", str(len(real_trips))],
+        ["Closed holds", str(len(hold_returns))],
     ]))
 
     fut_realized = get_futures_realized()
@@ -2140,46 +2144,40 @@ def cmd_profit():
         pnl_vals = [pnl for _, pnl in sorted_positions] + [None, None, None]
         lines.append(pre_table(["SYMBOL", "P&L"], fr_rows, aligns=["l", "d"], pnl_values=pnl_vals))
 
-    total_decisions = wins + losses
-    eff = (wins / total_decisions * 100) if total_decisions > 0 else 0
-    phantom_count = len(round_trips) - len(real_trips)
-    lines.append(section("🧾 Rotation Cash Deltas"))
-    trade_rows = [
-        ["Wins / losses / flat", f"{wins}W / {losses}L / {flat} flat"],
-        ["Cash efficiency", f"{eff:.0f}%"],
-        ["Spot cash delta", money(realized_from_hops, signed=True)],
-    ]
-    if fut_realized:
-        trade_rows.append(["Futures net", money(fut_realized["net"], signed=True)])
-    if phantom_count:
-        trade_rows.append(["Deposit-tagged hops", f"{phantom_count} excluded"])
-    if failed_trades:
-        trade_rows.append(["Failed orders", str(failed_trades)])
-    lines.append(kv_table(trade_rows))
-    lines.append("<i>Spot cash delta is fee/slippage cash movement between rotations; headline account P&amp;L is the source of truth.</i>")
+    # ── Closed coin holds (meaningful: real return per held coin) ──
+    if hold_returns:
+        hold_rows = [
+            ["Closed holds", str(len(hold_returns))],
+            ["Win rate", f"{hold_win_rate:.0f}% ({hold_wins}W / {hold_losses}L)"],
+            ["Avg hold return", pct(avg_hold_ret, 1)],
+            ["Realized hold P&L", money(realized_hold_pnl, signed=True)],
+        ]
+        if fut_realized:
+            hold_rows.append(["Futures net", money(fut_realized["net"], signed=True)])
+        if failed_trades:
+            hold_rows.append(["Failed orders", str(failed_trades)])
+        lines.append(section("🧮 Closed Coin Holds"))
+        lines.append(kv_table(hold_rows))
 
-    if round_trips:
-        lines.append(section("🧾 Hop History"))
-        hop_rows = []
-        hop_pnls = []
-        for rt in round_trips[-8:]:
-            if rt.get("phantom"):
-                tag = "DEPOSIT"
-                hop_pnls.append(None)
-            elif rt["pnl"] > 0.01:
-                tag = "WIN"
-                hop_pnls.append(rt["pnl"])
-            elif rt["pnl"] < -0.01:
-                tag = "LOSS"
-                hop_pnls.append(rt["pnl"])
-            else:
-                tag = "FLAT"
-                hop_pnls.append(None)
-            hop_rows.append([rt["from_coin"], rt["to_coin"], money(rt["pnl"], signed=True), tag])
-        if len(round_trips) > 8:
-            hop_rows.append(["...", f"+{len(round_trips) - 8} earlier", "", ""])
-            hop_pnls.append(None)
-        lines.append(pre_table(["FROM", "TO", "P&L", "TAG"], hop_rows, aligns=["l", "l", "d", "l"], pnl_values=hop_pnls))
+        recent = hold_returns[-8:]
+        rh_rows = []
+        rh_pnls = []
+        for h in recent:
+            pnl = h["proceeds"] - h["cost"]
+            rh_rows.append([h["coin"], pct(h["return_pct"], 1), money(pnl, signed=True)])
+            rh_pnls.append(pnl)
+        if len(hold_returns) > 8:
+            rh_rows.append(["...", f"+{len(hold_returns) - 8} earlier", ""])
+            rh_pnls.append(None)
+        lines.append(pre_table(
+            ["COIN", "RETURN", "P&L"], rh_rows,
+            aligns=["l", "d", "d"], pnl_values=rh_pnls,
+        ))
+        lines.append(
+            "<i>Hold return = coin sell value ÷ buy cost. Hops (coin→USDC→coin) "
+            "are fee-neutral; this measures real appreciation while held. "
+            "Headline account P&amp;L above is the source of truth.</i>"
+        )
 
     return "\n".join(lines)
 
