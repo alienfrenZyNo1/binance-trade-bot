@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
-"""Autonomous coin list manager for binance-trade-bot.
+"""Autonomous coin list manager for binance-trade-bot (DB-native).
 
-Checks USDC pair health, auto-removes dead coins, replaces low-volume coins
-with better candidates, and reports all actions taken.
+Works directly against the SQLite database — no file editing, no Docker
+redeploy, no LLM agent required. The trade bot picks up DB changes on
+its next scout cycle (~3 seconds).
 
 Actions taken:
-- REMOVE: delisted, inactive, or extremely low volume (<$50K)
-- REPLACE: low volume (<$500K) sustained for 3+ checks
-- PROMOTE: high-volume candidates from the candidate pool
+- REMOVE: delisted, inactive, or extremely low volume (<$50K) → disabled in DB
+- REPLACE: low volume (<$500K) sustained for 3+ checks → disabled + replacement enabled
+- PROMOTE: high-volume candidates from the dynamic candidate pool → enabled in DB
+
+Designed to run as a no_agent cron job. Prints a human-readable summary.
+Exits 0 with "COIN_LIST_OK" when healthy (suppresses delivery), or
+"COIN_LIST_CHANGED" when actions were taken (triggers delivery).
+
+Safety:
+  - Circuit breaker: aborts if Binance API returns <500 markets
+  - Never removes more than 30% of coins in one run
+  - Never removes the currently held coin or coins with open futures positions
+  - Persistent state tracks low-volume streaks across runs
 """
 
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime
 
 import ccxt
 
-BOT_DIR = os.path.expanduser("~/binance-trade-bot")
-COIN_LIST_FILE = os.path.join(BOT_DIR, "supported_coin_list")
-STATE_FILE = os.path.join(BOT_DIR, "scripts", "monitor_state.json")
+DB_PATH = os.environ.get("DB_PATH", "/data/binance-bot-data/crypto_trading.db")
+STATE_FILE = os.path.join(os.path.dirname(__file__), "monitor_state.json")
 BRIDGE = "USDC"
 
 # Thresholds
@@ -29,269 +40,298 @@ LOW_VOLUME_DAYS_TO_REPLACE = 3         # Days of low volume before replacing
 MAX_COINS = 25                         # Don't exceed this many coins
 MIN_COINS = 12                         # Don't go below this many coins
 
-# Candidate pool — high-volume coins with USDC pairs, not already in list
-CANDIDATE_POOL = [
-    "UNI", "AAVE", "MKR", "RENDER", "ENA", "SEI", "JUP",
-    "WIF", "PEPE", "FDUSD", "TRX", "LTC", "BCH", "ETC",
-    "NEIRO", "BONK", "FET", "AGIX", "RNDR", "HBAR",
-    "ALGO", "FTM", "CELO", "CFX", "APT",
-]
+
+# ── DB helpers ───────────────────────────────────────────────────────────────
+
+def _db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def load_coins():
-    """Load coin list from file."""
-    coins = []
-    with open(COIN_LIST_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                coins.append(line)
+def get_enabled_coins():
+    """Return list of enabled coin symbols from DB (excluding bridge)."""
+    conn = _db()
+    coins = [r[0] for r in conn.execute(
+        "SELECT symbol FROM coins WHERE enabled = 1 AND symbol != ?", (BRIDGE,)
+    ).fetchall()]
+    conn.close()
+    return sorted(coins)
+
+
+def get_disabled_coins():
+    """Return set of disabled coin symbols (candidate re-promotion pool)."""
+    conn = _db()
+    coins = {r[0] for r in conn.execute(
+        "SELECT symbol FROM coins WHERE enabled = 0 AND symbol != ?", (BRIDGE,)
+    ).fetchall()}
+    conn.close()
     return coins
 
 
-def write_coins(coins):
-    """Write coin list back to file, preserving comments."""
-    with open(COIN_LIST_FILE) as f:
-        original = f.read()
+def get_held_coin():
+    """Return the coin the bot is currently holding, or None."""
+    conn = _db()
+    row = conn.execute(
+        "SELECT coin_id FROM current_coin_history ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
 
-    # Simple write — just the coin list
-    # Group by category for readability
-    categories = {
-        "Major Pairs": ["BTC", "ETH", "BNB", "SOL"],
-        "L1 Alternatives": [],
-        "L2 Scaling": [],
-        "DeFi": [],
-        "High Beta": [],
-        "Infrastructure": [],
-        "Ecosystem": [],
-    }
-    classified = []
-    unclassified = []
-    for c in coins:
-        if c in ["BTC", "ETH", "BNB", "SOL"]:
-            categories["Major Pairs"].append(c) if c not in categories["Major Pairs"] else None
-        elif c in ["AVAX", "NEAR", "APT", "ADA", "ATOM", "DOT", "SUI"]:
-            categories["L1 Alternatives"].append(c)
-        elif c in ["OP", "ARB"]:
-            categories["L2 Scaling"].append(c)
-        elif c in ["LINK", "INJ", "UNI", "AAVE"]:
-            categories["DeFi"].append(c)
-        elif c in ["DOGE", "WIF", "PEPE", "BONK", "NEIRO"]:
-            categories["High Beta"].append(c)
-        elif c in ["FIL", "RENDER", "FET", "LTC", "HBAR", "TRX"]:
-            categories["Infrastructure"].append(c)
-        else:
-            unclassified.append(c)
 
-    with open(COIN_LIST_FILE, "w") as f:
-        f.write("# Major pairs - core liquidity anchors, mean-reverting\n")
-        for c in categories["Major Pairs"]:
-            if c in coins:
-                f.write(f"{c}\n")
-        f.write("\n# L1 alternatives - oscillate with BTC but different phase offsets\n")
-        for c in categories["L1 Alternatives"]:
-            f.write(f"{c}\n")
-        f.write("\n# L2 scaling\n")
-        for c in categories["L2 Scaling"]:
-            f.write(f"{c}\n")
-        f.write("\n# DeFi blue chips\n")
-        for c in categories["DeFi"]:
-            f.write(f"{c}\n")
-        f.write("\n# High beta / memecoins with strong mean reversion\n")
-        for c in categories["High Beta"]:
-            f.write(f"{c}\n")
-        f.write("\n# Infrastructure / ecosystem\n")
-        for c in categories["Infrastructure"]:
-            f.write(f"{c}\n")
-        if unclassified:
-            f.write("\n# Other\n")
-            for c in unclassified:
-                f.write(f"{c}\n")
+def get_futures_symbols():
+    """Return set of coin symbols with open futures positions."""
+    # Read from DB scraper state if available; otherwise check API indirectly
+    # by looking at the bot_state table for futures positions.
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM bot_state WHERE key LIKE 'futures_%'"
+        ).fetchall()
+        symbols = set()
+        for r in rows:
+            if r["key"] == "futures_open_positions":
+                positions = json.loads(r["value"])
+                for p in positions:
+                    sym = p.get("symbol", "").replace(BRIDGE, "")
+                    if sym:
+                        symbols.add(sym)
+        conn.close()
+        return symbols
+    except Exception:
+        conn.close()
+        return set()
 
+
+def db_disable_coin(symbol):
+    """Disable a coin in the DB. Returns True if changed."""
+    conn = _db()
+    row = conn.execute("SELECT enabled FROM coins WHERE symbol = ?", (symbol,)).fetchone()
+    if not row or not row[0]:
+        conn.close()
+        return False
+    conn.execute("UPDATE coins SET enabled = 0 WHERE symbol = ?", (symbol,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def db_enable_coin(symbol):
+    """Enable a coin in the DB and create pairs with all other enabled coins."""
+    conn = _db()
+    row = conn.execute("SELECT enabled FROM coins WHERE symbol = ?", (symbol,)).fetchone()
+    if row and row[0]:
+        conn.close()
+        return False  # already enabled
+
+    if row:
+        conn.execute("UPDATE coins SET enabled = 1 WHERE symbol = ?", (symbol,))
+    else:
+        conn.execute("INSERT OR IGNORE INTO coins (symbol, enabled) VALUES (?, 1)", (symbol,))
+    conn.commit()
+
+    # Create pair rows with all other enabled coins
+    enabled = [r[0] for r in conn.execute(
+        "SELECT symbol FROM coins WHERE enabled = 1 AND symbol != ?", (symbol,)
+    ).fetchall()]
+    for other in enabled:
+        for a, b in [(symbol, other), (other, symbol)]:
+            exists = conn.execute(
+                "SELECT id FROM pairs WHERE from_coin_id = ? AND to_coin_id = ?", (a, b)
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    "INSERT INTO pairs (from_coin_id, to_coin_id, ratio) VALUES (?, ?, 1.0)",
+                    (a, b),
+                )
+    conn.commit()
+    conn.close()
+    return True
+
+
+# ── State ────────────────────────────────────────────────────────────────────
 
 def load_state():
-    """Load persistent state for tracking low-volume streaks."""
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {"low_volume_days": {}, "last_run": None, "actions_history": []}
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {"low_volume_days": {}, "last_run": None}
 
 
 def save_state(state):
-    """Save state to file."""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
 
-def _get_currently_held_coin():
-    """Check the bot's DB for the currently held coin (to avoid disabling it)."""
-    import sqlite3
-    db_path = os.environ.get("DB_PATH", "data/crypto_trading.db")
-    try:
-        conn = sqlite3.connect(db_path)
-        row = conn.execute("SELECT coin_id FROM current_coin_history ORDER BY id DESC LIMIT 1").fetchone()
-        conn.close()
-        return row[0] if row else None
-    except Exception:
-        return None
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     actions = []
-    coins = load_coins()
+    coins = get_enabled_coins()
     state = load_state()
     state["last_run"] = datetime.utcnow().isoformat()
 
+    held_coin = get_held_coin()
+    futures_coins = get_futures_symbols()
+    protected = {held_coin} | futures_coins if held_coin else futures_coins
+
+    if held_coin:
+        print(f"📌 Holding: {held_coin} (protected)")
+    if futures_coins:
+        print(f"🔻 Futures open: {', '.join(sorted(futures_coins))} (protected)")
+
     exchange = ccxt.binance()
 
-    # ── CIRCUIT BREAKER: abort if load_markets fails or returns too few markets ──
+    # ── CIRCUIT BREAKER ──
     try:
         markets = exchange.load_markets()
     except Exception as e:
         print(f"❌ ABORTED: Binance load_markets() failed: {e}")
-        print("No changes made — coin list preserved.")
-        print("COIN_LIST_OK")  # Don't trigger change handlers
-        return
-
-    if len(markets) < 500:
-        print(f"❌ ABORTED: load_markets() returned only {len(markets)} markets (expected 4000+). Likely API failure.")
-        print("No changes made — coin list preserved.")
+        print("No changes made.")
         print("COIN_LIST_OK")
         return
 
-    # Check each coin's USDC pair
-    to_remove = []
-    low_volume = []
-    held_coin = _get_currently_held_coin()
-    if held_coin:
-        print(f"📌 Currently held coin: {held_coin} (will not remove)")
+    if len(markets) < 500:
+        print(f"❌ ABORTED: load_markets() returned {len(markets)} markets (< 500). Likely API failure.")
+        print("COIN_LIST_OK")
+        return
 
-    # Fetch tickers for all pairs
-    active_pairs = {f"{c}/{BRIDGE}" for c in coins if f"{c}/{BRIDGE}" in markets and markets[f"{c}/{BRIDGE}"].get("active", False)}
+    # Fetch tickers for all active USDC pairs of our coins
+    active_pairs = {
+        f"{c}/{BRIDGE}" for c in coins
+        if f"{c}/{BRIDGE}" in markets and markets[f"{c}/{BRIDGE}"].get("active", False)
+    }
     tickers = {}
     if active_pairs:
         try:
             tickers = exchange.fetch_tickers(list(active_pairs))
         except Exception as e:
-            print(f"⚠️ fetch_tickers() failed ({e}) — using volume from individual tickers as fallback")
+            print(f"⚠️ fetch_tickers() failed ({e}) — falling back to individual tickers")
 
+    # ── Check each coin ──
+    to_remove = []
     for coin in coins:
         pair = f"{coin}/{BRIDGE}"
 
-        # Check pair exists and is active
         if pair not in markets:
-            actions.append(f"🚨 REMOVED {coin}: USDC pair delisted/missing")
+            actions.append(f"🚨 REMOVE {coin}: USDC pair delisted/missing")
             to_remove.append(coin)
             continue
         if not markets[pair].get("active", False):
-            actions.append(f"🚫 REMOVED {coin}: USDC pair inactive/halted")
+            actions.append(f"🚫 REMOVE {coin}: USDC pair inactive/halted")
             to_remove.append(coin)
             continue
 
-        # Check volume — ccxt quoteVolume is ALREADY in quote currency (USDC), do NOT multiply by last
         t = tickers.get(pair, {})
         vol = t.get("quoteVolume") or 0
 
         if vol < VOLUME_REMOVE_THRESHOLD:
-            actions.append(f"💀 REMOVED {coin}: Extremely low volume ${vol:,.0f}")
+            actions.append(f"💀 REMOVE {coin}: volume ${vol:,.0f}")
             to_remove.append(coin)
-            # Reset streak
             state["low_volume_days"].pop(coin, None)
         elif vol < VOLUME_WARN_THRESHOLD:
-            low_volume.append((coin, vol))
-            # Track streak
-            prev = state["low_volume_days"].get(coin, 0)
-            state["low_volume_days"][coin] = prev + 1
-
-            days = prev + 1
-            if days >= LOW_VOLUME_DAYS_TO_REPLACE:
-                if len(coins) > MIN_COINS:
-                    actions.append(f"🔄 SCHEDULED REPLACEMENT {coin}: Low volume ${vol:,.0f} for {days} days")
+            low_days = state["low_volume_days"].get(coin, 0) + 1
+            state["low_volume_days"][coin] = low_days
+            if low_days >= LOW_VOLUME_DAYS_TO_REPLACE:
+                if len(coins) - len(to_remove) > MIN_COINS:
+                    actions.append(f"🔄 REPLACE {coin}: low vol ${vol:,.0f} for {low_days}d")
                     to_remove.append(coin)
                     state["low_volume_days"].pop(coin, None)
                 else:
-                    actions.append(f"⚠️ {coin}: Low volume ${vol:,.0f} for {days} days (keeping — at minimum coin count)")
+                    actions.append(f"⚠️ {coin}: low vol ${vol:,.0f} ({low_days}d) — at min coin count, keeping")
+            else:
+                actions.append(f"📉 {coin}: low vol ${vol:,.0f} ({low_days}d/{LOW_VOLUME_DAYS_TO_REPLACE})")
         else:
-            # Volume is fine, reset streak
             state["low_volume_days"].pop(coin, None)
 
-    # ── CIRCUIT BREAKER: never remove more than 30% of coins in one run ──
-    # This prevents catastrophic nukes from transient API failures.
+    # ── CIRCUIT BREAKER: never nuke >30% in one run ──
     max_removals = max(2, int(len(coins) * 0.30))
     if len(to_remove) > max_removals:
-        print(f"❌ ABORTED removals: {len(to_remove)} coins flagged for removal "
-              f"(max {max_removals}). This looks like an API failure, not real delisting.")
-        print("No changes made — coin list preserved.")
+        print(f"❌ ABORTED: {len(to_remove)} flagged (max {max_removals}) — looks like API failure.")
         save_state(state)
         print("COIN_LIST_OK")
         return
 
-    # ── PROTECT currently held coin ──
-    if held_coin and held_coin in to_remove:
-        actions.append(f"⏸️ SKIPPED {held_coin}: currently held by bot (will remove after bot trades away)")
-        to_remove.remove(held_coin)
-        # Restore coin to list
-        if held_coin not in coins:
-            coins.append(held_coin)
+    # ── PROTECT held coin + futures positions ──
+    protected_removed = []
+    for coin in list(to_remove):
+        if coin in protected:
+            actions.append(f"⏸️ SKIP {coin}: protected (held/futures)")
+            to_remove.remove(coin)
+            protected_removed.append(coin)
 
-    # Remove flagged coins
-    if to_remove:
-        coins = [c for c in coins if c not in to_remove]
+    # ── Execute removals in DB ──
+    for coin in to_remove:
+        db_disable_coin(coin)
 
-    # Find replacements from candidate pool
-    removed_count = len([a for a in actions if "REMOVED" in a or "SCHEDULED REPLACEMENT" in a])
-    if removed_count > 0 and len(coins) < MAX_COINS:
-        # Check candidates for good volume USDC pairs
-        available_candidates = []
-        for cand in CANDIDATE_POOL:
-            if cand in coins:
-                continue
-            pair = f"{cand}/{BRIDGE}"
-            if pair not in markets or not markets[pair].get("active", False):
-                continue
+    # ── Find replacements ──
+    removed_count = len(to_remove)
+    if removed_count > 0:
+        current_enabled = get_enabled_coins()
+        if len(current_enabled) < MAX_COINS:
+            # Build candidate pool: disabled coins from DB + known high-volume altcoins.
+            # Exclude majors (BTC/ETH/BNB) — they're reference coins, not momentum targets,
+            # and are typically disabled intentionally.
+            EXCLUDE_MAJORS = {"BTC", "ETH", "BNB", "USDC", BRIDGE}
+            pool = (get_disabled_coins() | {
+                "UNI", "RENDER", "ENA", "SEI", "JUP", "WIF", "PEPE",
+                "TRX", "LTC", "BCH", "ETC", "NEIRO", "BONK", "FET",
+                "RNDR", "HBAR", "FTM", "AGIX", "ONDO", "TAO",
+            }) - EXCLUDE_MAJORS
+            candidates = [c for c in pool if c not in current_enabled and c not in protected]
 
-            t = tickers.get(pair)  # Might not be in tickers if it wasn't in active_pairs
-            if not t:
-                try:
-                    t = exchange.fetch_ticker(pair)
-                except Exception:
+            # Check volume for each candidate
+            scored = []
+            for cand in candidates:
+                pair = f"{cand}/{BRIDGE}"
+                if pair not in markets or not markets[pair].get("active", False):
                     continue
+                t = tickers.get(pair)
+                if not t:
+                    try:
+                        t = exchange.fetch_ticker(pair)
+                    except Exception:
+                        continue
+                vol = float(t.get("quoteVolume") or 0)
+                if vol >= VOLUME_WARN_THRESHOLD:
+                    scored.append((cand, vol))
 
-            vol = (t.get("quoteVolume") or 0) * (t.get("last") or 0)
-            if vol >= VOLUME_WARN_THRESHOLD:
-                available_candidates.append((cand, vol))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            slots = min(removed_count, MAX_COINS - len(current_enabled))
 
-        # Sort by volume, best first
-        available_candidates.sort(key=lambda x: x[1], reverse=True)
+            for cand, vol in scored[:slots]:
+                if db_enable_coin(cand):
+                    actions.append(f"➕ ADD {cand}: ${vol:,.0f} 24h vol")
 
-        for cand, vol in available_candidates[:removed_count]:
-            coins.append(cand)
-            actions.append(f"➕ ADDED {cand}: ${vol:,.0f} 24h volume — replacing removed coin")
-
-    # Reset low-volume streaks for coins that are no longer in the list
-    state["low_volume_days"] = {k: v for k, v in state["low_volume_days"].items() if k in coins}
-
-    # Save updated state
+    # Clean up state for removed coins
+    state["low_volume_days"] = {
+        k: v for k, v in state["low_volume_days"].items()
+        if k in get_enabled_coins()
+    }
     save_state(state)
 
-    # Write updated coin list if changed
-    original_coins = load_coins()
-    if set(coins) != set(original_coins):
-        write_coins(coins)
-
-    # Output results
+    # ── Output ──
+    # Only treat as "changed" if actual DB writes happened (removals or additions)
+    db_changes = [a for a in actions if any(k in a for k in ("REMOVE", "REPLACE", "ADD"))]
     if not actions:
-        print(f"✅ All {len(coins)} coins healthy — no actions needed.")
-        print(f"COIN_LIST_OK")
-    else:
-        print(f"🤖 Autonomous coin manager — {len(actions)} action(s) taken:")
-        print()
+        print(f"✅ All {len(coins)} coins healthy.")
+        print("COIN_LIST_OK")
+    elif not db_changes:
+        # Only informational warnings — don't trigger delivery
+        print(f"✅ All {len(coins)} coins healthy (warnings below).")
         for a in actions:
-            print(a)
-        print()
-        print(f"📋 Updated coin list ({len(coins)} coins):")
-        print(", ".join(coins))
+            print(f"  {a}")
+        print("COIN_LIST_OK")
+    else:
+        print(f"\n🤖 {len(db_changes)} action(s):")
+        for a in actions:
+            print(f"  {a}")
+        final = get_enabled_coins()
+        print(f"\n📋 Active: {len(final)} coins — {', '.join(sorted(final))}")
         print("COIN_LIST_CHANGED")
 
 
