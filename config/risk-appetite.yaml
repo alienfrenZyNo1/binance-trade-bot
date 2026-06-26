@@ -1,25 +1,75 @@
 # Risk Appetite Statement — Binance Trading Bot
 # Maintained by: The Boss (Human Approval Authority)
 # Last Updated: 2026-06-26
+# This file defines the envelope within which all agents may operate.
+# Agents may NEVER exceed these limits. The Boss may tighten them.
 
 risk_appetite:
-  max_daily_loss_pct: 3.0
-  max_total_drawdown_pct: 10.0
-  max_position_size_pct: 100.0
-  max_concurrent_positions: 1
+  # ── Capital Protection ──────────────────────────────────
+  max_daily_loss_pct: 3.0          # Halt new entries after 3% daily loss
+  max_total_drawdown_pct: 10.0     # Full halt at 10% drawdown from peak equity
+  max_position_size_pct: 100.0     # Single-position model (architectural — 100% in/out)
+  max_concurrent_positions: 1      # Architectural constraint
+  max_correlation_between_strategies: null  # Single strategy — N/A
+
+  # ── Allowed Instruments ─────────────────────────────────
   allowed_instruments:
     spot: true
-    futures: true
-    margin: false
-    leverage_max: 1
-  futures_max_margin_pct: 0.50
-  futures_margin_type: CROSS
-  futures_stop_loss_pct: 15.0
-  futures_trailing_stop_pct: 10.0
-  futures_max_funding_rate: 0.0001
-  kill_switch_command: "/kill confirm"
-  portfolio_circuit_breaker_enabled: REQUIRED
-  daily_max_drawdown_pct: 3.0
-  weekly_max_drawdown_pct: 8.0
-  circuit_breaker_cooldown_hours: 24
-  canary_mode_enabled: false
+    futures: true                  # ALREADY ACTIVE — grandfathered (was enabled before audit)
+    margin: false                  # Requires explicit Boss approval
+    leverage_max: 1                # 1x only. Higher requires explicit Boss approval.
+
+  # ── Futures Controls ────────────────────────────────────
+  futures_max_margin_pct: 0.50     # Max 50% of USDC into futures wallet
+  futures_margin_type: CROSS       # Forced by Binance (ISOLATED rejected)
+  futures_stop_loss_pct: 15.0      # Server-side STOP_MARKET
+  futures_trailing_stop_pct: 10.0  # After +3% profit
+  futures_max_funding_rate: 0.0001 # Skip/exit if funding adverse
+
+  # ── Kill Switch ─────────────────────────────────────────
+  kill_switch_command: "/kill confirm"  # Telegram emergency stop
+  kill_switch_scope: "futures"     # Currently closes futures + transfers back
+
+  # ── Circuit Breaker (MUST BE ENABLED) ──────────────────
+  portfolio_circuit_breaker_enabled: REQUIRED  # Code exists, currently DISABLED — P0 fix
+  daily_max_drawdown_pct: 3.0      # Block new entries after 3% daily drawdown
+  weekly_max_drawdown_pct: 8.0     # Block new entries after 8% weekly drawdown
+  circuit_breaker_cooldown_hours: 24  # Stay blocked for 24h after trigger
+
+  # ── Canary Mode (for experiments) ───────────────────────
+  canary_mode_enabled: false       # Enable when testing new strategies live
+  canary_max_spot_trade_usdc: 0    # Set when canary enabled
+  canary_futures_max_margin_pct: 0
+  canary_max_futures_margin_usdc: 0
+
+  # ── Autonomy Envelope ───────────────────────────────────
+  # What agents can do WITHOUT Boss approval:
+  auto_approved:
+    - research
+    - backtests
+    - stress_tests
+    - unit_integration_tests
+    - paper_trading_testnet
+    - documentation
+    - monitoring_improvements
+    - bug_fixes_reducing_risk
+    - devops_non_trading
+    - pausing_bot_for_safety
+    - creating_alerts
+
+  # What ALWAYS requires Boss approval:
+  requires_boss_approval:
+    - first_deployment_new_live_strategy
+    - increasing_live_stake_size
+    - enabling_futures       # Already active — any expansion needs approval
+    - enabling_margin
+    - enabling_leverage      # Any increase above 1x
+    - short_selling_changes
+    - changing_max_daily_loss
+    - changing_max_drawdown_limits
+    - removing_weakening_kill_switches   # NEVER allowed — kill switches are permanent
+    - changing_api_permissions
+    - testnet_to_live_transition
+    - changing_withdrawal_settings
+    - transferring_funds
+    - any_material_financial_risk_increase
