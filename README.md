@@ -65,6 +65,7 @@ Long-only spot cannot profit in a bear market. This fork integrates Binance **US
 | **RSI Filter** | Skips buying coins with RSI > 75 (overbought) |
 | **Futures Risk Management** | 1x leverage, 50% max margin, 15% hard stop, 10% trailing after +3% profit, funding rate guard |
 | **Telegram Companion Bot** | 15 commands: `/status` `/futures` `/health` `/profit` `/config` `/kill` `/regime` `/coins` `/trades` `/hop` `/price` `/addcoin` `/removecoin` `/swap` `/help` |
+| **Autonomous Coin Manager** | Daily cron job that auto-removes dead coins, discovers replacements, and scores candidates by regime fit using multi-timeframe momentum, RSI, volatility, and correlation |
 | **SQLite WAL Mode** | Write-Ahead Logging for concurrent read/write (bot + Telegram bot + dashboard) |
 | **Daily DB Backups** | Automatic VACUUM INTO backup every 24 hours |
 | **Position Reconciliation** | On restart, reconciles DB state with actual Binance balances and futures positions |
@@ -91,6 +92,77 @@ During **BEAR** regime, the bot transitions from spot trading to futures:
 **Exit:**
 - Automatic on regime change (BEAR → BULL/SIDEWAYS)
 - Closes position, transfers USDC back to spot wallet
+
+---
+
+## Autonomous Coin Management
+
+The bot includes a regime-aware coin manager (`scripts/monitor_coins.py`) that runs daily as a background cron job. It automatically maintains the optimal coin list in the database — no manual editing, no Docker restart required.
+
+### How It Works
+
+1. **Health check** — Scans all enabled coins for delisted pairs, dead volume (<$50K), or sustained low volume (<$500K for 3 days). Dead coins are disabled in the DB instantly.
+
+2. **Dynamic candidate discovery** — Scans Binance's top USDC spot pairs by 24h volume to find replacement candidates (excludes stablecoins, majors like BTC/ETH/BNB, leveraged tokens, and non-standard symbols).
+
+3. **Regime-aware scoring** — Each candidate is scored against the current market regime using multi-timeframe metrics:
+
+| Metric | Source | Purpose |
+|---|---|---|
+| **7d / 14d / 30d momentum** | Daily OHLCV | Is this coin trending or flat? |
+| **RSI(14)** | Hourly closes (Wilder's smoothing) | Overbought / oversold detection |
+| **Hourly volatility** | Std dev of 48h returns | Enough movement for rotation signals? |
+| **24h quote volume** | Binance ticker | Liquidity for clean execution |
+| **USDC perp availability** | Futures market scan | Can the bot short it in BEAR? |
+| **Correlation** | 30d daily log returns vs current list | Diversification — rejects >0.88 correlated |
+
+4. **Upgrade pass** — Beyond filling dead-coin slots, it swaps the weakest current coin if a candidate scores **1.8x better**. Conservative guards prevent churn (max 1 swap/day, 5-day settle period, held coins and open futures positions protected).
+
+### Scoring Philosophy by Regime
+
+```
+BULL      → Momentum leaders with room to run
+            Rewards: strong 7d/14d trend, RSI 55-72 sweet spot
+            Penalizes: RSI > 82 (exhausted), flat performers
+
+SIDEWAYS  → Oscillation quality for rotation
+            Rewards: moderate volatility (1-4%), neutral momentum
+            Penalizes: strong trends either direction (mean reverts)
+
+BEAR      → Short-ready targets
+            Requires: USDC perpetual future
+            Rewards: negative momentum, RSI 30-55 (room to fall)
+            Penalizes: RSI < 22 (oversold squeeze risk)
+
+STORMY    → Defensive
+            Rewards: highest volume, lowest volatility only
+```
+
+### Safety Rails
+
+- **Circuit breaker**: Aborts if Binance API returns <500 markets (failure suspected)
+- **Max removal cap**: Never disables more than 30% of coins in a single run
+- **Protected coins**: Won't touch the currently held coin or coins with open futures positions
+- **Major exclusion**: Never auto-promotes BTC/ETH/BNB (reference coins, not momentum targets)
+- **Settle period**: Won't upgrade-swap coins added within the last 5 days
+
+### Running
+
+The script runs as a `no_agent` cron job (zero LLM cost, fully deterministic):
+
+```bash
+# Manual run (verbose shows all scores)
+DB_PATH=/data/binance-bot-data/crypto_trading.db python3 scripts/monitor_coins.py --verbose
+
+# Output when healthy (silent — no Telegram notification):
+✅ All 15 coins healthy for SIDEWAYS regime.
+
+# Output when changes are made (notifies via Telegram):
+🤖 3 regime-aware action(s) [SIDEWAYS]:
+  🔄 REPLACE TIA: low vol $430K for 3d
+  ➕ ADD BCH (score 32.7): 7d=-0.1% RSI=60 vol=$2.1M corr=0.70
+  ⬆️ UPGRADE AAVE (score 7.6) → SEI (score 31.5)
+```
 
 ---
 
@@ -302,7 +374,7 @@ binance-trade-bot/
 │       └── ... (coin, pair, trade, etc.)
 ├── scripts/
 │   ├── telegram_bot.py             # Interactive Telegram companion bot (15 commands)
-│   └── monitor_coins.py            # Coin health monitor
+│   └── monitor_coins.py            # Regime-aware autonomous coin manager (daily cron)
 ├── research/                       # Quantitative research journal & backlog
 ├── tests/                          # Unit tests
 ├── docker-entrypoint.sh            # Persistent volume config loader
