@@ -24,3 +24,4 @@ research/
 config/apprise.yml.bak
 monitor_state.json
 bear_futures_backtest.json
+research_results/
