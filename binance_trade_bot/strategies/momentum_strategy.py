@@ -37,6 +37,11 @@ from binance_trade_bot.indicators import (
 )
 from binance_trade_bot.regime_hysteresis import RegimeHysteresis
 from binance_trade_bot.regime_transition_planner import plan_regime_transition
+from binance_trade_bot.risk_circuit_breaker import (
+    circuit_breaker_status_summary,
+    evaluate_circuit_breaker,
+    is_circuit_breaker_cooling_down,
+)
 
 # Regime constants
 BULL = "bull"
@@ -546,6 +551,78 @@ class Strategy(AutoTrader):
     def _reset_position_tracking(self, symbol, price):
         self._position_peak_price = {symbol: price}
 
+    def _estimate_spot_equity(self):
+        """Estimate spot-side equity in bridge currency for circuit-breaker checks."""
+        equity = 0.0
+        bridge_symbol = self.config.BRIDGE.symbol
+        try:
+            bridge_balance = self.manager.get_currency_balance(bridge_symbol) or 0.0
+            equity += float(bridge_balance)
+        except Exception:
+            pass
+
+        try:
+            current_coin = self.db.get_current_coin()
+            if current_coin:
+                balance = self.manager.get_currency_balance(current_coin.symbol) or 0.0
+                price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                if price:
+                    equity += float(balance) * float(price)
+        except Exception as e:
+            self.logger.debug(f"Circuit breaker equity estimate failed: {e}")
+
+        return equity if equity > 0 else None
+
+    def _get_float_state(self, key):
+        try:
+            value = self.db.get_bot_state(key)
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _new_spot_risk_blocked(self):
+        """Return True when portfolio circuit breaker should block new spot buys."""
+        if not getattr(self.config, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED', False):
+            return False
+
+        equity = self._estimate_spot_equity()
+        if equity is None:
+            self.logger.warning(
+                "Circuit breaker enabled but equity estimate unavailable; allowing new risk",
+                notification=False,
+            )
+            return False
+
+        last_triggered = self._get_float_state("portfolio_circuit_breaker_last_triggered")
+        if is_circuit_breaker_cooling_down(last_triggered, time.time(), self.config):
+            self.logger.warning("Circuit breaker cooldown active — blocking new spot risk")
+            return True
+
+        daily = self._get_float_state("portfolio_daily_start_equity")
+        weekly = self._get_float_state("portfolio_weekly_start_equity")
+        seeded = False
+        if daily is None or daily <= 0:
+            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
+            daily = equity
+            seeded = True
+        if weekly is None or weekly <= 0:
+            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
+            weekly = equity
+            seeded = True
+        if seeded:
+            self.logger.info(
+                f"Seeded circuit-breaker equity baseline: ${equity:.2f}",
+                notification=False,
+            )
+
+        result = evaluate_circuit_breaker(equity, daily, weekly, self.config)
+        if result.block_new_risk:
+            self.db.set_bot_state("portfolio_circuit_breaker_last_triggered", str(time.time()))
+            self.logger.warning(circuit_breaker_status_summary(result))
+            return True
+        self.logger.debug(circuit_breaker_status_summary(result))
+        return False
+
     # ─────────────────────────────────────────────────────────────────────────
     #  RE-ENTRY FROM BRIDGE
     # ─────────────────────────────────────────────────────────────────────────
@@ -576,6 +653,8 @@ class Strategy(AutoTrader):
                 best_coin = coin
 
         if best_coin is not None:
+            if self._new_spot_risk_blocked():
+                return
             min_notional = self.manager.get_min_notional(best_coin.symbol, self.config.BRIDGE.symbol)
             if bridge_balance >= min_notional:
                 self.logger.info(
@@ -743,6 +822,10 @@ class Strategy(AutoTrader):
                 )
                 return
 
+            if self._new_spot_risk_blocked():
+                self._pending_rotation = None
+                return
+
             result = self.transaction_through_bridge_pair(current_coin, best_coin)
             if result is not None:
                 self._last_trade_time = time.time()
@@ -800,6 +883,8 @@ class Strategy(AutoTrader):
                 best_coin = coin
 
         if best_coin is not None:
+            if self._new_spot_risk_blocked():
+                return
             bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
             if bridge_balance and bridge_balance > self.manager.get_min_notional(
                 best_coin.symbol, self.config.BRIDGE.symbol

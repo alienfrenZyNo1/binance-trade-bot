@@ -101,6 +101,22 @@ def test_config_validation_flags_confirmation_and_timing_ranges():
     assert "TRADE_COOLDOWN_SECONDS should not be negative" in messages
 
 
+
+def test_config_validation_flags_circuit_breaker_ranges():
+    issues = validate_runtime_config(
+        cfg(
+            PORTFOLIO_CIRCUIT_BREAKER_ENABLED=True,
+            PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT=0,
+            PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT=-1,
+            PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS=-2,
+        )
+    )
+
+    messages = issue_messages(issues)
+    assert "PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT should be greater than 0 when circuit breaker is enabled" in messages
+    assert "PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT should be greater than 0 when circuit breaker is enabled" in messages
+    assert "PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS should not be negative" in messages
+
 def test_socketio_enabled_is_only_a_warning():
     issues = validate_runtime_config(cfg(SOCKETIO_UPDATES_ENABLED=True))
 

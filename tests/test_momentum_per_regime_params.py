@@ -82,11 +82,14 @@ class DB:
     def set_current_coin(self, coin):
         self.current = coin
 
+    def get_bot_state(self, key, default=None):
+        return self.state.get(key, default)
+
     def set_bot_state(self, key, value):
         self.state[key] = value
 
-
 class Logger:
+
     def __init__(self):
         self.messages = []
 
@@ -139,6 +142,10 @@ def make_strategy(*, regime=SIDEWAYS, per_regime=True, coins=None):
         SIDEWAYS_CONFIRMATION_MIN_SECONDS=180,
         BEAR_CONFIRMATION_MIN_SECONDS=60,
         STORMY_CONFIRMATION_MIN_SECONDS=300,
+        PORTFOLIO_CIRCUIT_BREAKER_ENABLED=False,
+        PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT=5.0,
+        PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT=12.0,
+        PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS=24.0,
     )
     strategy._market_regime = regime
     strategy._perf_cache = {}
@@ -293,3 +300,47 @@ def test_confirmation_min_seconds_getter_uses_regime_values_when_enabled():
     assert strategy._get_confirmation_min_seconds() == 300
     strategy._market_regime = SIDEWAYS
     assert strategy._get_confirmation_min_seconds() == 180
+
+
+def test_portfolio_circuit_breaker_blocks_confirmed_spot_rotation(monkeypatch):
+    current = Coin("AAA")
+    target = Coin("BBB")
+    strategy = make_strategy(regime=SIDEWAYS, coins=[current, target])
+    strategy.config.CONFIRMATION_TIME_ENABLED = False
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    set_kline_perf(strategy, "AAA", 100, 100)
+    set_kline_perf(strategy, "BBB", 100, 120)
+    strategy.manager.balances["AAA"] = 94.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.manager.prices["BBBUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+
+    now = [1_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    strategy.scout()
+    now[0] += 1
+    strategy.scout()
+
+    assert strategy.manager.sells == []
+    assert strategy.manager.buys == []
+    assert any("Circuit breaker" in message for level, message in strategy.logger.messages if level == "warning")
+
+
+def test_portfolio_circuit_breaker_cooldown_blocks_even_after_recovery(monkeypatch):
+    current = Coin("AAA")
+    target = Coin("BBB")
+    strategy = make_strategy(regime=SIDEWAYS, coins=[current, target])
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS = 24
+    strategy.db.state["portfolio_circuit_breaker_last_triggered"] = str(1_000.0)
+    strategy.manager.balances["AAA"] = 100.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+
+    monkeypatch.setattr(time, "time", lambda: 1_000.0 + 2 * 3600)
+
+    assert strategy._new_spot_risk_blocked() is True
+    assert any("cooldown" in message.lower() for level, message in strategy.logger.messages if level == "warning")

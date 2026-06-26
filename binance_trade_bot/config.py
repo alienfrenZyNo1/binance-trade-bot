@@ -236,6 +236,26 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
             os.environ.get("CANARY_MAX_FUTURES_MARGIN_USDC") or config.get(USER_CFG_SECTION, "canary_max_futures_margin_usdc", fallback="0")
         )
 
+        # Portfolio circuit breaker — disabled by default. When enabled, strategy
+        # code may block new entries after daily/weekly equity drawdown limits
+        # while still allowing exits and server-side protection to manage risk.
+        self.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = (
+            os.environ.get("PORTFOLIO_CIRCUIT_BREAKER_ENABLED")
+            or config.get(USER_CFG_SECTION, "portfolio_circuit_breaker_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+        self.PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT = float(
+            os.environ.get("PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT")
+            or config.get(USER_CFG_SECTION, "portfolio_daily_max_drawdown_pct", fallback="5.0")
+        )
+        self.PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT = float(
+            os.environ.get("PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT")
+            or config.get(USER_CFG_SECTION, "portfolio_weekly_max_drawdown_pct", fallback="12.0")
+        )
+        self.PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS = float(
+            os.environ.get("PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS")
+            or config.get(USER_CFG_SECTION, "portfolio_circuit_breaker_cooldown_hours", fallback="24")
+        )
+
         # Phase D: Trailing stop-loss
         self.TRAILING_STOP_ENABLED = (
             os.environ.get("TRAILING_STOP_ENABLED") or config.get(USER_CFG_SECTION, "trailing_stop_enabled", fallback="yes")

@@ -188,6 +188,35 @@ def validate_runtime_config(config: Any) -> Sequence[ConfigValidationIssue]:
             )
         )
 
+    if _bool(config, "PORTFOLIO_CIRCUIT_BREAKER_ENABLED", False):
+        daily_dd = _float(config, "PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT", 5.0)
+        weekly_dd = _float(config, "PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT", 12.0)
+        cb_cooldown = _float(config, "PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS", 24.0)
+        if daily_dd <= 0:
+            issues.append(
+                ConfigValidationIssue(
+                    key="PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT",
+                    severity="error",
+                    message="PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT should be greater than 0 when circuit breaker is enabled",
+                )
+            )
+        if weekly_dd <= 0:
+            issues.append(
+                ConfigValidationIssue(
+                    key="PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT",
+                    severity="error",
+                    message="PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT should be greater than 0 when circuit breaker is enabled",
+                )
+            )
+        if cb_cooldown < 0:
+            issues.append(
+                ConfigValidationIssue(
+                    key="PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS",
+                    severity="error",
+                    message="PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS should not be negative",
+                )
+            )
+
     if _bool(config, "SOCKETIO_UPDATES_ENABLED", False):
         issues.append(
             ConfigValidationIssue(

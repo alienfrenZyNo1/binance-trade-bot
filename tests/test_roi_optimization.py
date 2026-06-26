@@ -362,7 +362,9 @@ class TestConfigValidation:
                      'BB_SQUEEZE_ENABLED', 'CORRELATION_FILTER_ENABLED', 'BTC_CORRELATION_ENABLED',
                      'MIN_PROFIT_THRESHOLD', 'CHURN_BLOCK_SECONDS', 'CANARY_MODE_ENABLED',
                      'CANARY_MAX_SPOT_TRADE_USDC', 'CANARY_FUTURES_MAX_MARGIN_PCT',
-                     'CANARY_MAX_FUTURES_MARGIN_USDC']:
+                     'CANARY_MAX_FUTURES_MARGIN_USDC', 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED',
+                     'PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT', 'PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT',
+                     'PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS']:
             os.environ.pop(key, None)
 
         from binance_trade_bot.config import Config
@@ -418,6 +420,13 @@ class TestConfigValidation:
         assert c.CANARY_FUTURES_MAX_MARGIN_PCT == 0.0
         assert hasattr(c, 'CANARY_MAX_FUTURES_MARGIN_USDC')
         assert c.CANARY_MAX_FUTURES_MARGIN_USDC == 0.0
+
+        # Portfolio circuit breaker defaults are disabled/no-op
+        assert hasattr(c, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED')
+        assert c.PORTFOLIO_CIRCUIT_BREAKER_ENABLED is False
+        assert c.PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT == 5.0
+        assert c.PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT == 12.0
+        assert c.PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS == 24.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
