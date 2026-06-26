@@ -338,7 +338,7 @@ def get_24h_stats(symbol):
 # ── Futures API Helpers ──────────────────────────────────────────────────────
 
 def get_futures_balance():
-    """Get USDC balance in futures wallet."""
+    """Get USDC balance in futures wallet, flagging any non-bridge assets."""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return None
     try:
@@ -346,16 +346,21 @@ def get_futures_balance():
         if r.status_code != 200:
             log.warning(f"Futures balance API: {r.status_code} {r.text[:150]}")
             return None
+        result = {"balance": 0.0, "available": 0.0, "pnl": 0.0, "non_bridge_assets": []}
         for bal in r.json():
-            if bal.get("asset") == BRIDGE_SYMBOL:
+            asset = bal.get("asset", "")
+            balance = float(bal.get("balance", 0))
+            if asset == BRIDGE_SYMBOL:
                 # 'availableBalance' is unreliable (returns 0 with no positions)
                 # Use 'maxWithdrawAmount' for the available figure
-                return {
-                    "balance": float(bal.get("balance", 0)),
-                    "available": float(bal.get("maxWithdrawAmount", bal.get("balance", 0))),
-                    "pnl": float(bal.get("crossUnPnl", 0)),
-                }
-        return {"balance": 0.0, "available": 0.0, "pnl": 0.0}
+                result["balance"] = balance
+                result["available"] = float(bal.get("maxWithdrawAmount", balance))
+                result["pnl"] = float(bal.get("crossUnPnl", 0))
+            elif balance > 0.0001:
+                # Non-bridge assets (e.g. BNFCR promotional credit) — don't add
+                # to USDC equity, but flag so user knows they exist.
+                result["non_bridge_assets"].append({"asset": asset, "balance": balance})
+        return result
     except Exception as e:
         log.warning(f"get_futures_balance failed: {e}")
         return None
@@ -1472,6 +1477,15 @@ def cmd_futures():
         ["Equity", money(equity)],
         ["Transferable", money(available)],
         ["Margin used", money(margin_used)],
+    ]))
+
+    # Flag non-bridge futures assets (e.g. BNFCR promotional credit)
+    if balance and balance.get("non_bridge_assets"):
+        nba = balance["non_bridge_assets"]
+        summary = ", ".join(f"{a['asset']}={a['balance']:.2f}" for a in nba)
+        lines.append(f"\n<i>⚠ Non-USDC futures assets excluded from equity: {summary}</i>")
+
+    lines.append(kv_table([
         ["Unrealized P&L", money(unrealized_total, signed=True)],
     ]))
 
