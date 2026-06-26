@@ -1,0 +1,79 @@
+# =============================================================================
+# PREREQUISITES — complete these steps BEFORE activating the service:
+#
+# 1. Create data directory symlink (bot uses relative path "data/crypto_trading.db"):
+#      rm -rf /home/lunafox/binance-trade-bot/data
+#      ln -s /data/binance-bot-data /home/lunafox/binance-trade-bot/data
+#
+# 2. Symlink live config files (bot reads user.cfg from WorkingDirectory):
+#      ln -sf /data/binance-bot-data/config/user.cfg /home/lunafox/binance-trade-bot/user.cfg
+#      ln -sf /data/binance-bot-data/config/supported_coin_list /home/lunafox/binance-trade-bot/supported_coin_list
+#
+# 3. Ensure env file exists at /data/binance-bot-data/config/binance-trader.env
+#    (contains API_KEY and API_SECRET_KEY)
+#
+# 4. Stop the Docker container before starting the systemd service to avoid
+#    singleton lock conflicts.
+#
+# 5. Install the service:
+#      sudo cp binance-trader.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable binance-trader.service
+#      sudo systemctl start binance-trader.service
+# =============================================================================
+
+[Unit]
+Description=Binance Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lunafox
+Group=lunafox
+
+WorkingDirectory=/home/lunafox/binance-trade-bot
+
+# Use the project venv Python
+ExecStart=/home/lunafox/binance-trade-bot/.venv/bin/python -m binance_trade_bot
+
+# --- Environment ---
+# Unbuffered stdout/stderr so journalctl sees output immediately
+Environment=PYTHONUNBUFFERED=1
+
+# API credentials are loaded from the environment file below.
+# The bot's config.py reads these via os.environ.get("API_KEY") / os.environ.get("API_SECRET_KEY").
+EnvironmentFile=/data/binance-bot-data/config/binance-trader.env
+
+# Trading configuration (mirrors the Docker container env)
+Environment=BRIDGE_SYMBOL=USDC
+Environment=SUPPORTED_COIN_LIST=SOL SUI XRP ADA DOGE NEAR LINK AAVE AVAX APT INJ TIA ENA PEPE JUP
+Environment=STRATEGY=improved
+Environment=SCOUT_MULTIPLIER=6
+Environment=SCOUT_SLEEP_TIME=1
+Environment=SELL_TIMEOUT=20
+Environment=BUY_TIMEOUT=20
+Environment=HOURS_TO_KEEP_SCOUTING_HISTORY=1
+Environment=TESTNET=false
+Environment=TLD=com
+
+# --- Restart policy ---
+Restart=always
+RestartSec=10
+
+# --- Logging ---
+# stdout/stderr are captured by journald automatically.
+# The bot's logger.py also writes to logs/crypto_trading.log (relative to WorkingDirectory).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binance-trader
+
+# --- Security hardening ---
+NoNewPrivileges=true
+
+# --- Graceful shutdown ---
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
