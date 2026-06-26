@@ -80,7 +80,7 @@ def test_walk_forward_windows_are_chronological_and_non_overlapping():
     assert [w["label"] for w in windows] == ["w1", "w2", "w3"]
     assert windows == sorted(windows, key=lambda w: w["test_start"])
     for prev, cur in zip(windows, windows[1:]):
-        assert prev["test_end"] < cur["test_start"]
+        assert prev["test_end"] + HOUR_MS == cur["test_start"]
     for window in windows:
         assert window["train_start"] <= window["train_end"] < window["test_start"] <= window["test_end"]
 
@@ -137,3 +137,32 @@ def test_format_best_line_marks_robust_plateau():
     assert "trades=22" in line
     assert "PLATEAU" in line
     assert "BELOW_MIN_TRADES" not in line
+
+
+def test_walk_forward_selects_on_train_then_scores_oos_without_peeking():
+    module = load_module()
+    windows = [{"label": "w1", "train_start": 0, "train_end": 9, "test_start": 10, "test_end": 19}]
+    param_grid = [(4, 3.0), (8, 5.0)]
+    calls = []
+
+    def fake_runner(coin_candles, regimes, target_regime, lookback, min_edge, *, start_ts=None, end_ts=None):
+        calls.append((lookback, min_edge, start_ts, end_ts))
+        if start_ts == 0 and end_ts == 9:
+            return {"return_pct": 20.0 if lookback == 4 else 5.0, "trades": 20, "win_rate": 60.0}
+        if start_ts == 10 and end_ts == 19:
+            return {"return_pct": -3.0 if lookback == 4 else 50.0, "trades": 20, "win_rate": 60.0}
+        raise AssertionError("unexpected window")
+
+    results = module.evaluate_walk_forward(
+        {},
+        [],
+        "bull",
+        windows,
+        param_grid=param_grid,
+        runner=fake_runner,
+        min_trades=15,
+    )
+
+    assert results[0]["selected_params"] == {"lookback_hours": 4, "min_edge": 3.0}
+    assert results[0]["oos"]["return_pct"] == -3.0
+    assert (8, 5.0, 10, 19) not in calls  # losing train candidate must not be test-peeked

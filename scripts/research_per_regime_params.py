@@ -137,7 +137,8 @@ def build_walk_forward_windows(
             "test_start": test_start,
             "test_end": test_end,
         })
-        cursor_test_end = test_start - step_hours * HOUR_MS
+        next_test_start = test_start - step_hours * HOUR_MS
+        cursor_test_end = next_test_start + (test_hours - 1) * HOUR_MS
     windows = list(reversed(windows))
     for idx, window in enumerate(windows, start=1):
         window["label"] = f"w{idx}"
@@ -279,6 +280,66 @@ def classify_regime(candles):
     return regimes
 
 
+def evaluate_walk_forward(
+    coin_candles: dict[str, list[dict]],
+    regimes: list[str],
+    target_regime: str,
+    windows: list[dict[str, Any]],
+    *,
+    param_grid: list[tuple[int, float]] | None = None,
+    runner=None,
+    min_trades: int = 15,
+) -> list[dict[str, Any]]:
+    """Select params on each train window, then score only selected params OOS.
+
+    This avoids peeking at test-window performance when choosing parameters.
+    """
+    grid = param_grid or PARAM_GRID
+    if runner is None:
+        runner = run_momentum
+    output: list[dict[str, Any]] = []
+    for window in windows:
+        train_results = []
+        grid_results = {}
+        for lookback, min_edge in grid:
+            train = runner(
+                coin_candles,
+                regimes,
+                target_regime,
+                lookback,
+                min_edge,
+                start_ts=int(window["train_start"]),
+                end_ts=int(window["train_end"]),
+            )
+            train_results.append((lookback, min_edge, train))
+            grid_results[(lookback, min_edge)] = train
+        selected = select_best_result(train_results, min_trades=min_trades)
+        plateau = assess_parameter_plateau(grid_results, selected[0], selected[1])
+        oos = runner(
+            coin_candles,
+            regimes,
+            target_regime,
+            selected[0],
+            selected[1],
+            start_ts=int(window["test_start"]),
+            end_ts=int(window["test_end"]),
+        )
+        output.append({
+            "window": window,
+            "selected_params": {"lookback_hours": selected[0], "min_edge": selected[1]},
+            "train": selected[2],
+            "train_plateau": plateau,
+            "oos": oos,
+            "passed": (
+                bool(plateau.get("robust"))
+                and int(selected[2].get("trades", 0)) >= min_trades
+                and float(oos.get("return_pct", 0.0)) > 0.0
+                and int(oos.get("trades", 0)) >= 1
+            ),
+        })
+    return output
+
+
 def run_momentum(
     coin_candles: dict[str, list[dict]],
     regimes: list[str],
@@ -287,6 +348,9 @@ def run_momentum(
     min_edge: float,
     fee_pct: float = 0.1,
     slippage_pct: float = 0.05,
+    *,
+    start_ts: int | None = None,
+    end_ts: int | None = None,
 ) -> dict[str, Any]:
     """Run momentum rotation with specific params in target regime."""
     ref = coin_candles.get("SOL", coin_candles[list(coin_candles.keys())[0]])
@@ -308,7 +372,15 @@ def run_momentum(
     trades = 0
     wins = 0
 
-    for i in range(n):
+    active_indices = [
+        i for i, candle in enumerate(ref)
+        if (start_ts is None or int(candle["ts"]) >= start_ts)
+        and (end_ts is None or int(candle["ts"]) <= end_ts)
+    ]
+    if not active_indices:
+        return {"return_pct": 0.0, "trades": 0, "win_rate": 0.0}
+
+    for i in active_indices:
         if regimes[i] != target_regime:
             continue
 
@@ -351,7 +423,8 @@ def run_momentum(
 
     # Close final
     if current_coin:
-        exit_price = coin_candles[current_coin][n - 1]["close"]
+        exit_idx = active_indices[-1]
+        exit_price = coin_candles[current_coin][exit_idx]["close"]
         hold_ret = (exit_price / entry_price - 1.0) * 100.0
         equity *= (1.0 + hold_ret / 100.0) * (1.0 - trade_fees)
         if hold_ret > 0:
@@ -472,6 +545,45 @@ def main():
         "must be rejected until true walk-forward OOS validation passes. "
         "The TOTAL row is a diagnostic sum of regime slices, not a realizable compounded return."
     )
+
+    print(f"\n{'='*80}")
+    print("WALK-FORWARD TRAIN→OOS VALIDATION")
+    print(f"{'='*80}")
+    timestamps = [row["ts"] for row in ref]
+    windows = build_walk_forward_windows(
+        timestamps,
+        train_hours=45 * 24,
+        test_hours=15 * 24,
+        step_hours=15 * 24,
+        count=3,
+    )
+    if not windows:
+        print("Not enough data for walk-forward windows.")
+    else:
+        for regime in ["bull", "sideways", "bear"]:
+            wf = evaluate_walk_forward(
+                coin_candles,
+                regimes,
+                regime,
+                windows,
+                min_trades=15,
+            )
+            print(f"\n── {regime.upper()} WALK-FORWARD ──")
+            print(f"{'Window':>6} {'Params':>18} {'Train':>10} {'OOS':>10} {'Trades':>8} {'Verdict':>10}")
+            print("-" * 70)
+            for row in wf:
+                p = row["selected_params"]
+                params = f"{p['lookback_hours']}h/{p['min_edge']}%"
+                train_ret = float(row["train"].get("return_pct", 0.0))
+                oos_ret = float(row["oos"].get("return_pct", 0.0))
+                trades = int(row["oos"].get("trades", 0))
+                verdict = "PASS" if row["passed"] else "FAIL"
+                print(
+                    f"{row['window']['label']:>6} {params:>18} "
+                    f"{train_ret:>+9.1f}% {oos_ret:>+9.1f}% {trades:>8} {verdict:>10}"
+                )
+            pass_count = sum(1 for row in wf if row["passed"])
+            print(f"  Result: {pass_count}/{len(wf)} windows passed")
 
 
 if __name__ == "__main__":
