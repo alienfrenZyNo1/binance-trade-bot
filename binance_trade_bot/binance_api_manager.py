@@ -32,6 +32,59 @@ def _is_duplicate_order_error(e: BinanceAPIException) -> bool:
     msg = str(e).lower()
     return "duplicate order" in msg or "duplicate" in msg
 
+
+# Binance API error codes that are never worth retrying: the request itself is
+# invalid (e.g. below min notional, insufficient balance, unknown symbol), so
+# hammering the API will only burn through the rate limit budget without changing
+# the outcome.
+NON_RETRYABLE_API_CODES = frozenset({
+    -1013,  # MIN_NOTIONAL: order value too small
+    -1015,  # TOO_MANY_ORDERS
+    -1099,  # NOT_FOUND / invalid parameter
+    -1100,  # ILLEGAL_CHARS
+    -1101,  # TOO_MANY_PARAMETERS
+    -1104,  # INVALID_PARAM
+    -1121,  # BAD_SYMBOL: unknown symbol
+    -1128,  # BAD_API_KEY
+    -2010,  # NEW_ORDER_REJECTED / insufficient balance (treated as terminal here)
+    -2013,  # NO_SUCH_ORDER
+    -2014,  # BAD_API_KEY_FMT
+    -2015,  # INVALID API KEY
+})
+
+# HTTP status codes that indicate a hard client error rather than a transient
+# server/network condition. These must not be retried.
+NON_RETRYABLE_HTTP_STATUS = frozenset({400, 401, 403, 404, 405, 422})
+
+
+def _classify_retry_error(e: Exception) -> str:
+    """Classify an exception raised inside ``retry()``.
+
+    Returns one of:
+      * ``"non_retryable"``  - the request is invalid; retrying cannot help.
+      * ``"rate_limited"``   - HTTP 429: back off longer before the next attempt.
+      * ``"retryable"``      - transient/network error; keep retrying with backoff.
+    """
+    # Binance API error with a structured code/status.
+    if isinstance(e, BinanceAPIException):
+        status = getattr(e, "status_code", None)
+        code = getattr(e, "code", None)
+        # 429 is rate limiting - still retryable but needs a longer cool-down.
+        if status == 429:
+            return "rate_limited"
+        if code in NON_RETRYABLE_API_CODES:
+            return "non_retryable"
+        if status in NON_RETRYABLE_HTTP_STATUS:
+            return "non_retryable"
+        # Any other Binance API error is treated as transient (e.g. 5xx).
+        return "retryable"
+
+    # Timeouts and connection issues are transient -> retryable.
+    if isinstance(e, (TimeoutError, ConnectionError)):
+        return "retryable"
+
+    return "retryable"
+
 from .binance_stream_manager import BinanceCache, BinanceOrder, BinanceStreamManager, OrderGuard
 from .canary_capital_guard import cap_spot_trade_balance
 from .config import Config
@@ -158,18 +211,57 @@ class BinanceAPIManager:
 
             return balance
 
+    # Maximum number of attempts for retryable errors. Non-retryable errors
+    # short-circuit out of the loop on the first occurrence.
+    MAX_RETRY_ATTEMPTS = 20
+    # Cap the per-attempt backoff so we never sleep for minutes on end.
+    MAX_BACKOFF_SECONDS = 60
+    # Extra cool-down multiplier applied on top of the base exponential backoff
+    # when Binance signals rate limiting (HTTP 429). We honour the "do not
+    # immediately retry" guidance by applying a longer backoff rather than
+    # continuing to hammer the endpoint.
+    RATE_LIMIT_BACKOFF_MULTIPLIER = 3
+
     def retry(self, func, *args, **kwargs):
-        for attempt in range(20):
+        for attempt in range(self.MAX_RETRY_ATTEMPTS):
             try:
                 return func(*args, **kwargs)
             except Exception as e:  # pylint: disable=broad-except
+                classification = _classify_retry_error(e)
+
+                # Non-retryable errors (bad request, insufficient balance,
+                # unknown symbol, ...): retrying will never succeed, so log and
+                # bail out immediately instead of burning 20 attempts.
+                if classification == "non_retryable":
+                    self.logger.error(
+                        f"Non-retryable error in {func.__name__} "
+                        f"(code={getattr(e, 'code', None)}, "
+                        f"status={getattr(e, 'status_code', None)}): {e}"
+                    )
+                    return None
+
+                # Exponential backoff capped at MAX_BACKOFF_SECONDS.
+                backoff = min(2 ** attempt, self.MAX_BACKOFF_SECONDS)
+                if classification == "rate_limited":
+                    # HTTP 429: apply a longer cool-down and do not retry
+                    # immediately, to avoid escalating the rate limit.
+                    backoff = min(
+                        backoff * self.RATE_LIMIT_BACKOFF_MULTIPLIER,
+                        self.MAX_BACKOFF_SECONDS,
+                    )
+
                 self.logger.warning(
-                    f"Failed to Buy/Sell. Trying Again (attempt {attempt + 1}/20): {e}"
+                    f"Failed to Buy/Sell ({classification}). Trying Again "
+                    f"(attempt {attempt + 1}/{self.MAX_RETRY_ATTEMPTS}, "
+                    f"backoff {backoff}s): {e}"
                 )
                 if attempt == 0:
                     self.logger.warning(traceback.format_exc())
-                time.sleep(1)
-        self.logger.error(f"Retry exhausted after 20 attempts for {func.__name__}")
+                time.sleep(backoff)
+        self.logger.error(
+            f"Retry exhausted after {self.MAX_RETRY_ATTEMPTS} attempts "
+            f"for {func.__name__}"
+        )
         return None
 
     def get_symbol_filter(self, origin_symbol: str, target_symbol: str, filter_type: str):
