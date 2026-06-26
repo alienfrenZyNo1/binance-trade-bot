@@ -444,6 +444,8 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    # Auto-append BRIDGE suffix if missing (accept both SOL and SOLUSDC)
+    symbols = [s if s.endswith(BRIDGE) else s + BRIDGE for s in symbols]
     config = BacktestConfig(
         initial_balance=args.initial_balance,
         leverage=args.leverage,

@@ -56,6 +56,14 @@ FUTURES_ELIGIBLE_COINS = {
     # "BTC", "ETH", "BNB"
 }
 
+# Coins excluded from shorting due to poor backtested performance.
+# These tend to bounce violently against shorts, causing repeated stop-outs.
+# Research: scripts/research_bear_futures_backtester.py (2026-06-26, 90d)
+SHORT_EXCLUDE_COINS = {
+    "NEAR",   # -28.3% across 38 trades — bounces too hard
+    "TIA",    # -32.9% across 43 trades — bounces too hard
+}
+
 
 class FuturesPosition:
     """Tracks an open short position in memory."""
@@ -411,6 +419,8 @@ class FuturesManager:
         candidates = []
         for symbol, perf in performance.items():
             if symbol not in FUTURES_ELIGIBLE_COINS:
+                continue
+            if symbol in SHORT_EXCLUDE_COINS:
                 continue
             if perf is None:
                 continue
