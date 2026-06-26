@@ -344,3 +344,75 @@ def test_portfolio_circuit_breaker_cooldown_blocks_even_after_recovery(monkeypat
 
     assert strategy._new_spot_risk_blocked() is True
     assert any("cooldown" in message.lower() for level, message in strategy.logger.messages if level == "warning")
+
+
+def test_portfolio_circuit_breaker_resets_daily_baseline_on_utc_day_change(monkeypatch):
+    strategy = make_strategy(regime=SIDEWAYS, coins=[Coin("AAA"), Coin("BBB")])
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    strategy.manager.balances["AAA"] = 94.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "100.0"
+    strategy.db.state["portfolio_daily_period"] = "2026-06-25"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_period"] = "2026-W26"
+
+    # 2026-06-26T00:05:00Z: daily baseline should reset to 94 and not block.
+    monkeypatch.setattr(time, "time", lambda: 1782432300.0)
+
+    assert strategy._new_spot_risk_blocked() is False
+    assert strategy.db.state["portfolio_daily_start_equity"] == "94.0"
+    assert strategy.db.state["portfolio_daily_period"] == "2026-06-26"
+
+
+def test_portfolio_circuit_breaker_resets_weekly_baseline_on_utc_week_change(monkeypatch):
+    strategy = make_strategy(regime=SIDEWAYS, coins=[Coin("AAA"), Coin("BBB")])
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    strategy.manager.balances["AAA"] = 90.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "90.0"
+    strategy.db.state["portfolio_daily_period"] = "2026-06-29"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_period"] = "2026-W26"
+
+    # 2026-06-29T00:05:00Z is ISO week 27: weekly baseline should reset to 90.
+    monkeypatch.setattr(time, "time", lambda: 1782691500.0)
+
+    assert strategy._new_spot_risk_blocked() is False
+    assert strategy.db.state["portfolio_weekly_start_equity"] == "90.0"
+    assert strategy.db.state["portfolio_weekly_period"] == "2026-W27"
+
+
+def test_portfolio_circuit_breaker_legacy_baseline_gets_period_without_reset(monkeypatch):
+    strategy = make_strategy(regime=SIDEWAYS, coins=[Coin("AAA"), Coin("BBB")])
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    strategy.manager.balances["AAA"] = 94.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+
+    monkeypatch.setattr(time, "time", lambda: 1782432300.0)
+
+    assert strategy._new_spot_risk_blocked() is True
+    assert strategy.db.state["portfolio_daily_start_equity"] == "100.0"
+    assert strategy.db.state["portfolio_weekly_start_equity"] == "100.0"
+    assert strategy.db.state["portfolio_daily_period"] == "2026-06-26"
+    assert strategy.db.state["portfolio_weekly_period"] == "2026-W26"
+
+
+def test_portfolio_circuit_breaker_monday_resets_daily_and_weekly(monkeypatch):
+    strategy = make_strategy(regime=SIDEWAYS, coins=[Coin("AAA"), Coin("BBB")])
+    strategy.config.PORTFOLIO_CIRCUIT_BREAKER_ENABLED = True
+    strategy.manager.balances["AAA"] = 90.0
+    strategy.manager.prices["AAAUSDC"] = 1.0
+    strategy.db.state["portfolio_daily_start_equity"] = "100.0"
+    strategy.db.state["portfolio_daily_period"] = "2026-06-28"
+    strategy.db.state["portfolio_weekly_start_equity"] = "100.0"
+    strategy.db.state["portfolio_weekly_period"] = "2026-W26"
+
+    monkeypatch.setattr(time, "time", lambda: 1782691500.0)
+
+    assert strategy._new_spot_risk_blocked() is False
+    assert strategy.db.state["portfolio_daily_start_equity"] == "90.0"
+    assert strategy.db.state["portfolio_daily_period"] == "2026-06-29"
+    assert strategy.db.state["portfolio_weekly_start_equity"] == "90.0"
+    assert strategy.db.state["portfolio_weekly_period"] == "2026-W27"

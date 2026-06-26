@@ -153,3 +153,40 @@ def test_open_short_warns_when_exchange_reports_unexpected_margin_mode():
 
     assert result == "opened"
     assert any("margin mode mismatch" in msg for msg in logger.messages("warning"))
+
+
+def test_futures_entry_blocker_prevents_new_short_entries_only():
+    manager, client, logger = make_manager()
+    manager._initialized = True
+    manager._last_entry_attempt = 0
+    manager.position_check_interval = 0
+    manager._get_futures_usdc_balance = lambda: 100.0
+    manager.new_risk_blocked = lambda: True
+
+    result = manager.manage_bear({"ADA": -8.0}, "bear")
+
+    assert result == "idle"
+    assert client.orders == []
+    assert any("circuit breaker" in msg.lower() for msg in logger.messages("warning"))
+
+
+def test_futures_entry_blocker_does_not_prevent_existing_position_management():
+    manager, client, logger = make_manager()
+    manager._initialized = True
+    manager.position_check_interval = 0
+    manager.new_risk_blocked = lambda: True
+    manager._open_position = SimpleNamespace(
+        symbol="TIAUSDC",
+        entry_price=10.0,
+        quantity=5.0,
+        peak_pnl_pct=0.0,
+        opened_at=0.0,
+    )
+    called = []
+    manager._manage_open_position = lambda: called.append(True) or "holding"
+
+    result = manager.manage_bear({"TIA": -8.0}, "bear")
+
+    assert result == "holding"
+    assert called == [True]
+    assert client.orders == []

@@ -26,7 +26,7 @@ Optimal parameters (from grid search over 10,500 combinations):
 import time
 import sys
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 
 from binance_trade_bot.auto_trader import AutoTrader
 from binance_trade_bot.futures_manager import FuturesManager
@@ -138,6 +138,7 @@ class Strategy(AutoTrader):
         self.futures_manager = FuturesManager(
             self.manager.binance_client, self.logger, self.config
         )
+        self.futures_manager.new_risk_blocked = self._new_spot_risk_blocked
         self.futures_manager.initialize()
 
     def _persist_trade_state(self):
@@ -580,6 +581,61 @@ class Strategy(AutoTrader):
         except Exception:
             return None
 
+    def _get_string_state(self, key):
+        try:
+            value = self.db.get_bot_state(key)
+            return str(value) if value is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _circuit_breaker_periods(now_ts):
+        now_dt = datetime.fromtimestamp(now_ts, timezone.utc)
+        iso_year, iso_week, _ = now_dt.isocalendar()
+        return now_dt.strftime("%Y-%m-%d"), f"{iso_year:04d}-W{iso_week:02d}"
+
+    def _ensure_circuit_breaker_baselines(self, equity, now_ts):
+        """Seed or reset UTC daily/weekly circuit-breaker baselines."""
+        daily_period, weekly_period = self._circuit_breaker_periods(now_ts)
+        daily = self._get_float_state("portfolio_daily_start_equity")
+        weekly = self._get_float_state("portfolio_weekly_start_equity")
+        stored_daily_period = self._get_string_state("portfolio_daily_period")
+        stored_weekly_period = self._get_string_state("portfolio_weekly_period")
+        reset_scopes = []
+
+        if daily is None or daily <= 0:
+            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+            daily = equity
+            reset_scopes.append("daily")
+        elif stored_daily_period is None:
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+        elif stored_daily_period != daily_period:
+            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+            daily = equity
+            reset_scopes.append("daily")
+
+        if weekly is None or weekly <= 0:
+            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+            weekly = equity
+            reset_scopes.append("weekly")
+        elif stored_weekly_period is None:
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+        elif stored_weekly_period != weekly_period:
+            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+            weekly = equity
+            reset_scopes.append("weekly")
+
+        if reset_scopes:
+            self.logger.info(
+                f"Seeded/reset circuit-breaker baseline ({'/'.join(reset_scopes)}): ${equity:.2f}",
+                notification=False,
+            )
+        return daily, weekly
+
     def _new_spot_risk_blocked(self):
         """Return True when portfolio circuit breaker should block new spot buys."""
         if not getattr(self.config, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED', False):
@@ -593,31 +649,17 @@ class Strategy(AutoTrader):
             )
             return False
 
+        now = time.time()
         last_triggered = self._get_float_state("portfolio_circuit_breaker_last_triggered")
-        if is_circuit_breaker_cooling_down(last_triggered, time.time(), self.config):
+        if is_circuit_breaker_cooling_down(last_triggered, now, self.config):
             self.logger.warning("Circuit breaker cooldown active — blocking new spot risk")
             return True
 
-        daily = self._get_float_state("portfolio_daily_start_equity")
-        weekly = self._get_float_state("portfolio_weekly_start_equity")
-        seeded = False
-        if daily is None or daily <= 0:
-            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
-            daily = equity
-            seeded = True
-        if weekly is None or weekly <= 0:
-            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
-            weekly = equity
-            seeded = True
-        if seeded:
-            self.logger.info(
-                f"Seeded circuit-breaker equity baseline: ${equity:.2f}",
-                notification=False,
-            )
+        daily, weekly = self._ensure_circuit_breaker_baselines(equity, now)
 
         result = evaluate_circuit_breaker(equity, daily, weekly, self.config)
         if result.block_new_risk:
-            self.db.set_bot_state("portfolio_circuit_breaker_last_triggered", str(time.time()))
+            self.db.set_bot_state("portfolio_circuit_breaker_last_triggered", str(now))
             self.logger.warning(circuit_breaker_status_summary(result))
             return True
         self.logger.debug(circuit_breaker_status_summary(result))

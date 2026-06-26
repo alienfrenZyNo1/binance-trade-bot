@@ -20,7 +20,7 @@ USES: python-binance futures methods (fapi.binance.com endpoint).
 import time
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -114,6 +114,7 @@ class FuturesManager:
         self._last_entry_attempt = 0
         self._initialized = False
         self._exchange_info_cache = None
+        self.new_risk_blocked: Optional[Callable[[], bool]] = None
 
     def _normalize_margin_type(self, value) -> str:
         """Normalize configured futures margin type.
@@ -310,6 +311,12 @@ class FuturesManager:
         # No open position — look for entry opportunity
         # Don't open more than one position every 5 minutes
         if now - self._last_entry_attempt < 300:
+            return 'idle'
+
+        # Circuit breaker blocks new entries only. Existing shorts are managed
+        # above before this guard so stops/exits remain active.
+        if callable(self.new_risk_blocked) and self.new_risk_blocked():
+            self.logger.warning("Futures circuit breaker active — blocking new short entry")
             return 'idle'
 
         return self._attempt_entry(performance)
