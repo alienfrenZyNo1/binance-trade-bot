@@ -157,3 +157,27 @@ def test_simulate_short_hard_stop_limits_rising_market_loss_after_fees_and_slipp
     assert result["fees"] > 0
     assert result["max_drawdown_pct"] > 0
     assert result["account_stop_risk_pct"] == 8.0
+
+
+def test_missing_oi_is_unknown_and_does_not_pass_real_filter():
+    module = load_module()
+    candles = [candle(0, 100), candle(1, 96), candle(2, 92)]
+
+    real_filter = module._candidate_from_window(
+        "ENAUSDC",
+        candles,
+        [],
+        lookback_hours=2,
+        min_oi_change_pct=0.0,
+    )
+    no_filter = module._candidate_from_window(
+        "ENAUSDC",
+        candles,
+        [],
+        lookback_hours=2,
+        min_oi_change_pct=-1000.0,
+    )
+
+    assert real_filter["oi_known"] is False
+    assert real_filter["eligible"] is False
+    assert no_filter["eligible"] is True

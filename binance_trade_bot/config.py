@@ -218,6 +218,18 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.FUTURES_FUNDING_EXIT_MULTIPLIER = float(
             os.environ.get("FUTURES_FUNDING_EXIT_MULTIPLIER") or config.get(USER_CFG_SECTION, "futures_funding_exit_multiplier", fallback="3.0")
         )
+        self.FUTURES_OI_FILTER_ENABLED = (
+            os.environ.get("FUTURES_OI_FILTER_ENABLED")
+            or config.get(USER_CFG_SECTION, "futures_oi_filter_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+        self.FUTURES_OI_LOOKBACK_HOURS = int(
+            os.environ.get("FUTURES_OI_LOOKBACK_HOURS")
+            or config.get(USER_CFG_SECTION, "futures_oi_lookback_hours", fallback="24")
+        )
+        self.FUTURES_MIN_OI_CHANGE_PCT = float(
+            os.environ.get("FUTURES_MIN_OI_CHANGE_PCT")
+            or config.get(USER_CFG_SECTION, "futures_min_oi_change_pct", fallback="0.0")
+        )
         self.FUTURES_CHECK_INTERVAL = int(
             os.environ.get("FUTURES_CHECK_INTERVAL") or config.get(USER_CFG_SECTION, "futures_check_interval", fallback="60")
         )

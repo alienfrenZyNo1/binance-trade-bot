@@ -200,3 +200,64 @@ def test_futures_wallet_balance_helper_uses_raw_balance_not_max_withdraw():
 
     assert manager._get_futures_usdc_wallet_balance() == 100.0
     assert manager._get_futures_usdc_balance() == 70.0
+
+
+def test_oi_filter_disabled_does_not_change_short_entry_behavior():
+    manager, client, _logger = make_manager(FUTURES_OI_FILTER_ENABLED=False)
+    manager._get_futures_usdc_balance = lambda: 100.0
+    manager._fetch_open_interest_hist = lambda symbol: (_ for _ in ()).throw(AssertionError("should not fetch OI when disabled"))
+
+    result = manager._attempt_entry({"ADA": -8.0})
+
+    assert result == "opened"
+    assert client.orders
+
+
+def test_oi_filter_blocks_short_when_open_interest_is_falling():
+    manager, client, logger = make_manager(
+        FUTURES_OI_FILTER_ENABLED=True,
+        FUTURES_OI_LOOKBACK_HOURS=2,
+        FUTURES_MIN_OI_CHANGE_PCT=0.0,
+    )
+    manager._get_futures_usdc_balance = lambda: 100.0
+    manager._fetch_open_interest_hist = lambda symbol: [
+        {"timestamp": 0, "sumOpenInterestValue": "1000"},
+        {"timestamp": 1, "sumOpenInterestValue": "900"},
+        {"timestamp": 2, "sumOpenInterestValue": "800"},
+    ]
+
+    result = manager._attempt_entry({"ADA": -8.0})
+
+    assert result == "idle"
+    assert client.orders == []
+    assert any("open interest" in msg.lower() for msg in logger.messages("info"))
+
+
+def test_oi_filter_blocks_short_when_open_interest_is_unknown():
+    manager, client, _logger = make_manager(FUTURES_OI_FILTER_ENABLED=True)
+    manager._get_futures_usdc_balance = lambda: 100.0
+    manager._fetch_open_interest_hist = lambda symbol: []
+
+    result = manager._attempt_entry({"ADA": -8.0})
+
+    assert result == "idle"
+    assert client.orders == []
+
+
+def test_oi_filter_allows_short_when_open_interest_is_rising():
+    manager, client, _logger = make_manager(
+        FUTURES_OI_FILTER_ENABLED=True,
+        FUTURES_OI_LOOKBACK_HOURS=2,
+        FUTURES_MIN_OI_CHANGE_PCT=0.0,
+    )
+    manager._get_futures_usdc_balance = lambda: 100.0
+    manager._fetch_open_interest_hist = lambda symbol: [
+        {"timestamp": 0, "sumOpenInterestValue": "1000"},
+        {"timestamp": 1, "sumOpenInterestValue": "1000"},
+        {"timestamp": 2, "sumOpenInterestValue": "1100"},
+    ]
+
+    result = manager._attempt_entry({"ADA": -8.0})
+
+    assert result == "opened"
+    assert client.orders

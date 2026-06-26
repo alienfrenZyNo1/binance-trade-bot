@@ -73,10 +73,10 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _change_pct(values: list[float]) -> float:
+def _change_pct(values: list[float]) -> float | None:
     values = [value for value in values if value > 0]
     if len(values) < 2 or values[0] == 0:
-        return 0.0
+        return None
     return (values[-1] / values[0] - 1.0) * 100.0
 
 
@@ -116,15 +116,26 @@ def fetch_funding_rates(symbol: str, *, limit: int = 100) -> list[dict[str, Any]
     return fetch_json("/fapi/v1/fundingRate", {"symbol": symbol, "limit": min(limit, 1000)})
 
 
-def fetch_open_interest_hist(symbol: str, *, period: str = "1h", limit: int = 120) -> list[dict[str, Any]]:
-    return fetch_json(
-        "/futures/data/openInterestHist",
-        {"symbol": symbol, "period": period, "limit": min(limit, 500)},
-    )
+def fetch_open_interest_hist(
+    symbol: str,
+    *,
+    period: str = "1h",
+    limit: int = 120,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"symbol": symbol, "period": period, "limit": min(limit, 500)}
+    if start_ms is not None:
+        params["startTime"] = start_ms
+    if end_ms is not None:
+        params["endTime"] = end_ms
+    return fetch_json("/futures/data/openInterestHist", params)
 
 
 def load_market_data(symbols: Iterable[str], *, days: int = 30, interval: str = "1h") -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = end_ms - days * DAY_MS
     funding_limit = max(8, min(1000, days * 3 + 4))
     oi_limit = max(24, min(500, days * 24 + 1))
     for symbol in symbols:
@@ -137,7 +148,13 @@ def load_market_data(symbols: Iterable[str], *, days: int = 30, interval: str = 
             time.sleep(0.05)
             payload["funding"] = fetch_funding_rates(symbol, limit=funding_limit)
             time.sleep(0.05)
-            payload["open_interest"] = fetch_open_interest_hist(symbol, period=interval, limit=oi_limit)
+            payload["open_interest"] = fetch_open_interest_hist(
+                symbol,
+                period=interval,
+                limit=oi_limit,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
         except requests.RequestException as exc:
             payload["error"] = str(exc)
         out[symbol] = payload
@@ -155,7 +172,7 @@ def _momentum_pct(candles: list[dict[str, float | int]], lookback_hours: int) ->
     return (end / start - 1.0) * 100.0
 
 
-def _oi_value_change_pct(rows: list[dict[str, Any]]) -> float:
+def _oi_value_change_pct(rows: list[dict[str, Any]]) -> float | None:
     values = [_safe_float(row.get("sumOpenInterestValue")) for row in rows]
     return _change_pct(values)
 
@@ -204,12 +221,16 @@ def _candidate_from_window(
         return None
     signal_ts = int(candles[-1]["ts"])
     oi_change = _oi_value_change_pct(_rows_through(open_interest, signal_ts, limit=lookback_hours + 1))
+    oi_filter_disabled = min_oi_change_pct <= -999.0
+    oi_known = oi_change is not None
+    oi_for_output = oi_change if oi_change is not None else 0.0
     return {
         "symbol": symbol,
         "signal_ts": signal_ts,
         "momentum_pct": round(momentum, 6),
-        "oi_value_change_pct": round(oi_change, 6),
-        "eligible": bool(momentum < 0 and oi_change >= min_oi_change_pct),
+        "oi_value_change_pct": round(oi_for_output, 6),
+        "oi_known": oi_known,
+        "eligible": bool(momentum < 0 and (oi_filter_disabled or (oi_known and oi_change >= min_oi_change_pct))),
         "latest_price": float(candles[-1]["close"]),
         "candles": len(candles),
     }

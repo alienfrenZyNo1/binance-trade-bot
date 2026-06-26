@@ -22,6 +22,8 @@ from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from typing import Callable, Dict, List, Optional, Tuple
 
+import requests
+
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
@@ -103,6 +105,9 @@ class FuturesManager:
         )
         self.max_funding_rate = float(getattr(config, 'FUTURES_MAX_FUNDING_RATE', 0.0001))
         self.funding_exit_multiplier = float(getattr(config, 'FUTURES_FUNDING_EXIT_MULTIPLIER', 3.0))
+        self.oi_filter_enabled = bool(getattr(config, 'FUTURES_OI_FILTER_ENABLED', False))
+        self.oi_lookback_hours = int(getattr(config, 'FUTURES_OI_LOOKBACK_HOURS', 24))
+        self.min_oi_change_pct = float(getattr(config, 'FUTURES_MIN_OI_CHANGE_PCT', 0.0))
         self.position_check_interval = int(getattr(config, 'FUTURES_CHECK_INTERVAL', 60))
         self.testnet = getattr(config, 'TESTNET', False)
 
@@ -402,6 +407,69 @@ class FuturesManager:
             self.logger.warning(f"Position management error: {e}")
             return 'holding'
 
+    @staticmethod
+    def _change_pct(values: List[float]) -> Optional[float]:
+        values = [value for value in values if value > 0]
+        if len(values) < 2 or values[0] == 0:
+            return None
+        return (values[-1] / values[0] - 1.0) * 100.0
+
+    def _fetch_open_interest_hist(self, futures_symbol: str) -> List[dict]:
+        """Fetch recent public open-interest history for a futures symbol."""
+        limit = max(2, min(500, self.oi_lookback_hours + 1))
+        # Prefer python-binance if available; fall back to public REST so this
+        # remains independent of private permissions.
+        if hasattr(self.client, "futures_open_interest_hist"):
+            data = self.client.futures_open_interest_hist(
+                symbol=futures_symbol,
+                period="1h",
+                limit=limit,
+            )
+            return data if isinstance(data, list) else []
+        resp = requests.get(
+            "https://fapi.binance.com/futures/data/openInterestHist",
+            params={"symbol": futures_symbol, "period": "1h", "limit": limit},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _open_interest_change_pct(self, futures_symbol: str) -> Optional[float]:
+        try:
+            rows = self._fetch_open_interest_hist(futures_symbol)
+            values = []
+            for row in rows[-(self.oi_lookback_hours + 1):]:
+                try:
+                    values.append(float(row.get("sumOpenInterestValue", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            return self._change_pct(values)
+        except Exception as e:
+            self.logger.warning(f"Futures: open interest check failed for {futures_symbol}: {e}")
+            return None
+
+    def _oi_filter_allows_entry(self, futures_symbol: str) -> bool:
+        """Return True when OI confirms a new short entry, or filter is disabled."""
+        if not self.oi_filter_enabled:
+            return True
+        oi_change = self._open_interest_change_pct(futures_symbol)
+        if oi_change is None:
+            self.logger.info(
+                f"Futures: skipping {futures_symbol} short — open interest unavailable"
+            )
+            return False
+        if oi_change < self.min_oi_change_pct:
+            self.logger.info(
+                f"Futures: skipping {futures_symbol} short — open interest change "
+                f"{oi_change:+.2f}% < {self.min_oi_change_pct:+.2f}%"
+            )
+            return False
+        self.logger.debug(
+            f"Futures: OI filter passed for {futures_symbol}: "
+            f"{oi_change:+.2f}% >= {self.min_oi_change_pct:+.2f}%"
+        )
+        return True
+
     def _attempt_entry(self, performance: Dict[str, float]) -> str:
         """Find the worst-performing eligible coin and short it."""
         self._last_entry_attempt = time.time()
@@ -445,9 +513,13 @@ class FuturesManager:
         symbol = best_short[0]
         perf = best_short[1]
 
+        futures_symbol = f"{symbol}{self.bridge_symbol}"
+        if not self._oi_filter_allows_entry(futures_symbol):
+            return 'idle'
+
         # Check funding rate — don't open if short funding is adverse.
         # For shorts, NEGATIVE funding means shorts pay longs.
-        funding = self._get_funding_rate(f"{symbol}{self.bridge_symbol}")
+        funding = self._get_funding_rate(futures_symbol)
         if funding is not None and funding < -self.max_funding_rate:
             self.logger.info(
                 f"Futures: skipping {symbol} short — adverse funding rate "
