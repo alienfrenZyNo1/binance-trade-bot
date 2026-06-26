@@ -1,0 +1,96 @@
+# =============================================================================
+# systemd service unit for the Binance Trading Bot — addresses GitHub #91
+# (P1-HIGH: Bot running as root + no persistent logging).
+#
+# This unit runs the bot as the unprivileged user `lunafox` (NOT root),
+# captures stdout/stderr to journald, and relies on the bot's own logging
+# (logger.py) to write rotating log files to /data/binance-bot-data/logs/.
+#
+# -----------------------------------------------------------------------------
+# PREREQUISITES — complete ALL of these BEFORE enabling the service.
+# Detailed step-by-step instructions live in:
+#   docs/deployment/systemd-migration.md   (requires Boss approval to execute)
+#
+# 1. Permission migration: the live data dir is currently root-owned.
+#      sudo chown -R lunafox:lunafox /data/binance-bot-data
+#      sudo mkdir -p /data/binance-bot-data/logs
+#      sudo chown -R lunafox:lunafox /data/binance-bot-data/logs
+#
+# 2. Data directory symlink (bot uses the relative path "data/crypto_trading.db"):
+#      rm -rf /home/lunafox/binance-trade-bot/data
+#      ln -s /data/binance-bot-data /home/lunafox/binance-trade-bot/data
+#
+# 3. Live config symlink (bot reads user.cfg from WorkingDirectory):
+#      ln -sf /data/binance-bot-data/config/user.cfg \
+#             /home/lunafox/binance-trade-bot/user.cfg
+#      ln -sf /data/binance-bot-data/config/supported_coin_list \
+#             /home/lunafox/binance-trade-bot/supported_coin_list
+#
+# 4. Environment file present at /data/binance-bot-data/config/binance-trader.env
+#    (contains API_KEY and API_SECRET_KEY; mode 0600, owner lunafox).
+#
+# 5. Stop the currently-running root process (and/or Docker container) BEFORE
+#    starting this service to avoid singleton-lock (flock) conflicts on bot.pid.
+#
+# 6. Install the unit:
+#      sudo cp deploy/binance-trade-bot.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now binance-trade-bot.service
+# =============================================================================
+
+[Unit]
+Description=Binance Trading Bot
+Documentation=https://github.com/edeng23/binance-trade-bot
+After=network-online.target
+Wants=network-online.target
+
+# Prevent a tight crash loop from hammering the exchange API.
+# NOTE: StartLimit* directives live in [Unit], not [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# --- Run as an unprivileged user, NOT root (fixes the #91 security issue) ---
+User=lunafox
+Group=lunafox
+
+# --- Resolve relative paths (user.cfg, supported_coin_list, logs/, data/) ---
+WorkingDirectory=/home/lunafox/binance-trade-bot
+
+# --- Entry point via the project virtualenv (never the system python) ---
+ExecStart=/home/lunafox/binance-trade-bot/.venv/bin/python -m binance_trade_bot
+
+# --- Environment: API credentials loaded from the secret env file ---
+# The bot's config.py reads these via os.environ.get("API_KEY" / "API_SECRET_KEY").
+EnvironmentFile=/data/binance-bot-data/config/binance-trader.env
+
+# Unbuffered output so journald sees each line immediately.
+Environment=PYTHONUNBUFFERED=1
+
+# Persistent file logging target (read by logger.py to place rotating logs).
+# Falls back to logs/ under the working directory when unset.
+Environment=LOG_DIR=/data/binance-bot-data/logs
+
+# --- Restart policy ---
+Restart=on-failure
+RestartSec=10
+
+# --- Logging: stdout/stderr captured by journald ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binance-trade-bot
+
+# --- Security hardening ---
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+# --- Graceful shutdown: the bot traps SIGINT and unwinds cleanly ---
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
