@@ -416,3 +416,19 @@ def test_portfolio_circuit_breaker_monday_resets_daily_and_weekly(monkeypatch):
     assert strategy.db.state["portfolio_daily_period"] == "2026-06-29"
     assert strategy.db.state["portfolio_weekly_start_equity"] == "90.0"
     assert strategy.db.state["portfolio_weekly_period"] == "2026-W27"
+
+
+def test_portfolio_equity_estimate_includes_futures_balance_and_unrealized_pnl():
+    strategy = make_strategy(regime=BEAR, coins=[Coin("AAA"), Coin("BBB")])
+    strategy.manager.balances["USDC"] = 10.0
+    strategy.manager.balances["AAA"] = 2.0
+    strategy.manager.prices["AAAUSDC"] = 5.0
+    strategy.futures_manager._get_futures_usdc_balance = lambda: 50.0
+    strategy.futures_manager._open_position = SimpleNamespace(
+        symbol="ADAUSDC",
+        entry_price=10.0,
+        quantity=3.0,
+    )
+    strategy.futures_manager._get_mark_price = lambda symbol: 8.0
+
+    assert strategy._estimate_spot_equity() == 76.0  # 10 spot USDC + 10 spot coin + 50 futures + 6 short P&L

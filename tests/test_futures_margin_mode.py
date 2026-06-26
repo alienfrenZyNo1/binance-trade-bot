@@ -190,3 +190,13 @@ def test_futures_entry_blocker_does_not_prevent_existing_position_management():
     assert result == "holding"
     assert called == [True]
     assert client.orders == []
+
+
+def test_futures_wallet_balance_helper_uses_raw_balance_not_max_withdraw():
+    manager, client, _logger = make_manager()
+    client.futures_account_balance = lambda: [
+        {"asset": "USDC", "balance": "100.0", "maxWithdrawAmount": "70.0"}
+    ]
+
+    assert manager._get_futures_usdc_wallet_balance() == 100.0
+    assert manager._get_futures_usdc_balance() == 70.0

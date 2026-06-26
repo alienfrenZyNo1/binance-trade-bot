@@ -933,6 +933,23 @@ class FuturesManager:
             self.logger.warning(f"Futures balance check failed: {e}")
         return 0.0
 
+    def _get_futures_usdc_wallet_balance(self) -> float:
+        """Get raw USDC wallet balance for portfolio equity estimation.
+
+        Unlike _get_futures_usdc_balance(), this intentionally does not use
+        maxWithdrawAmount because withdrawable balance can already reflect open
+        P&L/locked margin. Circuit-breaker equity adds open-position P&L
+        explicitly, so it needs the raw wallet balance to avoid double-counting.
+        """
+        try:
+            balances = self.client.futures_account_balance()
+            for bal in balances:
+                if bal.get("asset") == self.bridge_symbol:
+                    return float(bal.get("balance", 0))
+        except Exception as e:
+            self.logger.warning(f"Futures wallet balance check failed: {e}")
+        return 0.0
+
     def _get_symbol_info(self, symbol: str) -> Optional[dict]:
         """Return cached futures exchangeInfo entry for a symbol."""
         try:

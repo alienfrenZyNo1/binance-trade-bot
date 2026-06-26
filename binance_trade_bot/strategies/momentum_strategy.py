@@ -553,7 +553,7 @@ class Strategy(AutoTrader):
         self._position_peak_price = {symbol: price}
 
     def _estimate_spot_equity(self):
-        """Estimate spot-side equity in bridge currency for circuit-breaker checks."""
+        """Estimate portfolio equity in bridge currency for circuit-breaker checks."""
         equity = 0.0
         bridge_symbol = self.config.BRIDGE.symbol
         try:
@@ -570,7 +570,25 @@ class Strategy(AutoTrader):
                 if price:
                     equity += float(balance) * float(price)
         except Exception as e:
-            self.logger.debug(f"Circuit breaker equity estimate failed: {e}")
+            self.logger.debug(f"Circuit breaker spot equity estimate failed: {e}")
+
+        try:
+            futures_manager = getattr(self, "futures_manager", None)
+            if futures_manager is not None:
+                wallet_balance = (
+                    futures_manager._get_futures_usdc_wallet_balance()
+                    if hasattr(futures_manager, "_get_futures_usdc_wallet_balance")
+                    else futures_manager._get_futures_usdc_balance()
+                )
+                equity += float(wallet_balance or 0.0)
+                pos = getattr(futures_manager, "_open_position", None)
+                if pos is not None:
+                    mark = futures_manager._get_mark_price(pos.symbol)
+                    if mark:
+                        # Short unrealized P&L: positive when mark < entry.
+                        equity += (float(pos.entry_price) - float(mark)) * float(pos.quantity)
+        except Exception as e:
+            self.logger.debug(f"Circuit breaker futures equity estimate failed: {e}")
 
         return equity if equity > 0 else None
 
