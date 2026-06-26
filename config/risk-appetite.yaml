@@ -1,0 +1,25 @@
+# Risk Appetite Statement — Binance Trading Bot
+# Maintained by: The Boss (Human Approval Authority)
+# Last Updated: 2026-06-26
+
+risk_appetite:
+  max_daily_loss_pct: 3.0
+  max_total_drawdown_pct: 10.0
+  max_position_size_pct: 100.0
+  max_concurrent_positions: 1
+  allowed_instruments:
+    spot: true
+    futures: true
+    margin: false
+    leverage_max: 1
+  futures_max_margin_pct: 0.50
+  futures_margin_type: CROSS
+  futures_stop_loss_pct: 15.0
+  futures_trailing_stop_pct: 10.0
+  futures_max_funding_rate: 0.0001
+  kill_switch_command: "/kill confirm"
+  portfolio_circuit_breaker_enabled: REQUIRED
+  daily_max_drawdown_pct: 3.0
+  weekly_max_drawdown_pct: 8.0
+  circuit_breaker_cooldown_hours: 24
+  canary_mode_enabled: false
