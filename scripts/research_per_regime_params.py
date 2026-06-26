@@ -22,27 +22,163 @@ import requests
 
 BINANCE_API = "https://api.binance.com"
 BRIDGE = "USDC"
+HOUR_MS = 3_600_000
 
 COINS = [
     "SOL", "XRP", "ADA", "DOGE", "NEAR", "LINK", "AAVE",
     "AVAX", "SUI", "TIA", "ENA", "PEPE", "JUP", "INJ", "APT",
 ]
 
-PARAM_GRID = [
-    # (lookback_hours, min_edge_pct)
-    (6, 3.0),   # Fast, sensitive
-    (6, 5.0),
-    (12, 3.0),  # Medium-fast
-    (12, 5.0),
-    (12, 8.0),
-    (18, 5.0),  # Current lookback, looser
-    (18, 8.0),  # CURRENT DEFAULT
-    (18, 12.0), # Current lookback, tighter
-    (24, 5.0),  # Slow
-    (24, 8.0),
-    (24, 12.0),
-    (36, 8.0),  # Very slow
-]
+LOOKBACK_GRID = [4, 6, 8, 10, 12, 18, 24, 36, 48]
+MIN_EDGE_GRID = [3.0, 5.0, 8.0, 10.0, 12.0]
+
+
+def build_param_grid(
+    lookbacks: list[int] | None = None,
+    min_edges: list[float] | None = None,
+) -> list[tuple[int, float]]:
+    """Return the full sensitivity surface, not a hand-picked subset."""
+    lbs = lookbacks or LOOKBACK_GRID
+    edges = min_edges or MIN_EDGE_GRID
+    return [(int(lb), float(edge)) for lb in lbs for edge in edges]
+
+
+PARAM_GRID = build_param_grid()
+
+
+def _result_return_pct(value: dict[str, Any] | float | int | None) -> float:
+    if isinstance(value, dict):
+        return float(value.get("return_pct", 0.0))
+    if value is None:
+        return 0.0
+    return float(value)
+
+
+def _adjacent_param_keys(lookback_hours: int, min_edge: float) -> list[tuple[int, float]]:
+    """Return immediate grid neighbors for plateau checks."""
+    neighbors: list[tuple[int, float]] = []
+    if lookback_hours in LOOKBACK_GRID:
+        idx = LOOKBACK_GRID.index(lookback_hours)
+        for adj_idx in (idx - 1, idx + 1):
+            if 0 <= adj_idx < len(LOOKBACK_GRID):
+                neighbors.append((LOOKBACK_GRID[adj_idx], float(min_edge)))
+    if float(min_edge) in MIN_EDGE_GRID:
+        idx = MIN_EDGE_GRID.index(float(min_edge))
+        for adj_idx in (idx - 1, idx + 1):
+            if 0 <= adj_idx < len(MIN_EDGE_GRID):
+                neighbors.append((int(lookback_hours), MIN_EDGE_GRID[adj_idx]))
+    return neighbors
+
+
+def assess_parameter_plateau(
+    results: dict[tuple[int, float], dict[str, Any] | float],
+    lookback_hours: int,
+    min_edge: float,
+    *,
+    min_neighbor_ratio: float = 0.70,
+    min_robust_neighbors: int = 2,
+) -> dict[str, Any]:
+    """Assess whether a candidate is a robust plateau or a sharp spike.
+
+    A top candidate is suspect if adjacent grid cells collapse. This helper
+    requires nearby lookback/edge combinations to retain at least a fraction of
+    the candidate return before we consider it robust.
+    """
+    candidate_key = (int(lookback_hours), float(min_edge))
+    candidate_return = _result_return_pct(results.get(candidate_key))
+    neighbor_keys = [key for key in _adjacent_param_keys(*candidate_key) if key in results]
+    neighbor_returns = [_result_return_pct(results[key]) for key in neighbor_keys]
+    if candidate_return <= 0:
+        robust_neighbor_count = 0
+        threshold = 0.0
+    else:
+        threshold = candidate_return * min_neighbor_ratio
+        robust_neighbor_count = sum(1 for value in neighbor_returns if value >= threshold)
+    return {
+        "lookback_hours": candidate_key[0],
+        "min_edge": candidate_key[1],
+        "candidate_return_pct": candidate_return,
+        "neighbor_count": len(neighbor_returns),
+        "robust_neighbor_count": robust_neighbor_count,
+        "worst_neighbor_return_pct": min(neighbor_returns) if neighbor_returns else 0.0,
+        "median_neighbor_return_pct": sorted(neighbor_returns)[len(neighbor_returns) // 2] if neighbor_returns else 0.0,
+        "min_neighbor_ratio": min_neighbor_ratio,
+        "robust": robust_neighbor_count >= min_robust_neighbors,
+    }
+
+
+def build_walk_forward_windows(
+    timestamps: list[int],
+    *,
+    train_hours: int,
+    test_hours: int,
+    step_hours: int,
+    count: int,
+) -> list[dict[str, Any]]:
+    """Build newest-N non-overlapping OOS walk-forward windows."""
+    if train_hours <= 0 or test_hours <= 0 or step_hours <= 0 or count <= 0:
+        return []
+    ts = sorted({int(value) for value in timestamps})
+    if not ts:
+        return []
+    first_ts = ts[0]
+    cursor_test_end = ts[-1]
+    windows: list[dict[str, Any]] = []
+    while len(windows) < count:
+        test_end = cursor_test_end
+        test_start = test_end - (test_hours - 1) * HOUR_MS
+        train_end = test_start - HOUR_MS
+        train_start = train_end - (train_hours - 1) * HOUR_MS
+        if train_start < first_ts:
+            break
+        windows.append({
+            "train_start": train_start,
+            "train_end": train_end,
+            "test_start": test_start,
+            "test_end": test_end,
+        })
+        cursor_test_end = test_start - step_hours * HOUR_MS
+    windows = list(reversed(windows))
+    for idx, window in enumerate(windows, start=1):
+        window["label"] = f"w{idx}"
+    return windows
+
+
+def format_best_line(
+    best: tuple[int, float, dict[str, Any]],
+    plateau: dict[str, Any],
+    *,
+    min_trades: int = 15,
+) -> str:
+    """Format a best-result line that cannot hide weak sample/spike status."""
+    lookback, min_edge, result = best
+    trades = int(result.get("trades", 0))
+    verdict = "PLATEAU" if plateau.get("robust") else "SPIKE"
+    warnings = []
+    if trades < min_trades:
+        warnings.append("BELOW_MIN_TRADES")
+    if not plateau.get("robust"):
+        warnings.append("SPIKE")
+    suffix = f" [{' '.join(warnings)}]" if warnings else ""
+    return (
+        f"Best: lookback={lookback}h min_edge={min_edge}% → "
+        f"{result['return_pct']:+.1f}% trades={trades} {verdict}{suffix}"
+    )
+
+
+def select_best_result(
+    results: list[tuple[int, float, dict[str, Any]]],
+    *,
+    min_trades: int = 15,
+) -> tuple[int, float, dict[str, Any]]:
+    """Return best result after a minimum-trade reliability floor.
+
+    If no result reaches the floor, fall back to the highest-return cell while
+    making the caller's printed trade count expose the weak sample size.
+    """
+    eligible = [row for row in results if int(row[2].get("trades", 0)) >= min_trades]
+    pool = eligible or results
+    return max(pool, key=lambda x: x[2]["return_pct"])
 
 
 def fetch_klines(symbol: str, interval: str = "1h", days: int = 90) -> list[dict]:
@@ -260,21 +396,31 @@ def main():
         print("-" * 50)
 
         results = []
+        grid_results = {}
         for lookback, min_edge in PARAM_GRID:
             r = run_momentum(coin_candles, regimes, regime, lookback, min_edge)
             results.append((lookback, min_edge, r))
+            grid_results[(lookback, min_edge)] = r
             marker = " ← DEFAULT" if lookback == 18 and min_edge == 8.0 else ""
             print(
                 f"{lookback:>8}h {min_edge:>7.1f}% {r['return_pct']:>+9.1f}% "
                 f"{r['trades']:>8} {r['win_rate']:>7.0f}%{marker}"
             )
 
-        # Find best
-        best = max(results, key=lambda x: x[2]["return_pct"])
+        # Find best after minimum-trade reliability floor
+        best = select_best_result(results, min_trades=15)
+        plateau = assess_parameter_plateau(grid_results, best[0], best[1])
         default = next((r for r in results if r[0] == 18 and r[1] == 8.0), None)
         improvement = best[2]["return_pct"] - (default[2]["return_pct"] if default else 0)
 
-        print(f"\n  Best: lookback={best[0]}h min_edge={best[1]}% → {best[2]['return_pct']:+.1f}%")
+        print(f"\n  {format_best_line(best, plateau, min_trades=15)}")
+        plateau_label = "ROBUST PLATEAU" if plateau["robust"] else "SHARP/SUSPECT SPIKE"
+        print(
+            f"  Plateau check: {plateau_label} "
+            f"({plateau['robust_neighbor_count']}/{plateau['neighbor_count']} neighbors >= "
+            f"{plateau['min_neighbor_ratio']:.0%} of best; "
+            f"worst neighbor {plateau['worst_neighbor_return_pct']:+.1f}%)"
+        )
         if default and improvement > 1:
             print(f"  Improvement vs current default: +{improvement:.1f}%")
         elif default and improvement < -1:
@@ -289,34 +435,43 @@ def main():
 
     regime_best = {}
     regime_default = {}
+    regime_plateau = {}
     for regime in ["bull", "sideways", "bear"]:
         results = []
+        grid_results = {}
         for lookback, min_edge in PARAM_GRID:
             r = run_momentum(coin_candles, regimes, regime, lookback, min_edge)
             results.append((lookback, min_edge, r))
-        best = max(results, key=lambda x: x[2]["return_pct"])
+            grid_results[(lookback, min_edge)] = r
+        best = select_best_result(results, min_trades=15)
         default = next((r for r in results if r[0] == 18 and r[1] == 8.0))
         regime_best[regime] = best
         regime_default[regime] = default
+        regime_plateau[regime] = assess_parameter_plateau(grid_results, best[0], best[1])
 
-    print(f"\n{'Regime':>10} {'Default Return':>15} {'Best Return':>15} {'Best Params':>20} {'Improvement':>12}")
-    print("-" * 75)
+    print(f"\n{'Regime':>10} {'Default Return':>15} {'Best Return':>15} {'Best Params':>20} {'Verdict':>10} {'Improvement':>12}")
+    print("-" * 88)
     for regime in ["bull", "sideways", "bear"]:
         d = regime_default[regime]
         b = regime_best[regime]
         imp = b[2]["return_pct"] - d[2]["return_pct"]
         params = f"lb={b[0]}h edge={b[1]}%"
+        verdict = "✓ plateau" if regime_plateau[regime]["robust"] else "⚠ spike"
         print(
             f"{regime:>10} {d[2]['return_pct']:>+14.1f}% {b[2]['return_pct']:>+14.1f}% "
-            f"{params:>20} {imp:>+11.1f}%"
+            f"{params:>20} {verdict:>10} {imp:>+11.1f}%"
         )
 
     total_default = sum(regime_default[r][2]["return_pct"] for r in regime_default)
     total_best = sum(regime_best[r][2]["return_pct"] for r in regime_best)
-    print(f"\n{'TOTAL':>10} {total_default:>+14.1f}% {total_best:>+14.1f}% {'':>20} {total_best - total_default:>+11.1f}%")
+    print(f"\n{'TOTAL (diagnostic sum)':>24} {total_default:>+14.1f}% {total_best:>+14.1f}% {'':>20} {total_best - total_default:>+11.1f}%")
 
-    print(f"\nConclusion: Per-regime parameter tuning could improve returns by "
-          f"{total_best - total_default:+.1f}% over {days}d.")
+    print(
+        "\nConclusion: This is an in-sample sensitivity scan, not a live enablement signal. "
+        "Any best cell flagged as SHARP/SUSPECT SPIKE or supported by too few trades "
+        "must be rejected until true walk-forward OOS validation passes. "
+        "The TOTAL row is a diagnostic sum of regime slices, not a realizable compounded return."
+    )
 
 
 if __name__ == "__main__":
