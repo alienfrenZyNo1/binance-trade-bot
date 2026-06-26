@@ -1,4 +1,6 @@
 import logging.handlers
+import os
+from pathlib import Path
 
 from .notifications import NotificationHandler
 
@@ -12,14 +14,39 @@ class Logger:
         self.Logger = logging.getLogger(f"{logging_service}_logger")
         self.Logger.setLevel(logging.DEBUG)
         self.Logger.propagate = False
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        # default is "logs/crypto_trading.log"
-        fh = logging.FileHandler(f"logs/{logging_service}.log")
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(formatter)
-        self.Logger.addHandler(fh)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
 
-        # logging to console
+        # --- Rotating file handler (persistent logs, fixes GitHub #91) ---
+        # Default to a relative "logs/" dir for local/dev runs; in production the
+        # systemd unit sets LOG_DIR=/data/binance-bot-data/logs so logs survive
+        # across restarts and live alongside the database.
+        log_dir = os.environ.get("LOG_DIR") or "logs"
+        log_dir_path = Path(log_dir)
+        # The bot runs as `lunafox` under systemd; ensure the dir exists and is
+        # writable. Failures here are non-fatal: we warn and keep the console
+        # handler so the process never silently loses all output.
+        try:
+            log_dir_path.mkdir(parents=True, exist_ok=True)
+            fh = logging.handlers.RotatingFileHandler(
+                log_dir_path / f"{logging_service}.log",
+                maxBytes=10 * 1024 * 1024,  # 10 MB per file
+                backupCount=5,
+                encoding="utf-8",
+            )
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(formatter)
+            self.Logger.addHandler(fh)
+        except OSError as exc:
+            # Missing/owned-by-root dir in an unprivileged context, etc.
+            # Don't crash startup over logging; console handler still works.
+            print(
+                f"[logger] WARNING: could not create file handler in "
+                f"'{log_dir_path}' ({exc}); continuing with console only."
+            )
+
+        # logging to console (journald under systemd, terminal otherwise)
         ch = logging.StreamHandler()
         ch.setLevel(logging.INFO)
         ch.setFormatter(formatter)
