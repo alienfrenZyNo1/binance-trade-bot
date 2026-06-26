@@ -353,35 +353,67 @@ This bot is deployed via [Coolify](https://coolify.io) (self-hosted PaaS) on a V
 ```
 binance-trade-bot/
 ├── binance_trade_bot/
-│   ├── auto_trader.py              # Base trading logic + retry/FAILED fixes
-│   ├── binance_api_manager.py      # Binance API wrapper
-│   ├── config.py                   # All configuration (50+ params)
-│   ├── crypto_trading.py           # Main entry point, scheduler, reconciliation
-│   ├── database.py                 # DB layer, bot_state, regime logging, backups
-│   ├── futures_manager.py          # USDC-M futures shorting engine
-│   ├── indicators.py               # 10 technical indicators (standalone)
-│   ├── notifications.py            # Apprise notification handler
+│   ├── __init__.py
+│   ├── __main__.py                     # Entry point: python -m binance_trade_bot
+│   ├── auto_trader.py                  # Base trading logic + retry/FAILED fixes
+│   ├── binance_api_manager.py          # Binance API wrapper (spot + futures)
+│   ├── binance_stream_manager.py       # WebSocket stream management
+│   ├── backtest.py                     # Internal backtest harness
+│   ├── config.py                       # All configuration (50+ params)
+│   ├── config_validation.py            # Startup config checks + warnings
+│   ├── crypto_trading.py               # Main entry point, scheduler, reconciliation
+│   ├── database.py                     # DB layer, bot_state, regime logging, backups
+│   ├── indicators.py                   # 10 technical indicators (standalone, zero deps)
 │   ├── logger.py
+│   ├── notifications.py                # Apprise notification handler + flood guard
 │   ├── scheduler.py
+│   ├── accounting.py                   # Deposit tracking, phantom hop detection
+│   ├── canary_capital_guard.py         # Canary-mode spot/futures capital caps
+│   ├── futures_manager.py              # USDC-M futures shorting engine
+│   ├── futures_transfer_policy.py      # Futures→spot transfer dust/retry logic
+│   ├── regime_hysteresis.py            # Consecutive-cycle regime confirmation
+│   ├── regime_transition_planner.py    # Regime change planning (BEAR→spot, etc.)
+│   ├── repositories.py                 # Database repository layer
+│   ├── formatting/
+│   │   ├── __init__.py
+│   │   └── telegram_html.py            # HTML formatting helpers (tables, money, pct)
 │   ├── strategies/
-│   │   ├── momentum_strategy.py    # Momentum rotation + futures + state persistence
-│   │   ├── improved_strategy.py    # Legacy adaptive multi-regime strategy
-│   │   ├── default_strategy.py     # Original simple strategy
+│   │   ├── momentum_strategy.py        # Momentum rotation + futures + state persistence
+│   │   ├── improved_strategy.py        # Legacy adaptive multi-regime strategy
+│   │   ├── default_strategy.py         # Original simple strategy
 │   │   └── multiple_coins_strategy.py
-│   └── models/                     # SQLAlchemy models
-│       ├── bot_state.py            # Persistent key-value store for strategy state
-│       ├── market_regime_log.py    # Regime classification log
+│   └── models/                         # SQLAlchemy models
+│       ├── bot_state.py                # Persistent key-value store for strategy state
+│       ├── market_regime_log.py        # Regime classification log
+│       ├── deposit.py                  # Account top-up tracking
+│       ├── scout_history.py            # Scout cycle history
 │       └── ... (coin, pair, trade, etc.)
 ├── scripts/
-│   ├── telegram_bot.py             # Interactive Telegram companion bot (15 commands)
-│   └── monitor_coins.py            # Regime-aware autonomous coin manager (daily cron)
-├── research/                       # Quantitative research journal & backlog
-├── tests/                          # Unit tests
-├── docker-entrypoint.sh            # Persistent volume config loader
-├── user.cfg                        # Main configuration
-├── supported_coin_list             # Coin list
+│   ├── telegram_bot.py                 # Interactive Telegram companion bot (15 commands)
+│   ├── monitor_coins.py                # Regime-aware autonomous coin manager (daily cron)
+│   ├── smoke_telegram_commands.py      # Telegram command render + HTML validation tests
+│   ├── strategy_acceptance_gates.py    # Strategy promotion gate checks
+│   ├── regime_promotion_readiness.py   # Daily regime v2 readiness report
+│   ├── regime_v2_forward_replay.py     # Cached forward replay harness
+│   ├── research_regime_v2_evaluator.py # Regime v2 scorecard + route outcomes
+│   ├── research_regime_classifier.py   # Regime classification research
+│   ├── research_bull_momentum_optimizer.py
+│   ├── research_bear_futures_backtester.py
+│   └── research_sideways_chop_backtester.py
+├── tests/                              # 247 unit tests
+├── research/                           # Quantitative research journal & backlog
+│   ├── JOURNAL.md
+│   ├── EXPERIMENTS.md
+│   └── BACKLOG.md
+├── docs/                               # Developer docs & refactor plans
+├── config/                             # Apprise notification templates
+├── .github/workflows/cicd.yaml         # CI: lint + test on push
+├── docker-entrypoint.sh                # Persistent volume config loader
+├── user.cfg                            # Main configuration
+├── supported_coin_list                 # Coin list
 ├── Dockerfile
-└── requirements.txt
+├── requirements.txt
+└── dev-requirements.txt
 ```
 
 ---
