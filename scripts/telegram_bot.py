@@ -1796,14 +1796,40 @@ def cmd_kill(args=None):
     return "\n".join(lines)
 
 
+def _log_kill_event(details):
+    """Log the kill-switch event to the database (best-effort)."""
+    try:
+        conn = get_db()
+        # bot_state has key (PK), value (Text), updated_at (DateTime)
+        # Use a unique key per event so repeated kills don't collide.
+        event_key = f"kill_switch_{details.get('timestamp', datetime.utcnow().isoformat())}"
+        conn.execute(
+            """INSERT INTO bot_state (key, value, updated_at)
+               VALUES (?, ?, ?)""",
+            (event_key, json.dumps(details), datetime.utcnow()),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log.warning(f"Could not log kill event to DB: {exc}")
+
+
 def _execute_kill():
-    """Execute the kill switch: close positions + transfer back."""
+    """Execute the kill switch: close positions + transfer back.
+
+    After closing, re-queries futures positions to verify everything is flat.
+    Reports warnings for any positions that remain open.  Logs the kill event
+    with a timestamp to the database when possible.
+    """
+    kill_time = datetime.utcnow().isoformat()
     lines = ["🚨 <b>Kill Switch Executing</b>\n"]
 
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return "❌ No API keys available. Cannot execute kill switch."
 
     positions = get_futures_positions()
+
+    closed_symbols = []
 
     # Step 1: Close all positions
     if positions:
@@ -1828,6 +1854,7 @@ def _execute_kill():
                 )
                 if r.status_code == 200:
                     lines.append(f"✅ Closed {p['symbol']} {p['direction']} (qty {p['qty']})")
+                    closed_symbols.append(p["symbol"])
                 else:
                     lines.append(f"❌ Failed to close {p['symbol']}: {r.status_code} {html_escape(r.text[:100])}")
             except Exception as e:
@@ -1838,6 +1865,7 @@ def _execute_kill():
     # Step 2: Transfer all USDC back to spot
     time.sleep(2)  # Wait for positions to settle
     balance = get_futures_balance()
+    transferred_amount = 0.0
     if balance and balance["balance"] > 0.01:
         try:
             transfer_params = {
@@ -1856,6 +1884,7 @@ def _execute_kill():
             )
             if r.status_code == 200:
                 lines.append(f"✅ Transferred {money(balance['balance'])} {BRIDGE_SYMBOL} back to spot")
+                transferred_amount = balance["balance"]
             else:
                 lines.append(f"❌ Transfer failed: {r.status_code} {html_escape(r.text[:100])}")
         except Exception as e:
@@ -1863,8 +1892,43 @@ def _execute_kill():
     else:
         lines.append("✅ No USDC in futures wallet to transfer")
 
-    lines.append("\n🏁 <b>Kill switch complete.</b> Bot is in spot-only mode.")
-    lines.append("<i>The trade bot may re-enter futures on the next bear regime cycle.</i>")
+    # Step 3: Verify positions are actually flat
+    time.sleep(1)
+    remaining = get_futures_positions()
+    if remaining:
+        lines.append("\n⚠️ <b>VERIFICATION FAILED — positions still open:</b>")
+        for p in remaining:
+            lines.append(
+                f"   🔴 {p['symbol']} {p['direction']} qty={p['qty']} "
+                f"entry={p.get('entry', '?')} unPnL={p.get('pnl_usd', '?')}"
+            )
+        lines.append(
+            "\n❌ <b>Kill switch did NOT flatten all positions. "
+            "Manual intervention required.</b>"
+        )
+    else:
+        lines.append("\n✅ <b>Verification: all positions confirmed flat.</b>")
+
+    # Step 4: Log the kill event to the database
+    _log_kill_event({
+        "timestamp": kill_time,
+        "closed_symbols": closed_symbols,
+        "remaining_positions": [
+            {k: p.get(k) for k in ("symbol", "direction", "qty", "entry", "pnl_usd")}
+            for p in (remaining or [])
+        ],
+        "transferred_amount": transferred_amount,
+        "verification_passed": len(remaining or []) == 0,
+    })
+
+    # Final summary
+    all_flat = not remaining
+    if all_flat:
+        lines.append("\n🏁 <b>Kill switch complete.</b> Bot is in spot-only mode.")
+        lines.append("<i>The trade bot may re-enter futures on the next bear regime cycle.</i>")
+    else:
+        lines.append("\n🚧 <b>Kill switch incomplete.</b> Positions remain open — do NOT assume safety.")
+
     return "\n".join(lines)
 
 

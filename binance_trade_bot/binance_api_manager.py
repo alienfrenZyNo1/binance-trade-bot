@@ -7,6 +7,31 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException
 from cachetools import TTLCache, cached
 
+
+def _generate_client_order_id(side: str, coin_symbol: str, price: str, qty: str) -> str:
+    """Generate a deterministic client order ID.
+
+    Same (side, coin, price, qty) → same ID, so retries on network timeout
+    don't create duplicate orders. Binance rejects a duplicate clientOrderId
+    with error -2010, which we treat as 'order already placed'.
+
+    Format: BTM{side}{price_hash}{qty_hash}{coin} truncated to 36 chars.
+    """
+    # Deterministic hash from the order parameters that define this logical order
+    import hashlib
+    raw = f"{side}{coin_symbol}{price}{qty}"
+    digest = hashlib.md5(raw.encode()).hexdigest()[:16]  # 16 hex chars
+    base = f"BTM{side}{digest}{coin_symbol}"
+    return base[:36]  # Binance limit is 36 chars
+
+
+def _is_duplicate_order_error(e: BinanceAPIException) -> bool:
+    """Check if an exception indicates a duplicate clientOrderId (idempotency success)."""
+    if hasattr(e, 'code') and e.code == -2010:
+        return True
+    msg = str(e).lower()
+    return "duplicate order" in msg or "duplicate" in msg
+
 from .binance_stream_manager import BinanceCache, BinanceOrder, BinanceStreamManager, OrderGuard
 from .canary_capital_guard import cap_spot_trade_balance
 from .config import Config
@@ -450,6 +475,10 @@ class BinanceAPIManager:
             )
             return None
 
+        # Deterministic client order ID for idempotency — retries of the same
+        # logical order reuse the same ID so Binance rejects the duplicate.
+        client_order_id = _generate_client_order_id("BUY", origin_symbol, from_coin_price_s, order_quantity_s)
+
         # Try to buy until successful
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
@@ -462,10 +491,19 @@ class BinanceAPIManager:
                     symbol=origin_symbol + target_symbol,
                     quantity=order_quantity_s,
                     price=from_coin_price_s,
+                    newClientOrderId=client_order_id,
                 )
                 self.logger.info(order)
             except BinanceAPIException as e:
                 self.logger.info(e)
+                if _is_duplicate_order_error(e):
+                    self.logger.info(f"Order already placed (duplicate clientOrderId): {client_order_id}")
+                    # Query the existing order so downstream logic can proceed
+                    order = self.binance_client.get_order(
+                        symbol=origin_symbol + target_symbol,
+                        origClientOrderId=client_order_id,
+                    )
+                    break
                 if attempts >= max_attempts:
                     self.logger.error(
                         f"Buy failed after {max_attempts} attempts. Giving up to avoid API spam."
@@ -551,6 +589,8 @@ class BinanceAPIManager:
             return None
 
         self.logger.info(f"Balance is {origin_balance}")
+        # Deterministic client order ID for idempotency
+        client_order_id = _generate_client_order_id("SELL", origin_symbol, from_coin_price_s, order_quantity_s)
         order = None
         order_guard = self.stream_manager.acquire_order_guard()
         max_attempts = 5
@@ -563,9 +603,18 @@ class BinanceAPIManager:
                     symbol=origin_symbol + target_symbol,
                     quantity=(order_quantity_s),
                     price=from_coin_price_s,
+                    newClientOrderId=client_order_id,
                 )
             except BinanceAPIException as e:
                 self.logger.info(e)
+                if _is_duplicate_order_error(e):
+                    self.logger.info(f"Order already placed (duplicate clientOrderId): {client_order_id}")
+                    # Query the existing order so downstream logic can proceed
+                    order = self.binance_client.get_order(
+                        symbol=origin_symbol + target_symbol,
+                        origClientOrderId=client_order_id,
+                    )
+                    break
                 if attempts >= max_attempts:
                     self.logger.error(
                         f"Sell failed after {max_attempts} attempts. Giving up to avoid API spam."

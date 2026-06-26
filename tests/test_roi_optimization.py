@@ -422,10 +422,11 @@ class TestConfigValidation:
         assert c.CANARY_MAX_FUTURES_MARGIN_USDC == 0.0
 
         # Portfolio circuit breaker defaults are disabled/no-op
+        # Thresholds tightened per Boss risk appetite (was 5.0/12.0)
         assert hasattr(c, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED')
         assert c.PORTFOLIO_CIRCUIT_BREAKER_ENABLED is False
-        assert c.PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT == 5.0
-        assert c.PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT == 12.0
+        assert c.PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT == 3.0
+        assert c.PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT == 8.0
         assert c.PORTFOLIO_CIRCUIT_BREAKER_COOLDOWN_HOURS == 24.0
 
 

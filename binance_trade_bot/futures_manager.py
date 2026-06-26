@@ -570,11 +570,13 @@ class FuturesManager:
                 return 'idle'
 
             # Place MARKET short order (SELL = open short on futures)
+            futures_client_order_id = f"BTMS{coin}{int(price * 10000)}"[:36]
             order = self.client.futures_create_order(
                 symbol=futures_symbol,
                 side="SELL",
                 type="MARKET",
                 quantity=quantity,
+                newClientOrderId=futures_client_order_id,
             )
 
             order_id = order.get("orderId", 0)
@@ -621,6 +623,10 @@ class FuturesManager:
             return 'opened'
 
         except BinanceAPIException as e:
+            if hasattr(e, 'code') and e.code == -2010:
+                self.logger.info(f"Futures short already placed (duplicate clientOrderId): {futures_client_order_id}")
+                # Treat as success — order already exists from a previous attempt
+                return 'opened'
             self.logger.error(f"Futures short failed: {e}")
             return 'idle'
         except Exception as e:
