@@ -22,3 +22,4 @@ research/
 .cache/
 *.env
 config/apprise.yml.bak
+monitor_state.json
