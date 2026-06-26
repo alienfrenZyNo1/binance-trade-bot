@@ -337,3 +337,69 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         self.MOMENTUM_MIN_EDGE = float(
             os.environ.get("MOMENTUM_MIN_EDGE") or config.get(USER_CFG_SECTION, "momentum_min_edge", fallback="8.0")
         )
+
+        # Per-regime momentum parameters. Disabled by default until the
+        # sensitivity + walk-forward validation gates pass.
+        self.PER_REGIME_PARAMS_ENABLED = (
+            os.environ.get("PER_REGIME_PARAMS_ENABLED")
+            or config.get(USER_CFG_SECTION, "per_regime_params_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+        self.BULL_MOMENTUM_LOOKBACK_HOURS = int(
+            os.environ.get("BULL_MOMENTUM_LOOKBACK_HOURS")
+            or config.get(USER_CFG_SECTION, "bull_momentum_lookback_hours", fallback="36")
+        )
+        self.BULL_MOMENTUM_MIN_EDGE = float(
+            os.environ.get("BULL_MOMENTUM_MIN_EDGE")
+            or config.get(USER_CFG_SECTION, "bull_momentum_min_edge", fallback="8.0")
+        )
+        self.SIDEWAYS_MOMENTUM_LOOKBACK_HOURS = int(
+            os.environ.get("SIDEWAYS_MOMENTUM_LOOKBACK_HOURS")
+            or config.get(USER_CFG_SECTION, "sideways_momentum_lookback_hours", fallback="18")
+        )
+        self.SIDEWAYS_MOMENTUM_MIN_EDGE = float(
+            os.environ.get("SIDEWAYS_MOMENTUM_MIN_EDGE")
+            or config.get(USER_CFG_SECTION, "sideways_momentum_min_edge", fallback="8.0")
+        )
+        self.BEAR_MOMENTUM_LOOKBACK_HOURS = int(
+            os.environ.get("BEAR_MOMENTUM_LOOKBACK_HOURS")
+            or config.get(USER_CFG_SECTION, "bear_momentum_lookback_hours", fallback="6")
+        )
+        self.BEAR_MOMENTUM_MIN_EDGE = float(
+            os.environ.get("BEAR_MOMENTUM_MIN_EDGE")
+            or config.get(USER_CFG_SECTION, "bear_momentum_min_edge", fallback="5.0")
+        )
+        self.STORMY_MOMENTUM_LOOKBACK_HOURS = int(
+            os.environ.get("STORMY_MOMENTUM_LOOKBACK_HOURS")
+            or config.get(USER_CFG_SECTION, "stormy_momentum_lookback_hours", fallback="6")
+        )
+        self.STORMY_MOMENTUM_MIN_EDGE = float(
+            os.environ.get("STORMY_MOMENTUM_MIN_EDGE")
+            or config.get(USER_CFG_SECTION, "stormy_momentum_min_edge", fallback="10.0")
+        )
+
+        # Time-based rotation confirmation. Cycle count alone can confirm a
+        # multi-hour signal after only a few seconds when SCOUT_SLEEP_TIME=1.
+        self.CONFIRMATION_TIME_ENABLED = (
+            os.environ.get("CONFIRMATION_TIME_ENABLED")
+            or config.get(USER_CFG_SECTION, "confirmation_time_enabled", fallback="no")
+        ).lower() in ("yes", "true", "1", "on")
+        self.CONFIRMATION_MIN_SECONDS = int(
+            os.environ.get("CONFIRMATION_MIN_SECONDS")
+            or config.get(USER_CFG_SECTION, "confirmation_min_seconds", fallback="180")
+        )
+        self.BULL_CONFIRMATION_MIN_SECONDS = int(
+            os.environ.get("BULL_CONFIRMATION_MIN_SECONDS")
+            or config.get(USER_CFG_SECTION, "bull_confirmation_min_seconds", fallback="300")
+        )
+        self.SIDEWAYS_CONFIRMATION_MIN_SECONDS = int(
+            os.environ.get("SIDEWAYS_CONFIRMATION_MIN_SECONDS")
+            or config.get(USER_CFG_SECTION, "sideways_confirmation_min_seconds", fallback="180")
+        )
+        self.BEAR_CONFIRMATION_MIN_SECONDS = int(
+            os.environ.get("BEAR_CONFIRMATION_MIN_SECONDS")
+            or config.get(USER_CFG_SECTION, "bear_confirmation_min_seconds", fallback="60")
+        )
+        self.STORMY_CONFIRMATION_MIN_SECONDS = int(
+            os.environ.get("STORMY_CONFIRMATION_MIN_SECONDS")
+            or config.get(USER_CFG_SECTION, "stormy_confirmation_min_seconds", fallback="300")
+        )

@@ -112,7 +112,7 @@ class Strategy(AutoTrader):
                 )
 
         # Confirmation delay — require edge to persist N cycles before trading
-        self._pending_rotation = None  # (from_coin, to_coin, edge, first_seen_time)
+        self._pending_rotation = None  # (from_coin, to_coin, edge, count, first_seen_time)
         self._confirmation_cycles = getattr(self.config, 'CONFIRMATION_CYCLES', 3)
 
         if self._last_trade_time > 0:
@@ -126,6 +126,7 @@ class Strategy(AutoTrader):
         # Performance cache (avoid hitting API every cycle)
         self._perf_cache = {}
         self._perf_cache_time = 0
+        self._perf_cache_key = None
         self._cache_ttl = getattr(self.config, 'INDICATOR_CACHE_TTL', 300)
 
         # Futures manager for bear regime
@@ -331,13 +332,49 @@ class Strategy(AutoTrader):
                         f"internal futures→spot transfer of {futures_bal:.2f} {self.config.BRIDGE.symbol}"
                     )
 
+    def _get_regime_momentum_lookback(self):
+        """Return momentum lookback hours for the active regime."""
+        if not getattr(self.config, 'PER_REGIME_PARAMS_ENABLED', False):
+            return getattr(self.config, 'MOMENTUM_LOOKBACK_HOURS', 18)
+        if self._market_regime == BULL:
+            return getattr(self.config, 'BULL_MOMENTUM_LOOKBACK_HOURS', 36)
+        if self._market_regime == BEAR:
+            return getattr(self.config, 'BEAR_MOMENTUM_LOOKBACK_HOURS', 6)
+        if self._market_regime == STORMY:
+            return getattr(self.config, 'STORMY_MOMENTUM_LOOKBACK_HOURS', 6)
+        return getattr(self.config, 'SIDEWAYS_MOMENTUM_LOOKBACK_HOURS', 18)
+
+    def _get_regime_momentum_min_edge(self):
+        """Return minimum outperformance edge for the active regime."""
+        if not getattr(self.config, 'PER_REGIME_PARAMS_ENABLED', False):
+            return getattr(self.config, 'MOMENTUM_MIN_EDGE', 8.0)
+        if self._market_regime == BULL:
+            return getattr(self.config, 'BULL_MOMENTUM_MIN_EDGE', 8.0)
+        if self._market_regime == BEAR:
+            return getattr(self.config, 'BEAR_MOMENTUM_MIN_EDGE', 5.0)
+        if self._market_regime == STORMY:
+            return getattr(self.config, 'STORMY_MOMENTUM_MIN_EDGE', 10.0)
+        return getattr(self.config, 'SIDEWAYS_MOMENTUM_MIN_EDGE', 8.0)
+
+    def _get_confirmation_min_seconds(self):
+        """Return time-based rotation confirmation requirement by regime."""
+        if not getattr(self.config, 'CONFIRMATION_TIME_ENABLED', False):
+            return 0
+        if self._market_regime == BULL:
+            return getattr(self.config, 'BULL_CONFIRMATION_MIN_SECONDS', 300)
+        if self._market_regime == BEAR:
+            return getattr(self.config, 'BEAR_CONFIRMATION_MIN_SECONDS', 60)
+        if self._market_regime == STORMY:
+            return getattr(self.config, 'STORMY_CONFIRMATION_MIN_SECONDS', 300)
+        return getattr(self.config, 'SIDEWAYS_CONFIRMATION_MIN_SECONDS', getattr(self.config, 'CONFIRMATION_MIN_SECONDS', 180))
+
     # ─────────────────────────────────────────────────────────────────────────
     #  PERFORMANCE SCORING
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_coin_performance(self, coin_symbol):
         """Get N-hour price performance for a coin. Returns % change or None."""
-        lookback_bars = getattr(self.config, 'MOMENTUM_LOOKBACK_HOURS', 18)
+        lookback_bars = self._get_regime_momentum_lookback()
         try:
             klines = self.manager.binance_client.get_klines(
                 symbol=f"{coin_symbol}{self.config.BRIDGE.symbol}",
@@ -359,7 +396,14 @@ class Strategy(AutoTrader):
     def _get_all_performance(self):
         """Get performance for all enabled coins, with caching."""
         now = time.time()
-        if self._perf_cache and (now - self._perf_cache_time) < self._cache_ttl:
+        lookback = self._get_regime_momentum_lookback()
+        regime_key = self._market_regime if getattr(self.config, 'PER_REGIME_PARAMS_ENABLED', False) else "global"
+        cache_key = (regime_key, lookback)
+        if (
+            self._perf_cache
+            and self._perf_cache_key == cache_key
+            and (now - self._perf_cache_time) < self._cache_ttl
+        ):
             return self._perf_cache
 
         perf = {}
@@ -369,6 +413,7 @@ class Strategy(AutoTrader):
                 perf[coin.symbol] = p
 
         self._perf_cache = perf
+        self._perf_cache_key = cache_key
         self._perf_cache_time = now
         return perf
 
@@ -618,7 +663,7 @@ class Strategy(AutoTrader):
             return
 
         cur_perf = performance[current_coin.symbol]
-        min_edge = getattr(self.config, 'MOMENTUM_MIN_EDGE', 8.0)
+        min_edge = self._get_regime_momentum_min_edge()
 
         # Find coins significantly outperforming current holding
         best_coin = None
@@ -658,22 +703,29 @@ class Strategy(AutoTrader):
             # across N consecutive scout cycles before executing. This filters
             # out noise-driven false signals from intrabar price spikes.
             pending = self._pending_rotation
+            now = time.time()
+            min_confirm_seconds = self._get_confirmation_min_seconds()
             if (pending and pending[0] == current_coin.symbol
                     and pending[1] == best_coin.symbol):
-                # Same signal as last cycle — increment confirmation count
+                # Same signal as last cycle — increment confirmation count while
+                # preserving first-seen time across cycles.
                 count = pending[3] + 1
+                first_seen = pending[4] if len(pending) > 4 else now
+                elapsed = now - first_seen
                 self._pending_rotation = (
-                    current_coin.symbol, best_coin.symbol, best_edge, count
+                    current_coin.symbol, best_coin.symbol, best_edge, count, first_seen
                 )
-                if count < self._confirmation_cycles:
+                if count < self._confirmation_cycles or elapsed < min_confirm_seconds:
                     self.logger.info(
-                        f"Rotation signal confirmed ({count}/{self._confirmation_cycles}): "
+                        f"Rotation signal confirmed ({count}/{self._confirmation_cycles}, "
+                        f"{elapsed:.0f}/{min_confirm_seconds}s): "
                         f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%)"
                     )
                     return
                 # Confirmed — execute
                 self.logger.info(
-                    f"Momentum rotation CONFIRMED ({self._confirmation_cycles}/{self._confirmation_cycles}): "
+                    f"Momentum rotation CONFIRMED ({count}/{self._confirmation_cycles}, "
+                    f"{elapsed:.0f}/{min_confirm_seconds}s): "
                     f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%, "
                     f"{current_coin}: {cur_perf:+.2f}%, "
                     f"{best_coin}: {performance[best_coin.symbol]:+.2f}%, "
@@ -682,10 +734,11 @@ class Strategy(AutoTrader):
             else:
                 # New signal — start confirmation countdown
                 self._pending_rotation = (
-                    current_coin.symbol, best_coin.symbol, best_edge, 1
+                    current_coin.symbol, best_coin.symbol, best_edge, 1, now
                 )
                 self.logger.info(
-                    f"Rotation signal detected (1/{self._confirmation_cycles}): "
+                    f"Rotation signal detected (1/{self._confirmation_cycles}, "
+                    f"0/{min_confirm_seconds}s): "
                     f"{current_coin} → {best_coin} (edge: {best_edge:+.2f}%)"
                 )
                 return
