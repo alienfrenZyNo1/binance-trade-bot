@@ -1,0 +1,1693 @@
+{
+  "symbols": [
+    "BTCUSDC",
+    "ETHUSDC",
+    "SOLUSDC",
+    "XRPUSDC",
+    "BNBUSDC",
+    "AAVEUSDC",
+    "ZECUSDC",
+    "DOGEUSDC",
+    "NEARUSDC",
+    "AVAXUSDC",
+    "SUIUSDC",
+    "WLDUSDC",
+    "WIFUSDC",
+    "1000PEPEUSDC",
+    "ADAUSDC"
+  ],
+  "config": {
+    "backtest_days": 180,
+    "initial_capital": 10000.0,
+    "fee_rate": 0.0004,
+    "slippage": 0.0003,
+    "funding_rate": 0.0001
+  },
+  "results": {
+    "BTCUSDC": {
+      "buy_hold": {
+        "total_return_pct": -30.55539291491446,
+        "annualized_return_pct": -52.26864435035342,
+        "sharpe_ratio": -1.4593632550997013,
+        "max_drawdown_pct": 40.397637287100764
+      },
+      "regime": {
+        "trending": 14.282407407407408,
+        "ranging": 81.0300925925926,
+        "volatile": 15.625
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -10.778822548353872,
+          "annualized_return_pct": -20.65185925241021,
+          "sharpe_ratio": -0.5512693384877781,
+          "max_drawdown_pct": 15.153420431886255,
+          "profit_factor": 0.49107072423237685,
+          "win_rate": 30.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 157.5,
+          "final_equity": 8922.117745164613,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -31.20138202881546,
+          "annualized_return_pct": -53.16489510947847,
+          "sharpe_ratio": -0.14762980852964983,
+          "max_drawdown_pct": 39.51076727042094,
+          "profit_factor": 0.4314108277153849,
+          "win_rate": 30.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 157.5,
+          "final_equity": 6879.861797118454,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -49.99020043281897,
+          "annualized_return_pct": -75.4749809377384,
+          "sharpe_ratio": 0.16542776195683254,
+          "max_drawdown_pct": 57.988435724566365,
+          "profit_factor": 0.37879242447302114,
+          "win_rate": 30.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 157.5,
+          "final_equity": 5000.979956718103,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": 18.78597643524205,
+          "annualized_return_pct": 41.78890764736478,
+          "sharpe_ratio": 1.2612539421155478,
+          "max_drawdown_pct": 61.03797667348362,
+          "profit_factor": 1.1164036357036533,
+          "win_rate": 28.57142857142857,
+          "num_trades": 21,
+          "avg_trade_duration_hours": 192.61904761904762,
+          "final_equity": 11878.597643524205,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -29.341521233036204,
+          "annualized_return_pct": -50.56120606216579,
+          "sharpe_ratio": -0.9297348019167823,
+          "max_drawdown_pct": 35.38977976822031,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 403.0,
+          "final_equity": 7065.847876696379,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -27.164135524701017,
+          "annualized_return_pct": -47.42222701399458,
+          "sharpe_ratio": 0.027646302195337046,
+          "max_drawdown_pct": 59.87919687369752,
+          "profit_factor": 0.08506575562983586,
+          "win_rate": 65.45454545454545,
+          "num_trades": 55,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 7283.586447529899,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -75.4812116037205,
+          "annualized_return_pct": -94.22232619392182,
+          "sharpe_ratio": -1.1338185423384748,
+          "max_drawdown_pct": 83.26313814636059,
+          "profit_factor": 0.33818823630592254,
+          "win_rate": 48.837209302325576,
+          "num_trades": 43,
+          "avg_trade_duration_hours": 21.46511627906977,
+          "final_equity": 2451.8788396279497,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -28.204269848147412,
+          "annualized_return_pct": -48.93393301777081,
+          "sharpe_ratio": 0.013301362486425307,
+          "max_drawdown_pct": 50.5824869886102,
+          "profit_factor": 0.7383120219708058,
+          "win_rate": 40.298507462686565,
+          "num_trades": 67,
+          "avg_trade_duration_hours": 92.19402985074628,
+          "final_equity": 7179.573015185259,
+          "meets_target": false
+        }
+      }
+    },
+    "ETHUSDC": {
+      "buy_hold": {
+        "total_return_pct": -45.587642254194996,
+        "annualized_return_pct": -70.89756926939208,
+        "sharpe_ratio": -1.7765955600023107,
+        "max_drawdown_pct": 55.0186566060943
+      },
+      "regime": {
+        "trending": 25.972222222222225,
+        "ranging": 69.22916666666666,
+        "volatile": 15.99537037037037
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -28.57146155262281,
+          "annualized_return_pct": -49.46226166645844,
+          "sharpe_ratio": -1.1221412872526924,
+          "max_drawdown_pct": 29.570095113455487,
+          "profit_factor": 0.2910289279630598,
+          "win_rate": 20.0,
+          "num_trades": 15,
+          "avg_trade_duration_hours": 98.06666666666666,
+          "final_equity": 7142.853844737719,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -66.80935413034449,
+          "annualized_return_pct": -89.32171755575087,
+          "sharpe_ratio": -0.6339259492805824,
+          "max_drawdown_pct": 68.10062240947715,
+          "profit_factor": 0.25109763337057256,
+          "win_rate": 20.0,
+          "num_trades": 15,
+          "avg_trade_duration_hours": 98.06666666666666,
+          "final_equity": 3319.064586965551,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -87.36905706757516,
+          "annualized_return_pct": -98.4951626872443,
+          "sharpe_ratio": -0.21695263113936025,
+          "max_drawdown_pct": 88.08743036951915,
+          "profit_factor": 0.20681908114478617,
+          "win_rate": 20.0,
+          "num_trades": 15,
+          "avg_trade_duration_hours": 98.06666666666666,
+          "final_equity": 1263.0942932424832,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -49.67056379352749,
+          "annualized_return_pct": -75.15600601576115,
+          "sharpe_ratio": 1.0702276310772283,
+          "max_drawdown_pct": 86.12074544764387,
+          "profit_factor": 0.8088189710665802,
+          "win_rate": 19.35483870967742,
+          "num_trades": 31,
+          "avg_trade_duration_hours": 130.7741935483871,
+          "final_equity": 5032.943620647251,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -25.892375116405198,
+          "annualized_return_pct": -45.54349438840038,
+          "sharpe_ratio": -0.7199214499872048,
+          "max_drawdown_pct": 32.3680961637619,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 215.33333333333334,
+          "final_equity": 7410.762488359481,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -40.48088330478977,
+          "annualized_return_pct": -65.0901797012783,
+          "sharpe_ratio": -0.2653379802432987,
+          "max_drawdown_pct": 67.07589123605533,
+          "profit_factor": 0.07538766927008063,
+          "win_rate": 68.85245901639344,
+          "num_trades": 61,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 5951.911669521022,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -84.22632032481272,
+          "annualized_return_pct": -97.63838105529157,
+          "sharpe_ratio": -0.987046741034141,
+          "max_drawdown_pct": 88.76870254923661,
+          "profit_factor": 0.26483249690665717,
+          "win_rate": 46.0,
+          "num_trades": 50,
+          "avg_trade_duration_hours": 19.58,
+          "final_equity": 1577.3679675187275,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -53.22716118540125,
+          "annualized_return_pct": -78.58758362257375,
+          "sharpe_ratio": -0.3927230796094738,
+          "max_drawdown_pct": 66.64788441152596,
+          "profit_factor": 0.5976788508347866,
+          "win_rate": 34.523809523809526,
+          "num_trades": 84,
+          "avg_trade_duration_hours": 67.60714285714286,
+          "final_equity": 4677.2838814598745,
+          "meets_target": false
+        }
+      }
+    },
+    "SOLUSDC": {
+      "buy_hold": {
+        "total_return_pct": -41.691695754525526,
+        "annualized_return_pct": -66.51553657934028,
+        "sharpe_ratio": -1.3773397073989726,
+        "max_drawdown_pct": 58.77686622821887
+      },
+      "regime": {
+        "trending": 30.60185185185185,
+        "ranging": 64.9050925925926,
+        "volatile": 14.976851851851853
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -32.655783052272746,
+          "annualized_return_pct": -55.15122701015607,
+          "sharpe_ratio": -1.293543745863549,
+          "max_drawdown_pct": 33.40985231989544,
+          "profit_factor": 0.10265814361046283,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 122.08333333333333,
+          "final_equity": 6734.4216947727255,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -72.73904336641044,
+          "annualized_return_pct": -92.83629397895096,
+          "sharpe_ratio": -0.7870625166565856,
+          "max_drawdown_pct": 73.6812109924733,
+          "profit_factor": 0.06313157802684209,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 122.08333333333333,
+          "final_equity": 2726.0956633589567,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -91.7646312323329,
+          "annualized_return_pct": -99.3679708657691,
+          "sharpe_ratio": -0.3449652907420407,
+          "max_drawdown_pct": 92.23712133468925,
+          "profit_factor": 0.029472403142083433,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 122.08333333333333,
+          "final_equity": 823.53687676671,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -68.16446897768466,
+          "annualized_return_pct": -90.18742891615452,
+          "sharpe_ratio": 0.9349083596592637,
+          "max_drawdown_pct": 90.34955847657446,
+          "profit_factor": 0.7223472141413056,
+          "win_rate": 20.833333333333336,
+          "num_trades": 24,
+          "avg_trade_duration_hours": 159.66666666666666,
+          "final_equity": 3183.553102231534,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -47.285379926498486,
+          "annualized_return_pct": -72.70975270372166,
+          "sharpe_ratio": -1.7306685197574965,
+          "max_drawdown_pct": 50.284056566036995,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 4,
+          "avg_trade_duration_hours": 147.5,
+          "final_equity": 5271.462007350152,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -37.395527796592496,
+          "annualized_return_pct": -61.32187864046761,
+          "sharpe_ratio": -0.16046694818969104,
+          "max_drawdown_pct": 64.91213514381543,
+          "profit_factor": 0.09049837734182772,
+          "win_rate": 69.35483870967742,
+          "num_trades": 62,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 6260.44722034075,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -86.08877653599059,
+          "annualized_return_pct": -98.16965458790413,
+          "sharpe_ratio": -0.7544327651863204,
+          "max_drawdown_pct": 90.14371154230312,
+          "profit_factor": 0.24082835971022756,
+          "win_rate": 45.83333333333333,
+          "num_trades": 48,
+          "avg_trade_duration_hours": 19.645833333333332,
+          "final_equity": 1391.1223464009413,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -67.18939108503417,
+          "annualized_return_pct": -89.56824686545366,
+          "sharpe_ratio": -0.8214254184113899,
+          "max_drawdown_pct": 76.26225202061786,
+          "profit_factor": 0.5025364147070907,
+          "win_rate": 35.526315789473685,
+          "num_trades": 76,
+          "avg_trade_duration_hours": 70.59210526315789,
+          "final_equity": 3281.0608914965824,
+          "meets_target": false
+        }
+      }
+    },
+    "XRPUSDC": {
+      "buy_hold": {
+        "total_return_pct": -42.72643603486546,
+        "annualized_return_pct": -67.70975928818442,
+        "sharpe_ratio": -1.5887977759679057,
+        "max_drawdown_pct": 57.66771159874609
+      },
+      "regime": {
+        "trending": 21.36574074074074,
+        "ranging": 73.24537037037038,
+        "volatile": 17.962962962962965
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -27.870473840810195,
+          "annualized_return_pct": -48.45123809705356,
+          "sharpe_ratio": -1.3052489688877842,
+          "max_drawdown_pct": 29.285417469833995,
+          "profit_factor": 0.040115008728977955,
+          "win_rate": 10.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 129.6,
+          "final_equity": 7212.95261591898,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -63.976949908033355,
+          "annualized_return_pct": -87.3923086302702,
+          "sharpe_ratio": -0.8224800767832045,
+          "max_drawdown_pct": 66.06170023267673,
+          "profit_factor": 0.029504545261714317,
+          "win_rate": 10.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 129.6,
+          "final_equity": 3602.305009196664,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -83.55185603309351,
+          "annualized_return_pct": -97.4290641977382,
+          "sharpe_ratio": -0.41103135788388523,
+          "max_drawdown_pct": 85.08573047727694,
+          "profit_factor": 0.019800382835268773,
+          "win_rate": 10.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 129.6,
+          "final_equity": 1644.8143966906484,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -24.0989911343639,
+          "annualized_return_pct": -42.83734183296214,
+          "sharpe_ratio": 1.217007510104736,
+          "max_drawdown_pct": 75.78341492654985,
+          "profit_factor": 0.8454979085255258,
+          "win_rate": 23.809523809523807,
+          "num_trades": 21,
+          "avg_trade_duration_hours": 191.38095238095238,
+          "final_equity": 7590.1008865636095,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -24.640992931702066,
+          "annualized_return_pct": -43.66221892270854,
+          "sharpe_ratio": -0.8359041452858944,
+          "max_drawdown_pct": 27.231538855845038,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 185.0,
+          "final_equity": 7535.900706829793,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -41.448112183351114,
+          "annualized_return_pct": -66.23121251179549,
+          "sharpe_ratio": -0.28697201160047164,
+          "max_drawdown_pct": 66.62050418298135,
+          "profit_factor": 0.06604950168412742,
+          "win_rate": 54.761904761904766,
+          "num_trades": 42,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 5855.188781664889,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -55.309390447308736,
+          "annualized_return_pct": -80.47674989562401,
+          "sharpe_ratio": -0.04777855208808785,
+          "max_drawdown_pct": 70.9369939555617,
+          "profit_factor": 0.6624025525762735,
+          "win_rate": 60.0,
+          "num_trades": 50,
+          "avg_trade_duration_hours": 16.12,
+          "final_equity": 4469.060955269127,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -34.57728350075728,
+          "annualized_return_pct": -57.70860803461899,
+          "sharpe_ratio": -0.2768527128276537,
+          "max_drawdown_pct": 51.743707038997464,
+          "profit_factor": 0.695776315127846,
+          "win_rate": 47.2972972972973,
+          "num_trades": 74,
+          "avg_trade_duration_hours": 72.70270270270271,
+          "final_equity": 6542.2716499242715,
+          "meets_target": false
+        }
+      }
+    },
+    "BNBUSDC": {
+      "buy_hold": {
+        "total_return_pct": -34.02702829524659,
+        "annualized_return_pct": -56.98403439110231,
+        "sharpe_ratio": -1.7118819172901794,
+        "max_drawdown_pct": 43.317533561436
+      },
+      "regime": {
+        "trending": 11.435185185185185,
+        "ranging": 83.21759259259258,
+        "volatile": 17.824074074074073
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -24.12212543410739,
+          "annualized_return_pct": -42.87267430856308,
+          "sharpe_ratio": -1.3573959124088382,
+          "max_drawdown_pct": 24.447195670847076,
+          "profit_factor": 0.13448552782301337,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 125.91666666666667,
+          "final_equity": 7587.787456589261,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -57.55925545032172,
+          "annualized_return_pct": -82.41866412883995,
+          "sharpe_ratio": -0.9183456188844275,
+          "max_drawdown_pct": 58.15791817377358,
+          "profit_factor": 0.11147957219607404,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 125.91666666666667,
+          "final_equity": 4244.0744549678275,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -77.88580173465162,
+          "annualized_return_pct": -95.3136886158567,
+          "sharpe_ratio": -0.5669445193335735,
+          "max_drawdown_pct": 78.41069778290212,
+          "profit_factor": 0.08774965574943278,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 125.91666666666667,
+          "final_equity": 2211.4198265348377,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -38.53826712727418,
+          "annualized_return_pct": -62.74039365281989,
+          "sharpe_ratio": 0.6900170100681801,
+          "max_drawdown_pct": 76.61040686490254,
+          "profit_factor": 0.7857537326283381,
+          "win_rate": 28.000000000000004,
+          "num_trades": 25,
+          "avg_trade_duration_hours": 151.96,
+          "final_equity": 6146.173287272582,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -3.409594697658702,
+          "annualized_return_pct": -6.7943149129812035,
+          "sharpe_ratio": 0.19271427964172475,
+          "max_drawdown_pct": 17.455239722923164,
+          "profit_factor": 0.6780767559827037,
+          "win_rate": 50.0,
+          "num_trades": 2,
+          "avg_trade_duration_hours": 858.5,
+          "final_equity": 9659.04053023413,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -30.391331150825263,
+          "annualized_return_pct": -52.039652138045646,
+          "sharpe_ratio": -0.059938844395762844,
+          "max_drawdown_pct": 61.636129752299155,
+          "profit_factor": 0.06826245736307258,
+          "win_rate": 63.46153846153846,
+          "num_trades": 52,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 6960.866884917474,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -69.57144111460352,
+          "annualized_return_pct": -91.04703526875971,
+          "sharpe_ratio": -0.8986541698392974,
+          "max_drawdown_pct": 78.72835002436132,
+          "profit_factor": 0.3986872778191719,
+          "win_rate": 55.55555555555556,
+          "num_trades": 45,
+          "avg_trade_duration_hours": 19.466666666666665,
+          "final_equity": 3042.855888539648,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -37.18675264131976,
+          "annualized_return_pct": -61.05981684004033,
+          "sharpe_ratio": -0.42248018620389105,
+          "max_drawdown_pct": 49.382506151605305,
+          "profit_factor": 0.6338822949831903,
+          "win_rate": 45.83333333333333,
+          "num_trades": 72,
+          "avg_trade_duration_hours": 88.77777777777777,
+          "final_equity": 6281.324735868025,
+          "meets_target": false
+        }
+      }
+    },
+    "AAVEUSDC": {
+      "buy_hold": {
+        "total_return_pct": -36.62066644227533,
+        "annualized_return_pct": -60.344731308801784,
+        "sharpe_ratio": -0.7865705942506375,
+        "max_drawdown_pct": 67.30123180291154
+      },
+      "regime": {
+        "trending": 42.03703703703704,
+        "ranging": 54.33796296296296,
+        "volatile": 12.083333333333334
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -19.80533180808618,
+          "annualized_return_pct": -36.087859828087765,
+          "sharpe_ratio": -0.18610389688276832,
+          "max_drawdown_pct": 43.240490327542844,
+          "profit_factor": 0.5253249481410254,
+          "win_rate": 14.285714285714285,
+          "num_trades": 14,
+          "avg_trade_duration_hours": 77.28571428571429,
+          "final_equity": 8019.466819191382,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -58.68030391484849,
+          "annualized_return_pct": -83.34779610362968,
+          "sharpe_ratio": 0.46714801181725363,
+          "max_drawdown_pct": 83.38516279185907,
+          "profit_factor": 0.2781745452039309,
+          "win_rate": 14.285714285714285,
+          "num_trades": 14,
+          "avg_trade_duration_hours": 77.28571428571429,
+          "final_equity": 4131.969608515151,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -84.33776128736011,
+          "annualized_return_pct": -97.67209909499532,
+          "sharpe_ratio": 1.0920556984239327,
+          "max_drawdown_pct": 96.0575911207241,
+          "profit_factor": 0.11324610706378008,
+          "win_rate": 14.285714285714285,
+          "num_trades": 14,
+          "avg_trade_duration_hours": 77.28571428571429,
+          "final_equity": 1566.22387126399,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -31.804352330438647,
+          "annualized_return_pct": -53.99369073504532,
+          "sharpe_ratio": 1.6903958012943936,
+          "max_drawdown_pct": 92.57371191289769,
+          "profit_factor": 0.8316571506852661,
+          "win_rate": 21.428571428571427,
+          "num_trades": 28,
+          "avg_trade_duration_hours": 136.71428571428572,
+          "final_equity": 6819.564766956136,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -31.145987071685077,
+          "annualized_return_pct": -53.08837727681487,
+          "sharpe_ratio": -0.7955973079278449,
+          "max_drawdown_pct": 38.135042657546784,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 4,
+          "avg_trade_duration_hours": 57.0,
+          "final_equity": 6885.401292831492,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -31.99386702422393,
+          "annualized_return_pct": -54.252633394593516,
+          "sharpe_ratio": -0.05673908665766639,
+          "max_drawdown_pct": 62.24759760627684,
+          "profit_factor": 0.12415718965441211,
+          "win_rate": 70.3125,
+          "num_trades": 64,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 6800.613297577606,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -83.21792880229525,
+          "annualized_return_pct": -97.32209531914773,
+          "sharpe_ratio": -0.609765608861675,
+          "max_drawdown_pct": 89.6244633938143,
+          "profit_factor": 0.39646107032490063,
+          "win_rate": 51.92307692307693,
+          "num_trades": 52,
+          "avg_trade_duration_hours": 15.326923076923077,
+          "final_equity": 1678.2071197704754,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -48.55357203076264,
+          "annualized_return_pct": -74.02491228536007,
+          "sharpe_ratio": -0.2218001169848651,
+          "max_drawdown_pct": 66.54932875342973,
+          "profit_factor": 0.5887003693265741,
+          "win_rate": 39.285714285714285,
+          "num_trades": 84,
+          "avg_trade_duration_hours": 57.773809523809526,
+          "final_equity": 5144.642796923737,
+          "meets_target": false
+        }
+      }
+    },
+    "ZECUSDC": {
+      "buy_hold": {
+        "total_return_pct": -25.863557065466892,
+        "annualized_return_pct": -45.50053489012855,
+        "sharpe_ratio": 0.11388806091886035,
+        "max_drawdown_pct": 64.44770911762005
+      },
+      "regime": {
+        "trending": 61.36574074074074,
+        "ranging": 35.25231481481482,
+        "volatile": 11.273148148148149
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": 17.085819164526296,
+          "annualized_return_pct": 37.70308105212541,
+          "sharpe_ratio": 0.8252584526617261,
+          "max_drawdown_pct": 30.924125978532473,
+          "profit_factor": 1.2630173814039243,
+          "win_rate": 33.33333333333333,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 133.66666666666666,
+          "final_equity": 11708.58191645263,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -21.554467416768265,
+          "annualized_return_pct": -38.88352878938986,
+          "sharpe_ratio": 1.5744629912334074,
+          "max_drawdown_pct": 70.98967281979773,
+          "profit_factor": 0.9031268980700696,
+          "win_rate": 33.33333333333333,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 133.66666666666666,
+          "final_equity": 7844.553258323173,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -77.89069954439249,
+          "annualized_return_pct": -95.31579352474184,
+          "sharpe_ratio": 2.2898464808510477,
+          "max_drawdown_pct": 91.77243913350878,
+          "profit_factor": 0.7136342578067959,
+          "win_rate": 33.33333333333333,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 133.66666666666666,
+          "final_equity": 2210.9300455607518,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -11.283935126574217,
+          "annualized_return_pct": -21.56033228844223,
+          "sharpe_ratio": 2.5992559974482665,
+          "max_drawdown_pct": 82.43473147729665,
+          "profit_factor": 0.9789671628784201,
+          "win_rate": 37.5,
+          "num_trades": 24,
+          "avg_trade_duration_hours": 151.0,
+          "final_equity": 8871.606487342578,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": 24.76423812642725,
+          "annualized_return_pct": 56.63705972554818,
+          "sharpe_ratio": 0.916016862972554,
+          "max_drawdown_pct": 41.837465771128954,
+          "profit_factor": 1.361389079066471,
+          "win_rate": 33.33333333333333,
+          "num_trades": 9,
+          "avg_trade_duration_hours": 27.77777777777778,
+          "final_equity": 12476.423812642724,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": 10.47508855513264,
+          "annualized_return_pct": 22.391375920208233,
+          "sharpe_ratio": 0.871456157197192,
+          "max_drawdown_pct": 46.48336694979997,
+          "profit_factor": 1.6248010694533221,
+          "win_rate": 95.4653937947494,
+          "num_trades": 419,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 11047.508855513264,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -94.60759252339471,
+          "annualized_return_pct": -99.73224245593256,
+          "sharpe_ratio": 0.16958881424997307,
+          "max_drawdown_pct": 98.69969959255516,
+          "profit_factor": 0.5232342983612713,
+          "win_rate": 39.39393939393939,
+          "num_trades": 66,
+          "avg_trade_duration_hours": 11.166666666666666,
+          "final_equity": 539.2407476605292,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -26.884844894034487,
+          "annualized_return_pct": -47.01250477204658,
+          "sharpe_ratio": 1.1844327013567244,
+          "max_drawdown_pct": 61.63257463962495,
+          "profit_factor": 0.8900362712254302,
+          "win_rate": 38.38383838383838,
+          "num_trades": 99,
+          "avg_trade_duration_hours": 46.57575757575758,
+          "final_equity": 7311.515510596551,
+          "meets_target": false
+        }
+      }
+    },
+    "DOGEUSDC": {
+      "buy_hold": {
+        "total_return_pct": -38.459651704684816,
+        "annualized_return_pct": -62.643666673771015,
+        "sharpe_ratio": -1.1840067544309185,
+        "max_drawdown_pct": 53.291147498206016
+      },
+      "regime": {
+        "trending": 30.138888888888886,
+        "ranging": 65.04861111111111,
+        "volatile": 16.041666666666668
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -36.508907763076934,
+          "annualized_return_pct": -60.202776882908005,
+          "sharpe_ratio": -1.3162181002424687,
+          "max_drawdown_pct": 43.010656735943584,
+          "profit_factor": 0.17482982562497004,
+          "win_rate": 15.384615384615385,
+          "num_trades": 13,
+          "avg_trade_duration_hours": 112.15384615384616,
+          "final_equity": 6349.109223692307,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -77.56751921036536,
+          "annualized_return_pct": -95.17587381853556,
+          "sharpe_ratio": -0.795692624718587,
+          "max_drawdown_pct": 83.26405644594307,
+          "profit_factor": 0.08712254561253666,
+          "win_rate": 15.384615384615385,
+          "num_trades": 13,
+          "avg_trade_duration_hours": 112.15384615384616,
+          "final_equity": 2243.2480789634637,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -93.73584615880452,
+          "annualized_return_pct": -99.63713969070291,
+          "sharpe_ratio": -0.33240319493672826,
+          "max_drawdown_pct": 95.9760612598948,
+          "profit_factor": 0.033693638825951756,
+          "win_rate": 15.384615384615385,
+          "num_trades": 13,
+          "avg_trade_duration_hours": 112.15384615384616,
+          "final_equity": 626.415384119547,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -74.70946478695653,
+          "annualized_return_pct": -93.84750557541496,
+          "sharpe_ratio": 0.7771432678864995,
+          "max_drawdown_pct": 93.05325498784245,
+          "profit_factor": 0.5187409884954253,
+          "win_rate": 18.51851851851852,
+          "num_trades": 27,
+          "avg_trade_duration_hours": 149.4814814814815,
+          "final_equity": 2529.053521304348,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": 13.028927043803806,
+          "annualized_return_pct": 28.19812448254917,
+          "sharpe_ratio": 0.6338390225226023,
+          "max_drawdown_pct": 12.433066812042068,
+          "profit_factor": 13098927043803.793,
+          "win_rate": 100.0,
+          "num_trades": 1,
+          "avg_trade_duration_hours": 749.0,
+          "final_equity": 11302.89270438038,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -32.91605105353413,
+          "annualized_return_pct": -55.502082427627954,
+          "sharpe_ratio": -0.11214581486663029,
+          "max_drawdown_pct": 62.42017720037306,
+          "profit_factor": 0.16837921985325766,
+          "win_rate": 72.05882352941177,
+          "num_trades": 68,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 6708.394894646587,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -75.21184724140045,
+          "annualized_return_pct": -94.09285851059704,
+          "sharpe_ratio": -0.6824066134513301,
+          "max_drawdown_pct": 84.50556400718443,
+          "profit_factor": 0.5080255922033392,
+          "win_rate": 52.27272727272727,
+          "num_trades": 44,
+          "avg_trade_duration_hours": 18.90909090909091,
+          "final_equity": 2478.8152758599563,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -45.92158169277211,
+          "annualized_return_pct": -71.25868626388703,
+          "sharpe_ratio": -0.8377120458800907,
+          "max_drawdown_pct": 54.65314798795862,
+          "profit_factor": 0.5566945595769074,
+          "win_rate": 40.27777777777778,
+          "num_trades": 72,
+          "avg_trade_duration_hours": 78.01388888888889,
+          "final_equity": 5407.841830722789,
+          "meets_target": false
+        }
+      }
+    },
+    "NEARUSDC": {
+      "buy_hold": {
+        "total_return_pct": 24.20634920634921,
+        "annualized_return_pct": 55.21972142507152,
+        "sharpe_ratio": 0.8860113518573262,
+        "max_drawdown_pct": 49.919914575547246
+      },
+      "regime": {
+        "trending": 50.0,
+        "ranging": 43.513888888888886,
+        "volatile": 21.62037037037037
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": 14.551381070398417,
+          "annualized_return_pct": 31.724712061049765,
+          "sharpe_ratio": 0.7543893892417455,
+          "max_drawdown_pct": 23.75172705527332,
+          "profit_factor": 1.3589955973599492,
+          "win_rate": 50.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 188.7,
+          "final_equity": 11455.138107039842,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": 4.650505308524644,
+          "annualized_return_pct": 9.65799431828187,
+          "sharpe_ratio": 1.6051739073057785,
+          "max_drawdown_pct": 59.63010521030421,
+          "profit_factor": 1.0336191528224727,
+          "win_rate": 50.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 188.7,
+          "final_equity": 10465.050530852464,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -40.76950033931468,
+          "annualized_return_pct": -65.43267133947579,
+          "sharpe_ratio": 2.3858936596527487,
+          "max_drawdown_pct": 83.37104986358332,
+          "profit_factor": 0.8610597769407631,
+          "win_rate": 50.0,
+          "num_trades": 10,
+          "avg_trade_duration_hours": 188.7,
+          "final_equity": 5923.049966068532,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -34.80822440986366,
+          "annualized_return_pct": -58.01085107698736,
+          "sharpe_ratio": 2.0082219149303304,
+          "max_drawdown_pct": 85.23262235488976,
+          "profit_factor": 0.9174879337419406,
+          "win_rate": 38.095238095238095,
+          "num_trades": 21,
+          "avg_trade_duration_hours": 183.1904761904762,
+          "final_equity": 6519.177559013633,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": 6.202327379036099,
+          "annualized_return_pct": 12.981226186108042,
+          "sharpe_ratio": 0.7696800052159463,
+          "max_drawdown_pct": 42.1907773414333,
+          "profit_factor": 1.1259344509412477,
+          "win_rate": 50.0,
+          "num_trades": 8,
+          "avg_trade_duration_hours": 111.375,
+          "final_equity": 10620.23273790361,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": 20.880495220899896,
+          "annualized_return_pct": 46.905751967515855,
+          "sharpe_ratio": 0.8158774534519727,
+          "max_drawdown_pct": 37.1470533380726,
+          "profit_factor": 41.54431637236543,
+          "win_rate": 98.65470852017937,
+          "num_trades": 223,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 12088.04952208999,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -65.77292904663406,
+          "annualized_return_pct": -88.63454878652661,
+          "sharpe_ratio": 0.048839413210322646,
+          "max_drawdown_pct": 76.7716934623317,
+          "profit_factor": 0.5319927178156892,
+          "win_rate": 52.77777777777778,
+          "num_trades": 36,
+          "avg_trade_duration_hours": 18.444444444444443,
+          "final_equity": 3422.7070953365946,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -31.493094849660963,
+          "annualized_return_pct": -53.56679739241702,
+          "sharpe_ratio": 0.6277058527183239,
+          "max_drawdown_pct": 59.32750590821004,
+          "profit_factor": 0.8468294382384765,
+          "win_rate": 47.69230769230769,
+          "num_trades": 65,
+          "avg_trade_duration_hours": 83.1076923076923,
+          "final_equity": 6850.6905150339035,
+          "meets_target": false
+        }
+      }
+    },
+    "AVAXUSDC": {
+      "buy_hold": {
+        "total_return_pct": -47.68623024830699,
+        "annualized_return_pct": -73.12900790503924,
+        "sharpe_ratio": -1.600179383051638,
+        "max_drawdown_pct": 60.463861920172604
+      },
+      "regime": {
+        "trending": 29.88425925925926,
+        "ranging": 66.74768518518518,
+        "volatile": 11.226851851851851
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -50.00143034852974,
+          "annualized_return_pct": -75.48614960870961,
+          "sharpe_ratio": -2.199035720203177,
+          "max_drawdown_pct": 51.12773978918273,
+          "profit_factor": 0.03446947401882169,
+          "win_rate": 11.76470588235294,
+          "num_trades": 17,
+          "avg_trade_duration_hours": 78.82352941176471,
+          "final_equity": 4999.856965147026,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -89.36882490346323,
+          "annualized_return_pct": -98.93912036825188,
+          "sharpe_ratio": -1.6851986583999756,
+          "max_drawdown_pct": 90.11026207836937,
+          "profit_factor": 0.017522202251051288,
+          "win_rate": 11.76470588235294,
+          "num_trades": 17,
+          "avg_trade_duration_hours": 78.82352941176471,
+          "final_equity": 1063.1175096536776,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -98.46971746424784,
+          "annualized_return_pct": -99.97919019644125,
+          "sharpe_ratio": -1.232487818333244,
+          "max_drawdown_pct": 98.64531618983308,
+          "profit_factor": 0.006597087855417554,
+          "win_rate": 11.76470588235294,
+          "num_trades": 17,
+          "avg_trade_duration_hours": 78.82352941176471,
+          "final_equity": 153.02825357521738,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -92.67639334177038,
+          "annualized_return_pct": -99.5018253873457,
+          "sharpe_ratio": 0.3223620029074749,
+          "max_drawdown_pct": 96.9968894445031,
+          "profit_factor": 0.38845755232032514,
+          "win_rate": 14.705882352941178,
+          "num_trades": 34,
+          "avg_trade_duration_hours": 118.1470588235294,
+          "final_equity": 732.3606658229621,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -45.40931437518603,
+          "annualized_return_pct": -70.70379190674257,
+          "sharpe_ratio": -1.6071835467769566,
+          "max_drawdown_pct": 48.23244234041019,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 4,
+          "avg_trade_duration_hours": 103.5,
+          "final_equity": 5459.068562481398,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -43.061622451884354,
+          "annualized_return_pct": -68.09189336250003,
+          "sharpe_ratio": -0.3186141247757094,
+          "max_drawdown_pct": 68.0269293190743,
+          "profit_factor": 0.0739569295510546,
+          "win_rate": 64.81481481481481,
+          "num_trades": 54,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 5693.837754811565,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -85.64042963624071,
+          "annualized_return_pct": -98.04802419140287,
+          "sharpe_ratio": -0.8124734742453074,
+          "max_drawdown_pct": 92.58429294317497,
+          "profit_factor": 0.2803909426612888,
+          "win_rate": 38.775510204081634,
+          "num_trades": 49,
+          "avg_trade_duration_hours": 18.0,
+          "final_equity": 1435.957036375929,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -74.75638925997275,
+          "annualized_return_pct": -93.87063682234968,
+          "sharpe_ratio": -2.596296963814975,
+          "max_drawdown_pct": 78.52959076558572,
+          "profit_factor": 0.291769356569924,
+          "win_rate": 27.586206896551722,
+          "num_trades": 87,
+          "avg_trade_duration_hours": 61.06896551724138,
+          "final_equity": 2524.361074002725,
+          "meets_target": false
+        }
+      }
+    },
+    "SUIUSDC": {
+      "buy_hold": {
+        "total_return_pct": -51.23955431754874,
+        "annualized_return_pct": -76.70170750511427,
+        "sharpe_ratio": -1.392660690855315,
+        "max_drawdown_pct": 67.07667490043858
+      },
+      "regime": {
+        "trending": 43.56481481481482,
+        "ranging": 52.782407407407405,
+        "volatile": 12.175925925925926
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -23.267925063478568,
+          "annualized_return_pct": -41.560728144333204,
+          "sharpe_ratio": -0.5686874352466763,
+          "max_drawdown_pct": 25.938973617080187,
+          "profit_factor": 0.3732090698536192,
+          "win_rate": 18.181818181818183,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 98.72727272727273,
+          "final_equity": 7673.207493652143,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -59.90704235554261,
+          "annualized_return_pct": -84.33523283983918,
+          "sharpe_ratio": 0.00021317504332517124,
+          "max_drawdown_pct": 60.89564336295648,
+          "profit_factor": 0.28029889632927324,
+          "win_rate": 18.181818181818183,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 98.72727272727273,
+          "final_equity": 4009.29576444574,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -82.64809237043205,
+          "annualized_return_pct": -97.13444939264993,
+          "sharpe_ratio": 0.5139590059759849,
+          "max_drawdown_pct": 82.70351906322601,
+          "profit_factor": 0.199757481010225,
+          "win_rate": 18.181818181818183,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 98.72727272727273,
+          "final_equity": 1735.1907629567957,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": 33.00868958508438,
+          "annualized_return_pct": 78.3443284878941,
+          "sharpe_ratio": 1.9151242064667362,
+          "max_drawdown_pct": 78.10153117620537,
+          "profit_factor": 1.1162269541450969,
+          "win_rate": 30.434782608695656,
+          "num_trades": 23,
+          "avg_trade_duration_hours": 169.1304347826087,
+          "final_equity": 13300.86895850844,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": 1.8532455225237499,
+          "annualized_return_pct": 3.7946605398541555,
+          "sharpe_ratio": 0.3652527836400461,
+          "max_drawdown_pct": 31.002027830299262,
+          "profit_factor": 1.0845764462597327,
+          "win_rate": 33.33333333333333,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 80.0,
+          "final_equity": 10185.324552252374,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -47.14744770201465,
+          "annualized_return_pct": -72.56472636331965,
+          "sharpe_ratio": -0.4036703948290239,
+          "max_drawdown_pct": 69.72074755403031,
+          "profit_factor": 0.10151100571756394,
+          "win_rate": 64.81481481481481,
+          "num_trades": 54,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 5285.255229798534,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -72.55279695973437,
+          "annualized_return_pct": -92.73667815182391,
+          "sharpe_ratio": -0.13472627404495252,
+          "max_drawdown_pct": 82.90017086185973,
+          "profit_factor": 0.4846958681785169,
+          "win_rate": 57.99999999999999,
+          "num_trades": 50,
+          "avg_trade_duration_hours": 16.46,
+          "final_equity": 2744.720304026563,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -12.107897515350796,
+          "annualized_return_pct": -23.030893912512596,
+          "sharpe_ratio": 0.7526409031473841,
+          "max_drawdown_pct": 58.86118302258362,
+          "profit_factor": 0.9264828435541036,
+          "win_rate": 48.68421052631579,
+          "num_trades": 76,
+          "avg_trade_duration_hours": 65.17105263157895,
+          "final_equity": 8789.21024846492,
+          "meets_target": false
+        }
+      }
+    },
+    "WLDUSDC": {
+      "buy_hold": {
+        "total_return_pct": -5.718355718355728,
+        "annualized_return_pct": -11.257444136536666,
+        "sharpe_ratio": 0.49547423981183186,
+        "max_drawdown_pct": 64.22600619195047
+      },
+      "regime": {
+        "trending": 59.791666666666664,
+        "ranging": 33.75694444444445,
+        "volatile": 21.50462962962963
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -7.294617965551186,
+          "annualized_return_pct": -14.240804126723338,
+          "sharpe_ratio": 0.666338840762088,
+          "max_drawdown_pct": 51.42740145554278,
+          "profit_factor": 0.8573412303043209,
+          "win_rate": 27.27272727272727,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 145.27272727272728,
+          "final_equity": 9270.538203444881,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -57.829907120121526,
+          "annualized_return_pct": -82.64532384241194,
+          "sharpe_ratio": 1.869604722482942,
+          "max_drawdown_pct": 91.07835608238108,
+          "profit_factor": 0.3510207659043573,
+          "win_rate": 27.27272727272727,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 145.27272727272728,
+          "final_equity": 4217.009287987847,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -92.22270433520328,
+          "annualized_return_pct": -99.43723621110809,
+          "sharpe_ratio": 3.058782495102226,
+          "max_drawdown_pct": 99.2662042654297,
+          "profit_factor": 0.06681245671058228,
+          "win_rate": 27.27272727272727,
+          "num_trades": 11,
+          "avg_trade_duration_hours": 145.27272727272728,
+          "final_equity": 777.729566479672,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -58.36747390308887,
+          "annualized_return_pct": -83.09109294875483,
+          "sharpe_ratio": 2.467340142513038,
+          "max_drawdown_pct": 93.99452333335077,
+          "profit_factor": 0.5114931191172883,
+          "win_rate": 39.130434782608695,
+          "num_trades": 23,
+          "avg_trade_duration_hours": 174.17391304347825,
+          "final_equity": 4163.252609691113,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -36.67014629600981,
+          "annualized_return_pct": -60.40749784897655,
+          "sharpe_ratio": 0.05718274698373295,
+          "max_drawdown_pct": 62.54630901501707,
+          "profit_factor": 0.40997071505468974,
+          "win_rate": 33.33333333333333,
+          "num_trades": 9,
+          "avg_trade_duration_hours": 23.666666666666668,
+          "final_equity": 6332.985370399019,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": 24.854192026124664,
+          "annualized_return_pct": 56.866202546897384,
+          "sharpe_ratio": 0.9375010819261438,
+          "max_drawdown_pct": 38.93610439586038,
+          "profit_factor": 2.667402095045349,
+          "win_rate": 94.8220064724919,
+          "num_trades": 309,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 12485.419202612467,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -84.36528336196028,
+          "annualized_return_pct": -97.68038843959468,
+          "sharpe_ratio": -0.4939782561003739,
+          "max_drawdown_pct": 89.82976108466731,
+          "profit_factor": 0.5849035703495634,
+          "win_rate": 48.0,
+          "num_trades": 50,
+          "avg_trade_duration_hours": 13.32,
+          "final_equity": 1563.471663803972,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -59.78663291418035,
+          "annualized_return_pct": -84.23966596935625,
+          "sharpe_ratio": -0.7329553386692461,
+          "max_drawdown_pct": 70.35395576087696,
+          "profit_factor": 0.5335472790045291,
+          "win_rate": 43.90243902439025,
+          "num_trades": 82,
+          "avg_trade_duration_hours": 59.573170731707314,
+          "final_equity": 4021.336708581965,
+          "meets_target": false
+        }
+      }
+    },
+    "WIFUSDC": {
+      "buy_hold": {
+        "total_return_pct": -39.74269819193324,
+        "annualized_return_pct": -64.20641207255215,
+        "sharpe_ratio": -0.5783721724761323,
+        "max_drawdown_pct": 71.58199091284592
+      },
+      "regime": {
+        "trending": 48.19444444444444,
+        "ranging": 47.78472222222222,
+        "volatile": 13.402777777777777
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -43.968408492400116,
+          "annualized_return_pct": -69.11413051257327,
+          "sharpe_ratio": -1.0205709194700767,
+          "max_drawdown_pct": 49.94131756831296,
+          "profit_factor": 0.1952006053806898,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 103.0,
+          "final_equity": 5603.159150759989,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -87.28273803140733,
+          "annualized_return_pct": -98.47423098375158,
+          "sharpe_ratio": -0.36172088530934554,
+          "max_drawdown_pct": 90.31777497173162,
+          "profit_factor": 0.07875960040373049,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 103.0,
+          "final_equity": 1271.7261968592663,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -98.65064133901005,
+          "annualized_return_pct": -99.98387736626442,
+          "sharpe_ratio": 0.25609671270874756,
+          "max_drawdown_pct": 99.03626104277501,
+          "profit_factor": 0.015022845894571158,
+          "win_rate": 16.666666666666664,
+          "num_trades": 12,
+          "avg_trade_duration_hours": 103.0,
+          "final_equity": 134.9358660989951,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -87.12413385965641,
+          "annualized_return_pct": -98.43538851892404,
+          "sharpe_ratio": 1.3262829824989133,
+          "max_drawdown_pct": 96.74565487530529,
+          "profit_factor": 0.6745706358187611,
+          "win_rate": 29.166666666666668,
+          "num_trades": 24,
+          "avg_trade_duration_hours": 160.83333333333334,
+          "final_equity": 1287.586614034359,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -20.700101341383103,
+          "annualized_return_pct": -37.5259025739737,
+          "sharpe_ratio": -0.4072427221777012,
+          "max_drawdown_pct": 33.03780281329664,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 2,
+          "avg_trade_duration_hours": 31.5,
+          "final_equity": 7929.989865861689,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -41.574653896699246,
+          "annualized_return_pct": -66.3790710357532,
+          "sharpe_ratio": -0.2563531097871525,
+          "max_drawdown_pct": 65.05198805996835,
+          "profit_factor": 0.12115002458484826,
+          "win_rate": 54.761904761904766,
+          "num_trades": 42,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 5842.534610330076,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -57.62497217017376,
+          "annualized_return_pct": -82.47383626355645,
+          "sharpe_ratio": 0.34505140908254806,
+          "max_drawdown_pct": 76.84578480865831,
+          "profit_factor": 0.644173856582127,
+          "win_rate": 54.166666666666664,
+          "num_trades": 48,
+          "avg_trade_duration_hours": 13.666666666666666,
+          "final_equity": 4237.502782982624,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -55.46947977109695,
+          "annualized_return_pct": -80.61833532789261,
+          "sharpe_ratio": -0.21010942187471693,
+          "max_drawdown_pct": 70.4446756020798,
+          "profit_factor": 0.6324455124357747,
+          "win_rate": 44.5945945945946,
+          "num_trades": 74,
+          "avg_trade_duration_hours": 61.87837837837838,
+          "final_equity": 4453.052022890305,
+          "meets_target": false
+        }
+      }
+    },
+    "1000PEPEUSDC": {
+      "buy_hold": {
+        "total_return_pct": -40.862170664569405,
+        "annualized_return_pct": -65.54227688740235,
+        "sharpe_ratio": -0.8341906483765869,
+        "max_drawdown_pct": 68.15035033358457
+      },
+      "regime": {
+        "trending": 41.273148148148145,
+        "ranging": 53.83101851851852,
+        "volatile": 16.319444444444446
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -33.562684236672304,
+          "annualized_return_pct": -56.36773288016739,
+          "sharpe_ratio": -0.843437507453526,
+          "max_drawdown_pct": 43.238939637448766,
+          "profit_factor": 0.1903715218188807,
+          "win_rate": 11.11111111111111,
+          "num_trades": 9,
+          "avg_trade_duration_hours": 160.44444444444446,
+          "final_equity": 6643.73157633277,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -75.54655430349261,
+          "annualized_return_pct": -94.25351340585553,
+          "sharpe_ratio": -0.21026404516965222,
+          "max_drawdown_pct": 84.25224717132879,
+          "profit_factor": 0.08810490914816518,
+          "win_rate": 11.11111111111111,
+          "num_trades": 9,
+          "avg_trade_duration_hours": 160.44444444444446,
+          "final_equity": 2445.3445696507374,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -93.83412570033211,
+          "annualized_return_pct": -99.64859335088333,
+          "sharpe_ratio": 0.38029412222332637,
+          "max_drawdown_pct": 96.9106314903784,
+          "profit_factor": 0.027869309812132027,
+          "win_rate": 11.11111111111111,
+          "num_trades": 9,
+          "avg_trade_duration_hours": 160.44444444444446,
+          "final_equity": 616.5874299667896,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -39.04774958377204,
+          "annualized_return_pct": -63.364170019078045,
+          "sharpe_ratio": 1.710442581863991,
+          "max_drawdown_pct": 88.36305120942846,
+          "profit_factor": 0.7428545914056066,
+          "win_rate": 26.31578947368421,
+          "num_trades": 19,
+          "avg_trade_duration_hours": 211.6315789473684,
+          "final_equity": 6095.225041622796,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -27.666385841616837,
+          "annualized_return_pct": -48.154976845214584,
+          "sharpe_ratio": -0.8035317383788884,
+          "max_drawdown_pct": 33.05826045473487,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 113.66666666666667,
+          "final_equity": 7233.361415838316,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -37.52882544132431,
+          "annualized_return_pct": -61.48872922388718,
+          "sharpe_ratio": -0.21154131806723048,
+          "max_drawdown_pct": 64.41401417796777,
+          "profit_factor": 0.25037877985621165,
+          "win_rate": 73.61111111111111,
+          "num_trades": 72,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 6247.117455867569,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -67.76532068503747,
+          "annualized_return_pct": -89.93628844913114,
+          "sharpe_ratio": 0.054070074360753215,
+          "max_drawdown_pct": 82.57445440455051,
+          "profit_factor": 0.6946941705351315,
+          "win_rate": 54.347826086956516,
+          "num_trades": 46,
+          "avg_trade_duration_hours": 16.58695652173913,
+          "final_equity": 3223.467931496253,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -44.768698012278406,
+          "annualized_return_pct": -70.00229721583287,
+          "sharpe_ratio": -0.5910219035911953,
+          "max_drawdown_pct": 61.153749527790715,
+          "profit_factor": 0.6643008292606991,
+          "win_rate": 44.11764705882353,
+          "num_trades": 68,
+          "avg_trade_duration_hours": 75.36764705882354,
+          "final_equity": 5523.130198772159,
+          "meets_target": false
+        }
+      }
+    },
+    "ADAUSDC": {
+      "buy_hold": {
+        "total_return_pct": -58.31674722775093,
+        "annualized_return_pct": -83.04927987952895,
+        "sharpe_ratio": -2.1721804949701133,
+        "max_drawdown_pct": 67.54098360655738
+      },
+      "regime": {
+        "trending": 30.74074074074074,
+        "ranging": 65.14120370370371,
+        "volatile": 13.726851851851851
+      },
+      "strategies": {
+        "trend_1x": {
+          "total_return_pct": -58.168324620371024,
+          "annualized_return_pct": -82.92663713740133,
+          "sharpe_ratio": -2.7899518629302817,
+          "max_drawdown_pct": 58.90103365439337,
+          "profit_factor": 0.044254168985671416,
+          "win_rate": 11.11111111111111,
+          "num_trades": 18,
+          "avg_trade_duration_hours": 65.66666666666667,
+          "final_equity": 4183.167537962898,
+          "meets_target": false
+        },
+        "trend_3x": {
+          "total_return_pct": -94.18877403617498,
+          "annualized_return_pct": -99.68837703752172,
+          "sharpe_ratio": -2.323810593606791,
+          "max_drawdown_pct": 94.49112195645235,
+          "profit_factor": 0.015991259002339997,
+          "win_rate": 11.11111111111111,
+          "num_trades": 18,
+          "avg_trade_duration_hours": 65.66666666666667,
+          "final_equity": 581.1225963825023,
+          "meets_target": false
+        },
+        "trend_5x": {
+          "total_return_pct": -99.54317673854719,
+          "annualized_return_pct": -99.99820778266424,
+          "sharpe_ratio": -1.916337274884697,
+          "max_drawdown_pct": 99.58164053762572,
+          "profit_factor": 0.003238794445425042,
+          "win_rate": 11.11111111111111,
+          "num_trades": 18,
+          "avg_trade_duration_hours": 65.66666666666667,
+          "final_equity": 45.68232614528149,
+          "meets_target": false
+        },
+        "trend_ls_3x": {
+          "total_return_pct": -95.68106464081117,
+          "annualized_return_pct": -99.82931061541697,
+          "sharpe_ratio": 0.16188035564934455,
+          "max_drawdown_pct": 98.82392168652387,
+          "profit_factor": 0.3793199275635293,
+          "win_rate": 13.513513513513514,
+          "num_trades": 37,
+          "avg_trade_duration_hours": 108.75675675675676,
+          "final_equity": 431.8935359188821,
+          "meets_target": false
+        },
+        "momentum_2x": {
+          "total_return_pct": -37.19946809535335,
+          "annualized_return_pct": -61.07580337406171,
+          "sharpe_ratio": -1.4196671913756895,
+          "max_drawdown_pct": 38.970696498084436,
+          "profit_factor": 0.0,
+          "win_rate": 0.0,
+          "num_trades": 3,
+          "avg_trade_duration_hours": 100.0,
+          "final_equity": 6280.053190464665,
+          "meets_target": false
+        },
+        "grid_spot": {
+          "total_return_pct": -51.25736756490391,
+          "annualized_return_pct": -76.71896742798378,
+          "sharpe_ratio": -0.4741959172249978,
+          "max_drawdown_pct": 72.39812894833301,
+          "profit_factor": 0.07260826719518841,
+          "win_rate": 63.46153846153846,
+          "num_trades": 52,
+          "avg_trade_duration_hours": 0.0,
+          "final_equity": 4874.263243509609,
+          "meets_target": false
+        },
+        "rsi_mr_3x": {
+          "total_return_pct": -82.3159597606493,
+          "annualized_return_pct": -97.02210614808104,
+          "sharpe_ratio": -0.6743683732803719,
+          "max_drawdown_pct": 87.81968128677096,
+          "profit_factor": 0.3634738611086352,
+          "win_rate": 53.70370370370371,
+          "num_trades": 54,
+          "avg_trade_duration_hours": 16.37037037037037,
+          "final_equity": 1768.40402393507,
+          "meets_target": false
+        },
+        "combined": {
+          "total_return_pct": -71.97165317035667,
+          "annualized_return_pct": -92.42136314395431,
+          "sharpe_ratio": -2.2835447622009943,
+          "max_drawdown_pct": 74.3670915600372,
+          "profit_factor": 0.3286544008623563,
+          "win_rate": 36.17021276595745,
+          "num_trades": 94,
+          "avg_trade_duration_hours": 55.40425531914894,
+          "final_equity": 2802.8346829643324,
+          "meets_target": false
+        }
+      }
+    }
+  }
+}
