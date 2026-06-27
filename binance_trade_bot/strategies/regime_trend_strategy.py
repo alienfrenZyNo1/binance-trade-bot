@@ -117,9 +117,10 @@ class RegimeSignal:
         self.above_ema = above_ema
 
     def __repr__(self):
+        ema_str = f"{self.ema_trend:.4f}" if self.ema_trend else "N/A"
         return (
             f"RegimeSignal(regime={self.regime!r}, adx={self.adx:.1f}, "
-            f"price={self.price:.4f}, ema={self.ema_trend:.4f if self.ema_trend else 'N/A'})"
+            f"price={self.price:.4f}, ema={ema_str})"
         )
 
 
