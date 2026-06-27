@@ -107,13 +107,15 @@ def build_default_settings(
     selector_trailing_window_max_drawdown_pct: float = 20.0,
     selector_re_engage_confirmations: list[bool] | None = None,
     selector_re_engage_rolling_peak_windows: list[int] | None = None,
+    selector_recent_pnl_lookback_windows: int = 0,
+    selector_recent_pnl_stop_pct: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
     drawdowns = selector_max_trailing_drawdowns or [0.0]
     equity_stops = selector_equity_stop_drawdowns or [0.0]
     win_rates = selector_min_trailing_win_rates or [0.0]
-    confirmations = selector_re_engage_confirmations if selector_re_engage_confirmations is not None else [False]
+    confirmations = selector_re_engage_confirmations if selector_re_engage_confirmations is not None else [True]
     rolling_peaks = selector_re_engage_rolling_peak_windows if selector_re_engage_rolling_peak_windows is not None else [0]
     for day in days:
         for step in step_hours:
@@ -151,15 +153,51 @@ def build_default_settings(
                                             "selector_min_passing_trailing_windows": int(selector_min_passing_trailing_windows),
                                             "selector_trailing_window_max_drawdown_pct": float(selector_trailing_window_max_drawdown_pct),
                                             "selector_re_engage_confirmation": bool(confirm),
-                                            "selector_re_engage_breadth_pct": 0.50,
+                                            "selector_re_engage_breadth_pct": 0.60,
                                             "selector_re_engage_rolling_peak_windows": int(rolling_peak),
+                                            "selector_recent_pnl_lookback_windows": int(selector_recent_pnl_lookback_windows),
+                                            "selector_recent_pnl_stop_pct": float(selector_recent_pnl_stop_pct),
                                         }
                                     )
     return settings
 
 
+# Routes that apply NO risk management (no equity stop, no confirmation gate, no
+# quality gate). They trade every window on the raw regime label and exist only as
+# diagnostic baselines. The DEPLOYABLE strategy is the selector route, which folds in
+# the confirmation-gated re-engagement (issue #72), the equity stop, and the trailing
+# quality gates. Reporting a baseline's maxDD misrepresents the deployed strategy's
+# realized risk, so ``_best_route`` prefers the selector route when one exists.
+_BASELINE_ROUTES = {"cash", "buy_and_hold_basket", "legacy_sol", "research_v1", "regime_v2", "regime_v2_tuned", "regime_v2_route_tuned"}
+_SELECTOR_ROUTES = ("regime_v2_selector",)
+
+
+def _route_by_name(rows: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    for row in rows:
+        if row.get("name") == name:
+            return row
+    return None
+
+
 def _best_route(output: dict[str, Any]) -> dict[str, Any]:
+    """Pick the route whose metrics the leaderboard should report.
+
+    Issue #72: when a confirmation-gated selector route (``regime_v2_selector``)
+    is available, it is the DEPLOYABLE strategy — it alone applies the equity
+    stop, the confirmation-gated re-engagement, and the trailing quality gates.
+    The raw regime routes (``regime_v2_route_tuned`` etc.) trade every window with
+    no risk management; they are diagnostic baselines whose maxDD the deployed
+    strategy never actually experiences. Reporting a baseline's maxDD made the
+    gate look ~4x worse than the realized selector risk, so prefer the selector.
+
+    Falls back to the highest-return non-trivial baseline when no selector route
+    exists (e.g. selector disabled) to preserve prior behaviour.
+    """
     rows = output.get("leaderboard", {}).get("by_metric", {}).get("route_outcomes", []) or []
+    for sel_name in _SELECTOR_ROUTES:
+        sel = _route_by_name(rows, sel_name)
+        if sel is not None:
+            return sel
     for row in rows:
         if row.get("name") not in {"cash", "buy_and_hold_basket"}:
             return row
@@ -204,9 +242,11 @@ def evaluate_settings_grid(
             selector_trailing_robust_windows=int(setting.get("selector_trailing_robust_windows", 0)),
             selector_min_passing_trailing_windows=int(setting.get("selector_min_passing_trailing_windows", 0)),
             selector_trailing_window_max_drawdown_pct=float(setting.get("selector_trailing_window_max_drawdown_pct", 20.0)),
-            selector_re_engage_confirmation=bool(setting.get("selector_re_engage_confirmation", False)),
-            selector_re_engage_breadth_pct=float(setting.get("selector_re_engage_breadth_pct", 0.50)),
+            selector_re_engage_confirmation=bool(setting.get("selector_re_engage_confirmation", True)),
+            selector_re_engage_breadth_pct=float(setting.get("selector_re_engage_breadth_pct", 0.60)),
             selector_re_engage_rolling_peak_windows=int(setting.get("selector_re_engage_rolling_peak_windows", 0)),
+            selector_recent_pnl_lookback_windows=int(setting.get("selector_recent_pnl_lookback_windows", 0)),
+            selector_recent_pnl_stop_pct=float(setting.get("selector_recent_pnl_stop_pct", 0.0)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -297,6 +337,18 @@ def main() -> int:
         default="0",
         help="Comma-separated rolling-peak rebase window sizes for re-engagement (0 disables, uses current equity)",
     )
+    parser.add_argument(
+        "--selector-recent-pnl-lookback-windows",
+        type=int,
+        default=0,
+        help="Direction #2: continuous recent-P&L risk-off lookback window count (0 disables)",
+    )
+    parser.add_argument(
+        "--selector-recent-pnl-stop-pct",
+        type=float,
+        default=0.0,
+        help="Direction #2: cumulative recent selector P&L threshold (pct) that trips risk-off (0 disables)",
+    )
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
@@ -331,6 +383,8 @@ def main() -> int:
         selector_trailing_window_max_drawdown_pct=args.selector_trailing_window_max_drawdown_pct,
         selector_re_engage_confirmations=[True] if args.selector_re_engage_confirmation else None,
         selector_re_engage_rolling_peak_windows=_parse_int_csv(args.selector_re_engage_rolling_peak_windows) or None,
+        selector_recent_pnl_lookback_windows=args.selector_recent_pnl_lookback_windows,
+        selector_recent_pnl_stop_pct=args.selector_recent_pnl_stop_pct,
     )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta

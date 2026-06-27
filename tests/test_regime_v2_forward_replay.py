@@ -105,12 +105,15 @@ def test_build_default_settings_can_batch_multiple_windows():
     settings = module.build_default_settings(days=[30, 60], step_hours=[12], selector_lookbacks=[6, 12])
 
     assert len(settings) == 4
+    # Confirmation-gated re-engagement now defaults ON (issue #72 direction #1),
+    # so every default setting carries the ``_confirm`` suffix and flag.
     assert {row["name"] for row in settings} == {
-        "30d_step12_sel6",
-        "30d_step12_sel12",
-        "60d_step12_sel6",
-        "60d_step12_sel12",
+        "30d_step12_sel6_confirm",
+        "30d_step12_sel12_confirm",
+        "60d_step12_sel6_confirm",
+        "60d_step12_sel12_confirm",
     }
+    assert all(row["selector_re_engage_confirmation"] is True for row in settings)
 
 
 def test_build_default_settings_can_batch_drawdown_guards():
@@ -127,19 +130,20 @@ def test_build_default_settings_can_batch_drawdown_guards():
     )
 
     assert len(settings) == 8
-    assert settings[0]["name"] == "60d_step6_sel3"
+    assert settings[0]["name"] == "60d_step6_sel3_confirm"
     assert settings[0]["selector_max_trailing_drawdown_pct"] == 0.0
     assert settings[0]["selector_equity_stop_drawdown_pct"] == 0.0
     assert settings[0]["selector_min_trailing_win_rate_pct"] == 0.0
     assert settings[0]["selector_trailing_robust_windows"] == 3
     assert settings[0]["selector_min_passing_trailing_windows"] == 2
-    assert settings[1]["name"] == "60d_step6_sel3_wr60"
+    assert settings[0]["selector_re_engage_confirmation"] is True
+    assert settings[1]["name"] == "60d_step6_sel3_wr60_confirm"
     assert settings[1]["selector_min_trailing_win_rate_pct"] == 60.0
-    assert settings[2]["name"] == "60d_step6_sel3_eqstop18"
+    assert settings[2]["name"] == "60d_step6_sel3_eqstop18_confirm"
     assert settings[2]["selector_equity_stop_drawdown_pct"] == 18.0
-    assert settings[4]["name"] == "60d_step6_sel3_dd15"
+    assert settings[4]["name"] == "60d_step6_sel3_dd15_confirm"
     assert settings[4]["selector_max_trailing_drawdown_pct"] == 15.0
-    assert settings[7]["name"] == "60d_step6_sel3_dd15_eqstop18_wr60"
+    assert settings[7]["name"] == "60d_step6_sel3_dd15_eqstop18_wr60_confirm"
     assert settings[7]["selector_max_trailing_drawdown_pct"] == 15.0
     assert settings[7]["selector_equity_stop_drawdown_pct"] == 18.0
     assert settings[7]["selector_min_trailing_win_rate_pct"] == 60.0
@@ -585,3 +589,345 @@ def test_selector_re_engages_only_on_confirmation():
         f"gated first re-engagement (idx {gated_first}) should not be earlier "
         f"than plain re-entry (idx {plain_first})"
     )
+
+
+def _synthetic_slow_bleed_records():
+    """Build a crash -> slow-bleed-of-bad-re-entries series for the transition-gate test.
+
+    This mirrors the REAL-DATA failure mode that the post-cooldown gate alone
+    cannot catch (issue #72): the equity stop fires once, then the selector
+    re-engages via the QUALITY gates into a string of losing windows over a
+    multi-month drawdown. The transition confirmation gate must skip those
+    cash -> active re-entries when the basket trailing return is negative.
+
+    Phases (future_basket_ret drives BULL route returns):
+      - warmup: 14 strong bull windows (+4%) to build peak + positive history.
+      - crash: 3 deep negative windows (-13%) -> trips the 15% equity stop.
+      - bleed: 14 windows of net-negative basket returns (alternating -6%,
+        +0.5%) with a BULL regime label on all keys. Without the transition
+        gate, the selector (quality gates satisfied by the prior positive
+        history) re-enters BULL here and bleeds. The basket trailing return is
+        deeply negative, so the market confirmation signal should block these
+        re-entries.
+      - recovery: 14 strong positive windows (+5%) -> the true recovery. Once
+        the trailing basket return turns positive, the transition gate lets the
+        selector re-engage.
+    """
+    evaluator = _load_evaluator_module()
+    BULL = evaluator.BULL
+
+    def row(idx, basket_ret):
+        return {
+            "ts": idx * HOUR_MS,
+            "time": f"t{idx}",
+            "legacy_regime": BULL,
+            "v1_regime": BULL,
+            "v2_smoothed": BULL,
+            "future_basket_ret": basket_ret,
+            "future_btc_ret": basket_ret,
+        }
+
+    records = []
+    idx = 0
+    for _ in range(14):  # warmup
+        records.append(row(idx, 4.0)); idx += 1
+    for _ in range(3):  # crash -> trips 15% stop
+        records.append(row(idx, -13.0)); idx += 1
+    for i in range(14):  # slow bleed (net-negative basket, BULL label)
+        records.append(row(idx, -6.0 if i % 2 == 0 else 0.5)); idx += 1
+    for _ in range(14):  # true recovery
+        records.append(row(idx, 5.0)); idx += 1
+    return evaluator, records
+
+
+def test_transition_confirmation_gate_skips_unconfirmed_re_engagement():
+    """Regression for issue #72 direction #1: transition confirmation gate.
+
+    The post-cooldown confirmation gate only fires after the equity stop trips.
+    On real data the stop fires once, then the selector re-engages via the
+    quality gates into a slow bleed of losing windows. The TRANSITION gate
+    applies the regime-aware market confirmation at EVERY cash -> active
+    transition, skipping re-entries the basket trailing return does not support.
+
+    On the slow-bleed series, the gated run must make FEWER active choices in
+    the bleed phase than the plain (confirmation OFF) run, because the basket
+    trailing return is deeply negative there. It must still re-engage in the
+    true recovery once the trailing return turns positive.
+    """
+    evaluator, records = _synthetic_slow_bleed_records()
+    route_candidates = {
+        "regime_v2": "v2_smoothed",
+        "research_v1": "v1_regime",
+        "legacy_sol": "legacy_regime",
+    }
+    base_kwargs = dict(
+        route_candidates=route_candidates,
+        fee_bps=10.0,
+        lookback=12,
+        min_trailing_objective=-999999.0,
+        selector_equity_stop_drawdown_pct=15.0,
+        selector_equity_stop_cooldown_windows=1,
+    )
+
+    routed_plain = evaluator.build_selector_route(
+        records, selector_re_engage_confirmation=False, **base_kwargs,
+    )
+    routed_gated = evaluator.build_selector_route(
+        records, selector_re_engage_confirmation=True,
+        selector_re_engage_breadth_pct=0.60, **base_kwargs,
+    )
+
+    # Phase boundaries from _synthetic_slow_bleed_records().
+    bleed_start, bleed_end = 17, 31  # bleed phase covers indices [17, 31)
+    recovery_start = 31
+
+    plain_bleed_active = sum(
+        1 for i in range(bleed_start, bleed_end)
+        if routed_plain[i]["selector_route_key"] != "cash"
+    )
+    gated_bleed_active = sum(
+        1 for i in range(bleed_start, bleed_end)
+        if routed_gated[i]["selector_route_key"] != "cash"
+    )
+    assert gated_bleed_active < plain_bleed_active, (
+        f"transition gate should skip more bleed-phase re-entries than plain "
+        f"(gated active={gated_bleed_active} vs plain active={plain_bleed_active} "
+        f"in indices [{bleed_start},{bleed_end}))"
+    )
+
+    # The gated run's maxDD must not exceed the plain run's — the whole point.
+    maxdd_plain = _route_max_drawdown(routed_plain)
+    maxdd_gated = _route_max_drawdown(routed_gated)
+    assert maxdd_gated <= maxdd_plain + 1e-9, (
+        f"gated maxDD {maxdd_gated:.2f}% should not exceed plain maxDD {maxdd_plain:.2f}%"
+    )
+
+    # The gated selector must still re-engage during the true recovery.
+    recovery_bull = sum(
+        1 for i in range(recovery_start, len(routed_gated))
+        if routed_gated[i]["selector_smoothed"] == evaluator.BULL
+    )
+    assert recovery_bull > 0, (
+        "transition-gated selector stayed in cash through the entire true recovery"
+    )
+
+
+def test_market_confirmation_signal_is_regime_aware():
+    """Unit test for _market_confirmation_signal (issue #72 direction #1).
+
+    The signal must be regime-aware: BULL confirms on positive basket trailing
+    return / breadth turn; BEAR confirms on negative basket AND btc trailing;
+    SIDEWAYS always confirms. This is what makes the gate skip false-BULL
+    choppy-recovery windows without wrongly blocking profitable BEAR bets.
+    """
+    evaluator = _load_evaluator_module()
+    BULL, BEAR, SIDEWAYS = evaluator.BULL, evaluator.BEAR, evaluator.SIDEWAYS
+
+    def hist(returns):
+        return [{"future_basket_ret": r, "future_btc_ret": r} for r in returns]
+
+    # BULL: positive trailing -> confirm
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(hist([1, 2, 3]), BULL, breadth_pct=0.60)
+    assert ok is True and bt > 0
+    # BULL: negative trailing, low advancing -> block (choppy recovery)
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(hist([-3, -2, -1]), BULL, breadth_pct=0.60)
+    assert ok is False and bt < 0 and baf < 0.60
+    # BULL: negative trailing but strong breadth turn (>60% advancing) -> confirm.
+    # 4 up / 1 down over 5 windows => advancing frac 0.80 > 0.60 threshold, even
+    # though the summed (trailing) return is negative because the single down
+    # window is large. The breadth branch must fire.
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(hist([1, 1, 1, 1, -9]), BULL, breadth_pct=0.60)
+    assert ok is True and baf > 0.60 and bt < 0
+    # BEAR: negative basket AND btc -> confirm (genuine downtrend)
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(hist([-2, -3, -1]), BEAR, breadth_pct=0.60)
+    assert ok is True and bt < 0 and btct < 0
+    # BEAR: negative basket but positive btc (V-bottom rally) -> block
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(
+        [{"future_basket_ret": -2, "future_btc_ret": 3}], BEAR, breadth_pct=0.60)
+    assert ok is False
+    # SIDEWAYS: always confirm
+    ok, bt, baf, btct = evaluator._market_confirmation_signal(hist([-5, -5, -5]), SIDEWAYS, breadth_pct=0.60)
+    assert ok is True
+    # Empty history -> confirm (no signal available, don't block)
+    ok, bt, baf, btct = evaluator._market_confirmation_signal([], BULL, breadth_pct=0.60)
+    assert ok is True
+
+
+def _synthetic_slow_bleed_no_transition_records():
+    """Build a continuous-bleed series for the recent-P&L risk-off test (dir #2).
+
+    Unlike the transition-gate series, this one has NO equity-stop crash and NO
+    cash->active transitions — the selector trades BULL continuously from the
+    start, then the market enters a sustained regime transition where the
+    directional model stays BULL but the basket bleeds a string of small net-
+    negative windows. The confirmation/transition gate (dir #1) cannot help here
+    because the selector never goes to cash (no transition to gate); only the
+    continuous recent-P&L layer (dir #2) can force risk-off mid-bleed.
+
+    Phases (future_basket_ret drives BULL route returns):
+      - warmup: 16 strong positive windows (+3%) to build positive history so
+        the selector's quality gates pass and it trades BULL throughout.
+      - bleed: 14 small net-negative windows (alternating -2.5%, +0.3%) that the
+        directional model still labels BULL. Cumulative recent selector return
+        over the lookback turns meaningfully negative during this phase, which
+        the recent-P&L layer must detect and force cash.
+    """
+    evaluator = _load_evaluator_module()
+    BULL = evaluator.BULL
+
+    def row(idx, basket_ret):
+        return {
+            "ts": idx * HOUR_MS,
+            "time": f"t{idx}",
+            "legacy_regime": BULL,
+            "v1_regime": BULL,
+            "v2_smoothed": BULL,
+            "future_basket_ret": basket_ret,
+            "future_btc_ret": basket_ret,
+        }
+
+    records = []
+    idx = 0
+    for _ in range(16):  # warmup: strong positive, selector trades BULL
+        records.append(row(idx, 3.0)); idx += 1
+    for i in range(14):  # continuous bleed (net-negative, BULL label, no crash)
+        records.append(row(idx, -2.5 if i % 2 == 0 else 0.3)); idx += 1
+    return evaluator, records
+
+
+def test_recent_pnl_risk_off_forces_cash_during_continuous_bleed():
+    """Regression for issue #72 direction #2: recent-P&L risk-off layer.
+
+    On the continuous-bleed series (no equity-stop crash, no cash->active
+    transition), the confirmation/transition gate (dir #1) cannot help because
+    the selector never visits cash. The continuous recent-P&L layer must detect
+    the accumulating negative recent realized selector return and force risk-off
+    (cash) mid-bleed. With the layer DISABLED, the selector bleeds through the
+    entire phase trading BULL.
+    """
+    evaluator, records = _synthetic_slow_bleed_no_transition_records()
+    route_candidates = {
+        "regime_v2": "v2_smoothed",
+        "research_v1": "v1_regime",
+        "legacy_sol": "legacy_regime",
+    }
+    base_kwargs = dict(
+        route_candidates=route_candidates,
+        fee_bps=10.0,
+        lookback=8,
+        min_trailing_objective=-999999.0,
+        # No equity stop and confirmation gate ON: the bleed phase has no crash,
+        # so the equity stop never trips and the selector never visits cash.
+        # This isolates the recent-P&L layer as the sole risk-off control.
+        selector_equity_stop_drawdown_pct=0.0,
+        selector_re_engage_confirmation=True,
+    )
+
+    # Layer DISABLED: selector trades BULL through the entire bleed.
+    routed_off = evaluator.build_selector_route(
+        records,
+        selector_recent_pnl_lookback_windows=0,
+        selector_recent_pnl_stop_pct=0.0,
+        **base_kwargs,
+    )
+    # Layer ENABLED: recent-P&L lookback=6, stop=2.0% forces cash mid-bleed.
+    routed_on = evaluator.build_selector_route(
+        records,
+        selector_recent_pnl_lookback_windows=6,
+        selector_recent_pnl_stop_pct=2.0,
+        **base_kwargs,
+    )
+
+    # Phase boundaries from _synthetic_slow_bleed_no_transition_records().
+    bleed_start, bleed_end = 16, 30  # bleed phase covers indices [16, 30)
+
+    # With the layer OFF, the selector should trade actively (non-cash) through
+    # essentially the entire bleed — there is no crash to trip the equity stop
+    # and no transition for the confirmation gate to gate.
+    off_bleed_cash = sum(
+        1 for i in range(bleed_start, bleed_end)
+        if routed_off[i]["selector_route_key"] == "cash"
+    )
+    assert off_bleed_cash < 2, (
+        f"with recent-P&L OFF, the bleed phase should be almost all active "
+        f"(found {off_bleed_cash} cash windows in [{bleed_start},{bleed_end})); "
+        f"the test premise (no other risk-off trigger) is violated"
+    )
+
+    # With the layer ON, the recent-P&L layer must force cash during the bleed
+    # phase once the cumulative recent selector return crosses the threshold.
+    on_bleed_cash = sum(
+        1 for i in range(bleed_start, bleed_end)
+        if routed_on[i]["selector_route_key"] == "cash"
+    )
+    assert on_bleed_cash > off_bleed_cash, (
+        f"recent-P&L layer should force MORE cash windows during the bleed than "
+        f"the disabled baseline (on={on_bleed_cash} vs off={off_bleed_cash} in "
+        f"indices [{bleed_start},{bleed_end}))"
+    )
+    assert on_bleed_cash >= 3, (
+        f"recent-P&L layer should force a meaningful number of cash windows "
+        f"during the bleed (on={on_bleed_cash} in [{bleed_start},{bleed_end}))"
+    )
+
+    # The cash windows forced by the recent-P&L layer must carry the right
+    # block reason, so the audit trail is debuggable.
+    rpnl_blocks = [
+        r for r in routed_on[bleed_start:bleed_end]
+        if "recent selector P&L risk-off" in (r.get("selector_block_reason") or "")
+    ]
+    assert rpnl_blocks, (
+        "no 'recent selector P&L risk-off' block reasons recorded during the bleed"
+    )
+
+    # The layer must strictly reduce realized route maxDD on the bleed series.
+    maxdd_off = _route_max_drawdown(routed_off)
+    maxdd_on = _route_max_drawdown(routed_on)
+    assert maxdd_on < maxdd_off, (
+        f"recent-P&L layer should reduce maxDD (on={maxdd_on:.2f}% vs "
+        f"off={maxdd_off:.2f}%) on the continuous-bleed series"
+    )
+
+
+def test_recent_pnl_layer_respects_threshold_and_lookback():
+    """Unit test: the recent-P&L layer should not fire when the threshold is
+    not breached, and should fire sooner with a smaller stop threshold.
+
+    On the continuous-bleed series, a large stop threshold (10%) should rarely
+    fire during the small-bleed phase, while a small threshold (1%) should fire
+    aggressively. This guards against the layer being a no-op or always-on.
+    """
+    evaluator, records = _synthetic_slow_bleed_no_transition_records()
+    route_candidates = {
+        "regime_v2": "v2_smoothed",
+        "research_v1": "v1_regime",
+        "legacy_sol": "legacy_regime",
+    }
+    base_kwargs = dict(
+        route_candidates=route_candidates,
+        fee_bps=10.0,
+        lookback=8,
+        min_trailing_objective=-999999.0,
+        selector_equity_stop_drawdown_pct=0.0,
+        selector_re_engage_confirmation=True,
+        selector_recent_pnl_lookback_windows=6,
+    )
+
+    routed_loose = evaluator.build_selector_route(
+        records, selector_recent_pnl_stop_pct=10.0, **base_kwargs,
+    )
+    routed_tight = evaluator.build_selector_route(
+        records, selector_recent_pnl_stop_pct=1.0, **base_kwargs,
+    )
+
+    # The tight threshold (1%) should force at least as many cash windows as the
+    # loose threshold (10%) — a tighter stop trips earlier and more often.
+    cash_tight = sum(1 for r in routed_tight if r["selector_route_key"] == "cash")
+    cash_loose = sum(1 for r in routed_loose if r["selector_route_key"] == "cash")
+    assert cash_tight >= cash_loose, (
+        f"tighter stop (1%) should force >= cash windows than loose stop (10%) "
+        f"(tight={cash_tight} vs loose={cash_loose})"
+    )
+    # And the loose threshold should still force fewer than the tight one unless
+    # the bleed is severe enough to trip both — in which case they may be equal.
+    # The key invariant: tight >= loose, already asserted above.

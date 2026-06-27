@@ -551,6 +551,50 @@ def _route_returns_for_key(records: list[dict[str, Any]], route_key: str, *, fee
     ]
 
 
+def _market_confirmation_signal(
+    history: list[dict[str, Any]],
+    regime: str,
+    *,
+    breadth_pct: float,
+) -> tuple[bool, float, float, float]:
+    """Regime-aware no-lookahead confirmation from raw market returns.
+
+    Issue #72 direction #1: the confirmation gate must skip choppy early-recovery
+    false-BULL windows. The prior signal used *realized route returns* (which
+    include BEAR-route gains from falling baskets), so it was almost always
+    positive and never skipped anything on real data. This signal uses the RAW
+    basket and reference trailing returns directly — i.e. "is the market actually
+    recovering?" — which is what the issue specifies.
+
+    Returns ``(confirmed, basket_trailing, basket_advancing_frac, btc_trailing)``.
+    ``confirmed`` is True when the market move supports the chosen regime:
+
+    - BULL: basket trailing return > 0 OR breadth turn (advancing frac > breadth_pct).
+    - BEAR: basket trailing return < 0 AND btc trailing return < 0 (a genuine
+      sustained downtrend, not a single V-bottom spike the BEAR route would
+      step into and lose on).
+    - SIDEWAYS / STORMY: always confirmed (these route to ~cash anyway).
+
+    All inputs are from ``history`` (rows strictly before the decision index),
+    so this is strictly no-lookahead.
+    """
+    if not history:
+        return True, 0.0, 0.0, 0.0
+    basket_rets = [float(h.get("future_basket_ret", 0.0)) for h in history]
+    btc_rets = [float(h.get("future_btc_ret", 0.0)) for h in history]
+    basket_trailing = sum(basket_rets)
+    basket_advancing = sum(1 for x in basket_rets if x > 0.0)
+    basket_advancing_frac = basket_advancing / len(basket_rets) if basket_rets else 0.0
+    btc_trailing = sum(btc_rets)
+    if regime == BULL:
+        confirmed = basket_trailing > 0.0 or basket_advancing_frac > breadth_pct
+    elif regime == BEAR:
+        confirmed = basket_trailing < 0.0 and btc_trailing < 0.0
+    else:
+        confirmed = True
+    return confirmed, basket_trailing, basket_advancing_frac, btc_trailing
+
+
 def _trailing_window_passes(
     returns: list[float],
     *,
@@ -593,6 +637,9 @@ def build_selector_route(
     selector_re_engage_confirmation: bool = True,
     selector_re_engage_breadth_pct: float = 0.60,
     selector_re_engage_rolling_peak_windows: int = 0,
+    selector_re_engage_confirmation_lookback: int = 0,
+    selector_recent_pnl_lookback_windows: int = 0,
+    selector_recent_pnl_stop_pct: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Select a route using only prior realized route windows.
 
@@ -619,6 +666,25 @@ def build_selector_route(
       couple of early-recovery losses don't immediately establish a new, higher
       watermark to draw down from. 0 disables the rolling rebase and falls back
       to rebasing to current equity.
+    - ``selector_re_engage_confirmation_lookback`` (DEFAULT 0 = full lookback):
+      the number of recent history windows the confirmation signal sums over.
+      The default (0) uses the full ``lookback`` (e.g. 12) history. A SHORTER
+      window (e.g. 3-4) drops stale positive returns faster after a trend
+      reversal, so the gate stops confirming a BULL whose uptrend has already
+      rolled over — this materially reduces route maxDD on the recent crash
+      window (issue #72). 0 keeps the prior full-lookback behaviour.
+    - ``selector_recent_pnl_lookback_windows`` / ``selector_recent_pnl_stop_pct``
+      (issue #72 direction #2, DEFAULT OFF): a CONTINUOUS risk-off layer keyed
+      on the selector's OWN recent realized P&L over the last N windows (not the
+      all-time peak drawdown the equity stop watches). When the cumulative
+      realized selector return over the last ``lookback_windows`` windows is at
+      or below ``-stop_pct``, the selector goes to cash for this window and
+      re-checks next window. Unlike the confirmation gate (direction #1), this
+      layer is not a transition gate — it fires mid-bleed whenever the selector
+      is recently losing, regardless of any cash->active transition, which makes
+      it robust to a directional model that stays BULL through a regime
+      transition. When ``stop_pct > 0`` and ``lookback_windows > 0`` it is ON;
+      either being 0 disables it.
     """
     selected: list[dict[str, Any]] = []
     lookback = max(1, lookback)
@@ -630,6 +696,15 @@ def build_selector_route(
     stop_cooldown_remaining = 0
     selector_equity_stop_cooldown_windows = max(1, int(selector_equity_stop_cooldown_windows or 1))
     re_engage_rolling_peak_windows = max(0, int(selector_re_engage_rolling_peak_windows or 0))
+    # Direction #2: recent-P&L risk-off layer. Active only when BOTH a positive
+    # lookback window count AND a positive stop threshold are configured.
+    recent_pnl_lookback_windows = max(0, int(selector_recent_pnl_lookback_windows or 0))
+    recent_pnl_stop_pct = float(selector_recent_pnl_stop_pct or 0.0)
+    recent_pnl_active = recent_pnl_lookback_windows > 0 and recent_pnl_stop_pct > 0.0
+    # Confirmation-signal lookback: 0 means use the full ``lookback`` history
+    # (prior behaviour); a positive value uses only the most recent N windows so
+    # stale positive returns drop faster after a trend reversal.
+    confirm_lookback = lookback if int(selector_re_engage_confirmation_lookback or 0) <= 0 else max(1, int(selector_re_engage_confirmation_lookback))
     for idx, row in enumerate(records):
         if idx > 0 and selected:
             prev = selected[-1]
@@ -739,31 +814,25 @@ def build_selector_route(
             # regime. This skips the choppy early-recovery false-BULL windows
             # that inflate route maxDD.
             if stop_cooldown_remaining == 0:
-                # Compute a no-lookahead confirmation signal from the realized
-                # route returns of ALL candidates over the lookback window.
+                # Direction #1: gate re-engagement on a regime-aware MARKET
+                # confirmation signal (raw basket/reference trailing return),
+                # NOT on realized route returns. The prior signal used route
+                # returns (which include BEAR-route gains from falling baskets)
+                # and was therefore almost always positive — it never skipped
+                # anything on real data. The market signal asks "is the basket
+                # actually recovering?" which is what skips the choppy
+                # early-recovery false-BULL windows that inflate route maxDD.
                 confirmation_ok = True
                 if selector_re_engage_confirmation and history:
-                    best_trailing_ret = -1e18
-                    best_advancing_frac = 0.0
-                    for _name, key in route_candidates.items():
-                        returns = _route_returns_for_key(history, key, fee_bps=fee_bps)
-                        if not returns:
-                            continue
-                        outcome = _compound_returns(returns)
-                        trailing_ret = outcome["total_return_pct"]
-                        advancing = sum(1 for r in returns if r > 0.0)
-                        advancing_frac = advancing / len(returns) if returns else 0.0
-                        if trailing_ret > best_trailing_ret:
-                            best_trailing_ret = trailing_ret
-                            best_advancing_frac = advancing_frac
-                    # Confirm if best candidate shows a positive trailing return
-                    # OR a breadth/momentum turn (advancing windows > threshold).
-                    confirmation_ok = (best_trailing_ret > 0.0) or (best_advancing_frac > selector_re_engage_breadth_pct)
+                    _cand_regime = str(row.get("v2_smoothed", SIDEWAYS))
+                    confirmation_ok, _bt, _baf, _btct = _market_confirmation_signal(
+                        history, _cand_regime, breadth_pct=selector_re_engage_breadth_pct,
+                    )
                     if not confirmation_ok:
                         block_reason = (
-                            f"re-engagement confirmation FAILED (best trailing ret "
-                            f"{best_trailing_ret:+.2f}%, advancing frac {best_advancing_frac:.2f} "
-                            f"> {selector_re_engage_breadth_pct:.2f}? no); staying in cash"
+                            f"re-engagement market confirmation FAILED "
+                            f"(basket_trail {_bt:+.2f}%, advancing {_baf:.2f}, "
+                            f"btc_trail {_btct:+.2f} for {_cand_regime}); staying in cash"
                         )
                         # Do NOT re-arm. Stay in cash this window WITHOUT
                         # rebasing the peak, so the stop can re-trip a fresh
@@ -801,6 +870,70 @@ def build_selector_route(
             # true time-bounded cooldown rather than requiring drawdown to heal
             # below the stop first.
             stop_cooldown_remaining = selector_equity_stop_cooldown_windows
+        # Direction #1 — TRANSITION confirmation gate. The post-cooldown gate
+        # above only fires after the equity stop trips. But on real data the
+        # stop fires only once and the dominant maxDD driver is a slow bleed of
+        # *quality-gate-sanctioned* re-entries (cash -> active) that step into
+        # losing windows over a multi-month drawdown. This gate applies the SAME
+        # regime-aware market confirmation at EVERY cash -> active transition,
+        # not just post-cooldown, so those bad re-entries are skipped. When the
+        # gate blocks, the selector stays in cash for this window (the market
+        # has not confirmed a recovery) and re-checks next window.
+        if (
+            selector_re_engage_confirmation
+            and choice_name != "cash"
+            and selected
+            and selected[-1].get("selector_route_key") == "cash"
+            and history
+        ):
+            _trans_regime = str(row.get(choice_key, SIDEWAYS))
+            _trans_ok, _tbt, _tbaf, _tbtct = _market_confirmation_signal(
+                history, _trans_regime, breadth_pct=selector_re_engage_breadth_pct,
+            )
+            if not _trans_ok:
+                block_reason = (
+                    f"transition market confirmation FAILED "
+                    f"(basket_trail {_tbt:+.2f}%, advancing {_tbaf:.2f}, "
+                    f"btc_trail {_tbtct:+.2f} for {_trans_regime}); staying in cash"
+                )
+                choice_name = "cash"
+                choice_key = ""
+                choice_objective = 0.0
+        # Direction #2 — CONTINUOUS recent-P&L risk-off. Unlike the transition
+        # gate above (which only fires at cash->active transitions), this layer
+        # watches the selector's OWN realized P&L over the last N windows every
+        # step and forces cash whenever that recent stretch is losing beyond the
+        # threshold. This catches a directional model that stays BULL through a
+        # regime transition and bleeds active losses the confirmation gate never
+        # sees (because there is no transition into/out of cash to gate). The
+        # window returns are the realized selector route returns for the prior
+        # rows (rows strictly before this decision), so this is no-lookahead.
+        if recent_pnl_active and choice_name != "cash" and selected:
+            _recent_rows = selected[-recent_pnl_lookback_windows:]
+            _recent_returns = [
+                route_window_return(
+                    str(r.get("selector_smoothed", SIDEWAYS)),
+                    future_basket_ret=float(r.get("future_basket_ret", 0.0)),
+                    future_btc_ret=float(r.get("future_btc_ret", 0.0)),
+                    fee_bps=fee_bps,
+                )
+                for r in _recent_rows
+            ]
+            if len(_recent_returns) >= recent_pnl_lookback_windows:
+                # Cumulative realized selector return over the last N windows.
+                _recent_equity = 1.0
+                for _r in _recent_returns:
+                    _recent_equity *= max(0.0, 1.0 + _r / 100.0)
+                _recent_pnl_pct = (_recent_equity - 1.0) * 100.0
+                if _recent_pnl_pct <= -recent_pnl_stop_pct:
+                    block_reason = (
+                        f"recent selector P&L risk-off: {_recent_pnl_pct:+.2f}% "
+                        f"over last {recent_pnl_lookback_windows} windows <= "
+                        f"-{recent_pnl_stop_pct:.2f}%; going to cash"
+                    )
+                    choice_name = "cash"
+                    choice_key = ""
+                    choice_objective = 0.0
         selected_regime = SIDEWAYS if choice_name == "cash" else str(row.get(choice_key, SIDEWAYS))
         selected.append(
             {
@@ -1018,6 +1151,8 @@ def evaluate_regime_v2_history(
     selector_re_engage_confirmation: bool = True,
     selector_re_engage_breadth_pct: float = 0.60,
     selector_re_engage_rolling_peak_windows: int = 0,
+    selector_recent_pnl_lookback_windows: int = 0,
+    selector_recent_pnl_stop_pct: float = 0.0,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -1144,6 +1279,8 @@ def evaluate_regime_v2_history(
         "re_engage_confirmation": selector_re_engage_confirmation,
         "re_engage_breadth_pct": selector_re_engage_breadth_pct,
         "re_engage_rolling_peak_windows": selector_re_engage_rolling_peak_windows,
+        "recent_pnl_lookback_windows": selector_recent_pnl_lookback_windows,
+        "recent_pnl_stop_pct": selector_recent_pnl_stop_pct,
         "candidates": selector_candidates,
         "no_lookahead": True,
     }
@@ -1165,6 +1302,8 @@ def evaluate_regime_v2_history(
         selector_re_engage_confirmation=selector_re_engage_confirmation,
         selector_re_engage_breadth_pct=selector_re_engage_breadth_pct,
         selector_re_engage_rolling_peak_windows=selector_re_engage_rolling_peak_windows,
+        selector_recent_pnl_lookback_windows=selector_recent_pnl_lookback_windows,
+        selector_recent_pnl_stop_pct=selector_recent_pnl_stop_pct,
     )
 
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
@@ -1218,6 +1357,11 @@ def evaluate_regime_v2_history(
                 "selector_min_passing_trailing_windows": selector_min_passing_trailing_windows,
                 "selector_trailing_window_min_return_pct": selector_trailing_window_min_return_pct,
                 "selector_trailing_window_max_drawdown_pct": selector_trailing_window_max_drawdown_pct,
+                "selector_re_engage_confirmation": selector_re_engage_confirmation,
+                "selector_re_engage_breadth_pct": selector_re_engage_breadth_pct,
+                "selector_re_engage_rolling_peak_windows": selector_re_engage_rolling_peak_windows,
+                "selector_recent_pnl_lookback_windows": selector_recent_pnl_lookback_windows,
+                "selector_recent_pnl_stop_pct": selector_recent_pnl_stop_pct,
             },
         },
         "records": raw_records,
