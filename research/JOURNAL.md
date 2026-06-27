@@ -217,3 +217,199 @@ Adding more regimes would:
 - 30 days of live operation without catastrophic bugs
 
 ---
+
+## SESSION 003 — 2026-06-27 (Hardening Sweep: Backtest Revalidation, Idempotency, Risk Audit, Regime v2 Candidate)
+
+### System Snapshot
+- **Capital:** ~$52 spot (single INJ position), ~$0.28 futures dust
+- **Regime:** BULL (ADX ≈ 30–32, stable; SOL-only classifier)
+- **Live code:** master @ `ab980f4` — **pre-fix** (see §6 below)
+- **Trading mode:** **Canary / paper-scale** — `canary_mode_enabled = yes`, spot cap $75, futures caps $50 abs / 15% pct. No new entries; momentum filter currently blocking all candidates.
+
+> ⚠️ **Important framing for this whole session:** several fixes were committed this
+> session to branch `fix/deploy-blockers-98-101`, which **has NOT been merged to
+> master and has NOT been deployed**. The live bot is still running the pre-fix
+> container image (built from master `ab980f4` on 2026-06-26). Each section below
+> marks clearly what is *committed-and-pending-review* vs *actually live*.
+
+---
+
+### 1. BACKTEST REVALIDATION — VERDICT: FAIL (original +79% was an artifact); corrected +36.5% is UNPROVEN
+
+The original headline (+79% full-period, Sharpe 3.85) is **an artifact of methodological
+flaws** (same-bar-close execution lookahead, understated 0.05% slippage, single inverted
+train/OOS split, flawed Sharpe math). See `docs/audits/backtest-audit.md`.
+
+A corrected, independent revalidation (`docs/audits/backtest-revalidation-report.md`,
+issue #92) applied: next-bar-open execution, 0.1%/side slippage, 0.075%/side fees,
+rolling disjoint OOS walk-forward windows, plus buy-&-hold and 50-run random-rotation
+benchmarks.
+
+| Metric | Original claim | Corrected (`s3`) |
+|---|---|---|
+| Full-period P&L (5 mo) | +79% | **+36.5%** |
+| Sharpe (annualized) | 3.85 | **1.12** |
+| Max drawdown | 48% | **62%** |
+| Trades | 53 | 41 |
+
+- The corrected +36.5% is **probably real but small, risky, and under-sampled** (5 OOS windows, 4/5 positive, high variance). **62% max drawdown is the binding constraint.**
+- Funding-rate cost remains unmodeled in the headline number (the one open gap vs. acceptance criteria).
+- Random-rotation baseline returned mean −63.7% (50 runs); B&H single-coin ≈ +4.4%.
+- Break-even slippage ≈ 0.48%/side — only ~5× margin at the deployed 0.1% assumption.
+- **Do not treat +36.5% as final or deployment-grade.** Treat it as an upper bound pending funding aggregation, a dynamic (survivorship-free) coin universe, ≥10 windows, and 100+ live trades post-fix.
+
+---
+
+### 2. CONFIRMATION-TIMING BUG — FOUND AND FIXED (live 3s → 3–5 min)
+
+The live-vs-backtest trade-frequency divergence was **root-caused and fixed**
+(revalidation report §5; backtest-audit §4). This was the real implementation bug behind
+the "55× too many trades" finding from Session 002.
+
+- **Root cause:** live config had `SCOUT_SLEEP_TIME=1` with `confirmation_cycles=3`, so a
+  rotation signal was confirmed in ~3 seconds; the backtest processes one bar/hour, so its
+  "3 cycles" ≈ 3 hours. The time-based gate (`CONFIRMATION_TIME_ENABLED`) defaulted to off,
+  so the near-instant cycle count was all that mattered live.
+- **Result:** the live bot acted on intrabar noise that disappears by the hourly close —
+  invisible to the backtest. This single mismatch fully explains the 55× frequency gap.
+- **Fix (committed):** regime-aware minimum confirmation seconds (default 180s, bull 300s,
+  sideways 180s, bear 60s). Lives in the pending fix branch; **not yet deployed**.
+
+---
+
+### 3. ORDER IDEMPOTENCY — ADDED TO SPOT + FUTURES PATHS
+
+To make order submission safe to retry without double-execution:
+- Added `_generate_client_order_id()` / `_is_duplicate_order_error()` helpers and
+  `newClientOrderId` on the spot buy/sell paths in `binance_api_manager.py`.
+- Added `_generate_futures_client_order_id()` / `_verify_short_exists()` and
+  `newClientOrderId` on **all 6** `futures_create_order` call sites in `futures_manager.py`
+  (entry, close, emergency-flatten, reconciliation, hard stop, trailing algo).
+- Also: `retry()` rewrite with exponential backoff + 429/`rate_limited` handling + error
+  classification; kill-switch now re-queries positions and logs the kill event; rotating
+  file logger.
+- **Status:** committed on `fix/deploy-blockers-98-101`; **pending review — not deployed.**
+
+---
+
+### 4. RISK AUDIT (#98) — CIRCUIT BREAKER IS DORMANT IN PRODUCTION (F2/F3)
+
+Independent read-only audit (`docs/audits/risk-audit.md`, issue #98):
+
+- **The breaker logic is correct** (≥3% daily / ≥8% weekly trips; all entry paths gated;
+  exits/stop-losses bypass by construction; 13-test independent suite + 15 existing = 28 green).
+- **But it is DORMANT in production.** Its equity baselines were never seeded in the live DB
+  (`portfolio_daily_start_equity` / `portfolio_weekly_start_equity` are MISSING), so
+  `evaluate_circuit_breaker` hits the fail-open branch (`"equity baseline unavailable"`) on
+  every cycle and returns `block_new_risk=False`. The breaker is enabled in config but blind.
+- **Root cause = version skew (F2/F3):** the eager-seeding + visible-fail-open-alert fix
+  exists **locally** on `fix/deploy-blockers-98-101` but the live container was built from
+  master `ab980f4` *before* the fix. Until the branch is merged + redeployed, the breaker
+  cannot fire and a fail-open is silent (no Telegram alert).
+- ~16.6% realized drawdown occurred entirely *before* the breaker was enabled (locked in).
+- The only active capital guard today is the **canary cap** (spot $75, futures $50/15%).
+- Risk-agent did **not** exercise a halt (latent gap, not an active loss path). **Condition
+  attached:** do not approve a regime change to BEAR (opens futures shorts) until F2/F3 are
+  deployed and baselines confirmed seeded.
+
+> **#98 veto review status: ⏳ PENDING.** The fix is committed on the branch but the
+> risk-agent has not yet re-reviewed/signed off the merged+deployed state. Not merged, not deployed.
+
+---
+
+### 5. SESSION CODE REVIEW (#101) — TWO BLOCKERS FOUND AND FIXED (A/B); ROUND-2 APPROVE
+
+Round-1 session review (`docs/audits/session-review.md`, issue #101) found two BLOCKERS:
+
+- **BLOCKER A** — `-2010` misclassified as duplicate: an insufficient-balance `-2010` was
+  treated as "duplicate order sent" and thus as a *successful* order. Fixed by gating on the
+  duplicate-specific message string (`"duplicate order sent"`) instead of the bare code.
+  Verified by execution against the installed `python-binance`.
+- **BLOCKER B** — 5 of 6 `futures_create_order` calls lacked `newClientOrderId` (no
+  idempotency). Fixed: all 6 sites now carry it; AST-based structural test guards regressions.
+
+Round-2 review (same file, top) **APPROVED** both fixes as genuinely resolved. Non-blocking
+follow-ups tracked: (F1, medium) entry-duplicate recovery leaves position untracked until
+restart; (low) `flask-socketio`/Werkzeug-3 web-UI import breakage (trading core unaffected).
+
+> **#101 final-review status: ⏳ PENDING.** Round-2 approved the code on the branch, but the
+> branch has not been merged to master or deployed. The final reviewer has not signed off the
+> deployed state.
+
+---
+
+### 6. DEPLOYMENT STATUS — LIVE IS PRE-FIX; FIXES ARE ON THE BRANCH, NOT DEPLOYED
+
+| | Commit | Deployed? | Notes |
+|---|---|---|---|
+| **Live bot (now)** | master `ab980f4` | ✅ yes (container built 2026-06-26 20:17 UTC) | Pre-fix: dormant breaker, no idempotency, 3s confirmation |
+| `6d69f6c` | fix(#98,#101): 3 defects | ❌ no | BLOCKER A/B + breaker tightening |
+| `aac91e4` | fix(#98 F3): fail-open Telegram alert | ❌ no | Breaker fail-open visibility |
+| `dbe3bd6` | feat(#102): regime v2 candidate | ❌ no | Non-live research module (see §7) |
+
+**Unblocking action:** merge `fix/deploy-blockers-98-101` → master, let Coolify redeploy,
+then confirm `portfolio_daily_start_equity` appears in `bot_state`. **Until then, treat the
+circuit breaker as OFF.**
+
+---
+
+### 7. STRATEGY HYPOTHESES (#97) — COMPLETED: DEFENSIVE TIMING IS THE REAL EDGE
+
+Research doc `research/strategy-hypotheses-2026-06.md` (issue #97) decomposed the corrected
++36.5% and concluded the edge is **defensive timing, not coin selection**:
+
+- Momentum *selection* is weak: per-window optimization beat fixed deployed params in only
+  1 of 3 OOS windows; random-coin-rotation baseline was −63.7% (50 runs).
+- Value is concentrated in three defenses: the 15% trailing stop, the regime→USDC rotation
+  in bears, and the 24h anti-churn filter.
+- Futures exit mix is stop-dominated (290 trailing vs 61 hard-stop exits of 353 trades).
+- Rough attribution: ~70–85% of the corrected spot edge is defensive; ≤15–30% selectional
+  (statistically indistinguishable from zero at n=5).
+- Five candidate hypotheses (H-A defensive overlay, H-B funding harvest, H-C vol-targeted
+  sizing, H-D sideways mean-reversion) + recommended regime-detection signal additions
+  (BTC confirmation, realized-vol, funding-rate, OI, market breadth). Highest-value next
+  experiment: the H-A stop/regime/anti-churn ablation (does not yet exist in committed data).
+
+---
+
+### 8. REGIME v2 CANDIDATE MODULE (#102) — BUILT, NON-LIVE, 26 TESTS PASS
+
+New non-live research module `binance_trade_bot/regime_v2_signals.py` (issue #102,
+commit `dbe3bd6`) implements the five multi-signal detectors recommended in the hypotheses
+doc §2.2: multi-coin breadth, BTC confirmation, realized-volatility regime, funding-rate
+signal, and a weighted composite → BULL/SIDEWAYS/BEAR/STORMY.
+
+- **Intentionally NOT wired into the live path** — every detector accepts data as params,
+  no Binance API calls, fully offline-testable.
+- Feeds the existing Regime v2 promotion pipeline (issue #72), which Session 002 judged
+  🟡 *not ready for live promotion* (route robustness fails all windows; 90d DD > 18% gate).
+- Tests: `tests/test_regime_v2_signals.py` — **26/26 pass.**
+- **Status:** committed on the branch; **non-live; not deployed; not promoted.**
+
+---
+
+### 9. SESSION SUMMARY — WHAT IS DONE vs PENDING
+
+| Work item | Issue | Done? | Live? |
+|---|---|---|---|
+| Backtest revalidation (corrected +36.5%, FAIL vs original +79%) | #92 | ✅ report | n/a (research) |
+| Confirmation-timing bug fix (3s → 3–5min) | #92/#101 | ✅ committed | ❌ pending deploy |
+| Order idempotency (spot + futures, all 6 sites) | #101 | ✅ committed | ❌ pending deploy |
+| Risk audit: breaker dormant (F2/F3) | #98 | ✅ audit | ❌ fix pending deploy |
+| Breaker eager-seed + fail-open alert | #98 | ✅ committed | ❌ pending deploy |
+| Session code review (BLOCKER A/B fixed, round-2 approve) | #101 | ✅ review | ❌ pending deploy |
+| Strategy hypotheses (defensive timing = edge) | #97 | ✅ doc | n/a (research) |
+| Regime v2 candidate module (non-live, 26 tests) | #102 | ✅ committed | ❌ non-live by design |
+
+**Two veto reviews remain PENDING (not merged, not deployed):**
+1. **#98 — risk-agent** must re-review/sign off after the breaker fix is merged + deployed
+   and baselines are confirmed seeded in the DB.
+2. **#101 — final-reviewer** round-2 approved the code on the branch, but the branch is not
+   merged to master or deployed; the deployed state has not been signed off.
+
+**Net:** the live bot is running safe-default canary caps + trailing stop + momentum filter
+blocking entries, but its circuit breaker is dormant and its fixes are on the branch. No
+claim in this journal should be read as "the fixes are live."
+
+---
+

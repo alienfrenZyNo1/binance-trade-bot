@@ -323,6 +323,42 @@ Phase 0 reliability fixes applied:
 
 ---
 
+## Status & Research
+
+### Strategy backtest — honest assessment
+The strategy is **under active revalidation**; treat earlier "+79% / Sharpe 3.85" headline
+figures as **artifacts** of methodological flaws (same-bar-close lookahead, understated
+slippage, inverted train/OOS split). A corrected revalidation
+([`docs/audits/backtest-revalidation-report.md`](docs/audits/backtest-revalidation-report.md))
+puts the full-period result at **+36.5% / Sharpe ~1.1 / ~62% max drawdown** — *probably real
+but small, risky, and under-sampled* (5 OOS windows). **Defensive timing (trailing stop +
+regime→USDC rotation + anti-churn filter) is the real edge; momentum coin-selection is
+unproven.** Do not scale capital on the current evidence. The 62% max drawdown is the binding
+constraint. See also [`docs/audits/backtest-audit.md`](docs/audits/backtest-audit.md).
+
+### Regime v2 candidate (non-live)
+A multi-signal **regime v2 candidate module** exists at
+[`binance_trade_bot/regime_v2_signals.py`](binance_trade_bot/regime_v2_signals.py)
+(issue #102). It implements five detectors (multi-coin breadth, BTC confirmation,
+realized-volatility, funding-rate, composite score) recommended in the strategy hypotheses.
+It is **intentionally NOT wired into the live trading path** — it is offline-testable
+research code (26 tests pass) feeding the Regime v2 promotion pipeline (issue #72), which is
+**not yet promotion-ready**. The live bot still uses the SOL-only ADX+EMA classifier.
+
+### Research hypotheses
+[`research/strategy-hypotheses-2026-06.md`](research/strategy-hypotheses-2026-06.md)
+decomposes where the edge actually comes from and proposes five candidate hypotheses
+(defensive-timing overlay, funding-rate harvesting, volatility-targeted sizing, sideways
+mean-reversion) plus regime-detection signal improvements. The single highest-value next
+experiment is a stop/regime/anti-churn ablation to confirm the defensive-timing attribution.
+
+### Live status snapshot
+See [`CURRENT_STATE.md`](CURRENT_STATE.md) for a living summary of exactly what the deployed
+bot runs, what's pending review on the fix branch, and open issues. The journal of research
+sessions lives in [`research/JOURNAL.md`](research/JOURNAL.md).
+
+---
+
 ## Deployment with Coolify
 
 This bot is deployed via [Coolify](https://coolify.io) (self-hosted PaaS) on a VPS:
