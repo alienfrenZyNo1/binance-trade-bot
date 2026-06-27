@@ -681,6 +681,42 @@ class Strategy(AutoTrader):
             )
         return daily, weekly
 
+    # Rate-limit the fail-open alert so a persistent equity-estimation outage
+    # cannot flood Telegram, while still ensuring the FIRST occurrence (and at
+    # most one per ALERT_INTERVAL) is loudly visible. The fail-open itself is
+    # unchanged — this only escalates visibility on the dangerous path where the
+    # breaker is enabled but blind.
+    CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL = 600  # seconds (10 min)
+
+    def _alert_circuit_breaker_fail_open(self):
+        """Escalate the circuit-breaker blind/fail-open path to a VISIBLE alert.
+
+        When the breaker is enabled but ``_estimate_spot_equity`` returns None,
+        the breaker cannot evaluate drawdown and silently allows all new risk.
+        Per risk-audit #98 (F3) that silent fail-open must be loudly visible —
+        not a notification=False warning. We route a high-severity Telegram
+        message (notification=True), rate-limited so an extended outage does
+        not spam the channel.
+        """
+        now = time.time()
+        last = getattr(self, "_cb_fail_open_last_alert_ts", 0.0)
+        if now - last < self.CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL:
+            # Within the rate-limit window — still log locally for operators
+            # reading journald, but do not re-broadcast to Telegram.
+            self.logger.warning(
+                "Circuit breaker enabled but equity estimate unavailable; "
+                "allowing new risk (fail-open, alert rate-limited)",
+                notification=False,
+            )
+            return
+        self._cb_fail_open_last_alert_ts = now
+        self.logger.warning(
+            "🚨 CIRCUIT BREAKER BLIND: breaker is enabled but spot equity could "
+            "not be estimated — the breaker is FAILING OPEN and allowing all new "
+            "risk without drawdown protection. Investigate balance/price feeds.",
+            notification=True,
+        )
+
     def _new_spot_risk_blocked(self):
         """Return True when portfolio circuit breaker should block new spot buys."""
         if not getattr(self.config, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED', False):
@@ -688,10 +724,11 @@ class Strategy(AutoTrader):
 
         equity = self._estimate_spot_equity()
         if equity is None:
-            self.logger.warning(
-                "Circuit breaker enabled but equity estimate unavailable; allowing new risk",
-                notification=False,
-            )
+            # Fail-open is retained (do not trap the bot / block exits by
+            # blocking new risk based on missing data), but escalate to a
+            # high-severity visible alert so an operator notices the breaker
+            # is blind. Previously this was a silent notification=False warning.
+            self._alert_circuit_breaker_fail_open()
             return False
 
         now = time.time()

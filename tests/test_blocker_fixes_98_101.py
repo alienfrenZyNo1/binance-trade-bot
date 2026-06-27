@@ -114,3 +114,85 @@ def test_initialize_seeding_does_not_change_thresholds():
     # The seeding block must not reference threshold values directly.
     assert "PORTFOLIO_DAILY_MAX_DRAWDOWN_PCT" not in src
     assert "PORTFOLIO_WEEKLY_MAX_DRAWDOWN_PCT" not in src
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER C (F3) — circuit breaker fail-open must be VISIBLE, not silent
+# ---------------------------------------------------------------------------
+
+def test_fail_open_path_escalates_to_visible_alert():
+    """When the breaker is enabled but equity cannot be estimated, the
+    fail-open path must escalate to a high-severity VISIBLE alert
+    (notification=True), not a silent notification=False warning.
+
+    Previously this path was silent (risk-audit #98 F3: "silent fail-open on
+    missing equity"). The fail-open itself is retained (we still allow new
+    risk rather than blocking on missing data), but it must be loudly visible.
+    """
+    import inspect as _inspect
+
+    from binance_trade_bot.strategies.momentum_strategy import Strategy
+
+    # The fail-open branch must delegate to a dedicated alert method rather
+    # than inlining a notification=False warning.
+    src_new = _inspect.getsource(Strategy._new_spot_risk_blocked)
+    assert "_alert_circuit_breaker_fail_open" in src_new, (
+        "REGRESSION: the fail-open path must call _alert_circuit_breaker_fail_open "
+        "so the blind-breaker condition is visible, not silently logged."
+    )
+
+    src_alert = _inspect.getsource(Strategy._alert_circuit_breaker_fail_open)
+    # The alert must actually broadcast (notification=True) at least once per
+    # rate-limit window — a silent notification=False would hide the danger.
+    assert "notification=True" in src_alert, (
+        "REGRESSION: the fail-open alert must send a visible Telegram "
+        "notification (notification=True), not stay silent."
+    )
+
+
+def test_fail_open_alert_is_rate_limited():
+    """The fail-open alert must be rate-limited so an extended equity-estimation
+    outage cannot flood Telegram, while still letting the first occurrence
+    through. We verify the rate-limit interval attribute exists and the
+    method respects it across two calls."""
+    from binance_trade_bot.strategies.momentum_strategy import Strategy
+
+    assert hasattr(Strategy, "CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL")
+    assert Strategy.CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL > 0
+
+    class RecordingLogger:
+        """Captures every (message, notification) call."""
+
+        def __init__(self):
+            self.sent = []  # messages with notification=True (broadcast)
+            self.local = []  # messages with notification=False
+
+        def warning(self, message, notification=True):
+            if notification:
+                self.sent.append(message)
+            else:
+                self.local.append(message)
+
+        def info(self, *a, **k):
+            pass
+
+        def debug(self, *a, **k):
+            pass
+
+        def error(self, *a, **k):
+            pass
+
+    s = Strategy.__new__(Strategy)
+    s.logger = RecordingLogger()
+    # _cb_fail_open_last_alert_ts not set → getattr default 0.0 → first call
+    # is outside the window and must broadcast.
+
+    s._alert_circuit_breaker_fail_open()
+    assert len(s.logger.sent) == 1, "first fail-open occurrence must broadcast"
+    assert len(s.logger.local) == 0
+
+    # Immediate second call is inside the rate-limit window → must NOT
+    # broadcast again, only log locally.
+    s._alert_circuit_breaker_fail_open()
+    assert len(s.logger.sent) == 1, "rate limit must suppress repeat broadcasts"
+    assert len(s.logger.local) == 1, "rate-limited call must still log locally"
