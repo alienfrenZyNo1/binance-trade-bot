@@ -26,11 +26,27 @@ def _generate_client_order_id(side: str, coin_symbol: str, price: str, qty: str)
 
 
 def _is_duplicate_order_error(e: BinanceAPIException) -> bool:
-    """Check if an exception indicates a duplicate clientOrderId (idempotency success)."""
-    if hasattr(e, 'code') and e.code == -2010:
-        return True
-    msg = str(e).lower()
-    return "duplicate order" in msg or "duplicate" in msg
+    """Check if an exception indicates a duplicate clientOrderId (idempotency success).
+
+    IMPORTANT: Binance error code -2010 is ``NEW_ORDER_REJECTED``, a generic
+    catch-all that covers BOTH duplicate-clientOrderId rejections AND genuine
+    rejections such as insufficient balance (e.g. "Account has insufficient
+    balance for requested action."), margin insufficient, etc. Treating every
+    -2010 as "duplicate" silently reports an insufficient-balance failure as a
+    successfully-placed order, which is a live money-loss defect.
+
+    Therefore this check must be GATED on the duplicate-specific message text,
+    not on the -2010 code alone. Only a -2010 whose message actually indicates
+    a duplicate clientOrderId is treated as idempotency success; a genuine
+    insufficient-balance -2010 returns False (so the caller fails rather than
+    pretending the order was placed).
+    """
+    msg = str(getattr(e, "message", None) or e)
+    msg_l = msg.lower()
+    # Binance signals a duplicate clientOrderId with the literal message
+    # "Duplicate order sent." (code -2010). Other -2010 messages such as
+    # "Account has insufficient balance for requested action." must NOT match.
+    return "duplicate order sent" in msg_l
 
 
 # Binance API error codes that are never worth retrying: the request itself is

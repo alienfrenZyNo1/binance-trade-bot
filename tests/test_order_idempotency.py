@@ -114,17 +114,34 @@ class TestGenerateClientOrderIdDeterminism:
 # Pure helper: _is_duplicate_order_error                                      #
 # --------------------------------------------------------------------------- #
 class TestIsDuplicateOrderError:
-    def test_code_minus_2010_is_duplicate(self):
-        # Binance reuses -2010 for insufficient balance AND duplicate orderId;
-        # the current implementation treats -2010 as duplicate in both cases.
-        assert _is_duplicate_order_error(api_error(-2010, msg="duplicateOrder")) is True
+    def test_code_minus_2010_with_duplicate_message_is_duplicate(self):
+        # Binance signals a duplicate clientOrderId with the literal message
+        # "Duplicate order sent." (code -2010). Only that case is idempotency
+        # success — a bare -2010 is NOT a duplicate (see next test).
+        assert _is_duplicate_order_error(
+            api_error(-2010, msg="Duplicate order sent.")
+        ) is True
+
+    def test_insufficient_balance_2010_is_not_duplicate(self):
+        # BLOCKER A regression test (final-reviewer #101, risk-agent #98):
+        # -2010 is NEW_ORDER_REJECTED, a generic catch-all that ALSO covers
+        # genuine insufficient-balance rejections. Such a failure must NOT be
+        # treated as a duplicate/success — otherwise an order that failed for
+        # lack of funds is silently reported as successfully placed.
+        e = api_error(
+            -2010,
+            msg="Account has insufficient balance for requested action.",
+        )
+        assert _is_duplicate_order_error(e) is False
+
+    def test_bare_minus_2010_code_without_duplicate_message_is_not_duplicate(self):
+        # A -2010 with a non-duplicate message must never be treated as
+        # duplicate, regardless of the specific rejection reason.
+        assert _is_duplicate_order_error(api_error(-2010, msg="Margin is insufficient.")) is False
+        assert _is_duplicate_order_error(api_error(-2010, msg="Order would immediately trigger.")) is False
 
     def test_message_duplicate_order_detected(self):
         e = api_error(-9999, msg="Duplicate order sent")
-        assert _is_duplicate_order_error(e) is True
-
-    def test_message_duplicate_substring_detected(self):
-        e = api_error(-9999, msg="This is a duplicate request")
         assert _is_duplicate_order_error(e) is True
 
     def test_unrelated_error_is_not_duplicate(self):
@@ -211,17 +228,61 @@ def _make_futures_manager(client, **config_overrides):
 
 class TestFuturesShortIdempotency:
     def test_duplicate_client_order_id_treated_as_already_opened(self):
-        """Futures _open_short: a -2010 duplicate must be recovered, not fatal."""
+        """Futures _open_short: a -2010 duplicate must be recovered, not fatal.
+
+        After BLOCKER A fix, the duplicate must be verified via
+        futures_get_order before reporting 'opened'. This test confirms a
+        verified duplicate still returns 'opened'.
+        """
         client = DupFuturesClient()
-        client.fail_first = [api_error(-2010, msg="duplicate order id")]
+        client.fail_first = [api_error(-2010, msg="Duplicate order sent.")]
         mgr, logger = _make_futures_manager(client)
+
+        # _verify_short_exists must succeed for 'opened' to be returned.
+        mgr._verify_short_exists = lambda symbol, coid: True
 
         result = mgr._open_short("SOL", margin=50.0, perf_pct=-6.0)
 
-        # The duplicate rejection is treated as success: order already exists.
+        # The duplicate rejection is verified and treated as success.
         assert result == "opened"
         assert client.calls == 1  # only the rejected call; no infinite loop
         assert any("duplicate" in m.lower() for m in logger.messages("info"))
+
+    def test_duplicate_not_verified_returns_idle(self):
+        """BLOCKER A (futures): if futures_get_order cannot confirm the order,
+        'opened' must NOT be returned. Safe default is 'idle'."""
+        client = DupFuturesClient()
+        client.fail_first = [api_error(-2010, msg="Duplicate order sent.")]
+        mgr, logger = _make_futures_manager(client)
+
+        # Verification fails — no order exists on the exchange.
+        mgr._verify_short_exists = lambda symbol, coid: False
+
+        result = mgr._open_short("SOL", margin=50.0, perf_pct=-6.0)
+
+        assert result == "idle"
+        assert any("idle" in m.lower() for m in logger.messages("warning"))
+
+    def test_insufficient_balance_2010_not_treated_as_duplicate(self):
+        """BLOCKER A (futures): a genuine insufficient-margin -2010 must NOT
+        be treated as a duplicate. It must return 'idle', not 'opened'."""
+        client = DupFuturesClient()
+        client.fail_first = [
+            api_error(-2010, msg="Account has insufficient balance for requested action.")
+        ]
+        mgr, logger = _make_futures_manager(client)
+        # Even if verification somehow succeeded, the message gate should
+        # prevent us from ever calling it. Spy to be sure.
+        called = {"verify": False}
+        def _spy(symbol, coid):
+            called["verify"] = True
+            return True
+        mgr._verify_short_exists = _spy
+
+        result = mgr._open_short("SOL", margin=50.0, perf_pct=-6.0)
+
+        assert result == "idle"
+        assert called["verify"] is False  # message gate must skip verification
 
     def test_timeout_then_duplicate_does_not_create_second_order(self):
         """A first-attempt timeout (non-Binance exception) aborts to 'idle'.
@@ -254,21 +315,23 @@ class TestFuturesShortIdempotency:
         assert client.calls == 1
 
     def test_deterministic_order_id_uses_coin_and_price(self):
-        """The futures client_order_id embeds coin + price so retries collide."""
+        """The futures client_order_id embeds coin + symbol so retries collide."""
         captured = {}
-        orig = DupFuturesClient.futures_create_order
 
         class CaptureClient(DupFuturesClient):
             def futures_create_order(self, **kwargs):
                 captured.update(kwargs)
-                raise api_error(-2010, msg="duplicate")
+                raise api_error(-2010, msg="Duplicate order sent.")
 
         client = CaptureClient()
         mgr, _ = _make_futures_manager(client)
+        # Verification stub so the duplicate path doesn't blow up on the
+        # futures_get_order call.
+        mgr._verify_short_exists = lambda symbol, coid: True
         mgr._open_short("SOL", margin=50.0, perf_pct=-6.0)
 
         cid = captured.get("newClientOrderId", "")
-        assert cid.startswith("BTMS")
+        assert cid.startswith("BTF")  # futures prefix (deterministic helper)
         assert "SOL" in cid
 
 
@@ -300,14 +363,14 @@ class DupSpotClient:
         if self.submit_calls == 1:
             raise ConnectionError("read timeout")  # simulate network death
         # second call — Binance says we already sent it
-        raise api_error(-2010, msg="duplicate order id")
+        raise api_error(-2010, msg="Duplicate order sent.")
 
     def order_limit_sell(self, **kwargs):
         self.submit_calls += 1
         self.submitted_params.append(kwargs)
         if self.submit_calls == 1:
             raise ConnectionError("read timeout")
-        raise api_error(-2010, msg="duplicate order id")
+        raise api_error(-2010, msg="Duplicate order sent.")
 
     def get_order(self, **kwargs):
         self.get_calls += 1

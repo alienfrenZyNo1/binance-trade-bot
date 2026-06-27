@@ -17,6 +17,7 @@ REQUIRES: Binance account with USDC-M futures access (verified for IE).
 USES: python-binance futures methods (fapi.binance.com endpoint).
 """
 
+import hashlib
 import time
 from datetime import datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
@@ -143,6 +144,24 @@ class FuturesManager:
         message = str(getattr(error, "message", "") or error).lower()
         return getattr(error, "code", None) == -4046 or "no need to change margin type" in message
 
+    @staticmethod
+    def _generate_futures_client_order_id(scope: str, symbol: str, quantity: float,
+                                          extra: str = "") -> str:
+        """Generate a deterministic futures client order ID.
+
+        Same (scope, symbol, quantity, extra) → same ID, so retries after a
+        network timeout are rejected as a duplicate by Binance rather than
+        creating a second order. The ``scope`` (e.g. 'ENTRY', 'CLOSE',
+        'STOP', 'EMERGENCY', 'RECON') disambiguates orders that share a
+        symbol/quantity so distinct order paths never collide.
+
+        Format: BTF{SCOPE}{digest}{symbol} truncated to 36 chars (Binance limit).
+        """
+        raw = f"{scope}{symbol}{quantity}{extra}"
+        digest = hashlib.md5(raw.encode()).hexdigest()[:16]
+        base = f"BTF{scope.upper()}{digest}{symbol}"
+        return base[:36]
+
     def _ensure_margin_mode(self, futures_symbol: str) -> bool:
         """Set leverage and the configured margin mode before opening a short."""
         self.client.futures_change_leverage(
@@ -188,6 +207,28 @@ class FuturesManager:
                     "Risk controls use conservative sizing and server-side stops."
                 )
             return
+
+    def _verify_short_exists(self, futures_symbol: str, client_order_id: str) -> bool:
+        """Confirm that a short order actually exists on the exchange.
+
+        Used after a -2010 duplicate-indication: only return True (and therefore
+        allow the caller to report 'opened') if an order with the given
+        clientOrderId is actually present on Binance. This prevents a
+        genuine insufficient-balance -2010 from being falsely treated as a
+        successfully-placed order.
+        """
+        try:
+            self.client.futures_get_order(
+                symbol=futures_symbol,
+                origClientOrderId=client_order_id,
+            )
+            return True
+        except Exception as e:
+            self.logger.debug(
+                f"futures_get_order for {client_order_id} on {futures_symbol} "
+                f"did not confirm an existing order: {e}"
+            )
+            return False
 
     # ─────────────────────────────────────────────────────────────────────────
     #  INITIALIZATION
@@ -267,12 +308,16 @@ class FuturesManager:
                     f"{extra_symbol} qty={extra_qty} entry={extra_entry}"
                 )
                 try:
+                    recon_coid = self._generate_futures_client_order_id(
+                        "RECON", extra_symbol, extra_qty, extra=f"{extra_entry:.8f}"
+                    )
                     self.client.futures_create_order(
                         symbol=extra_symbol,
                         side="BUY",
                         type="MARKET",
                         quantity=extra_qty,
                         reduceOnly="true",
+                        newClientOrderId=recon_coid,
                     )
                     self._cancel_server_stops(extra_symbol)
                 except Exception as e:
@@ -569,8 +614,13 @@ class FuturesManager:
                 )
                 return 'idle'
 
-            # Place MARKET short order (SELL = open short on futures)
-            futures_client_order_id = f"BTMS{coin}{int(price * 10000)}"[:36]
+            # Place MARKET short order (SELL = open short on futures).
+            # Deterministic clientOrderId makes retries idempotent: a network
+            # timeout on retry reuses the same ID and Binance rejects the
+            # duplicate instead of opening a second short.
+            futures_client_order_id = self._generate_futures_client_order_id(
+                "ENTRY", futures_symbol, quantity, extra=f"{price:.8f}"
+            )
             order = self.client.futures_create_order(
                 symbol=futures_symbol,
                 side="SELL",
@@ -601,12 +651,16 @@ class FuturesManager:
                     f"Protective stop failed for {futures_symbol}; closing new short immediately"
                 )
                 try:
+                    emergency_coid = self._generate_futures_client_order_id(
+                        "EMERGENCY", futures_symbol, quantity
+                    )
                     self.client.futures_create_order(
                         symbol=futures_symbol,
                         side="BUY",
                         type="MARKET",
                         quantity=quantity,
                         reduceOnly="true",
+                        newClientOrderId=emergency_coid,
                     )
                 finally:
                     self._open_position = None
@@ -623,12 +677,29 @@ class FuturesManager:
             return 'opened'
 
         except BinanceAPIException as e:
-            if hasattr(e, 'code') and e.code == -2010:
-                self.logger.info(f"Futures short already placed (duplicate clientOrderId): {futures_client_order_id}")
-                # Treat as success — order already exists from a previous attempt
-                return 'opened'
+            if (
+                hasattr(e, "code")
+                and e.code == -2010
+                and "duplicate" in str(getattr(e, "message", "") or e).lower()
+            ):
+                # -2010 is NEW_ORDER_REJECTED, a generic catch-all that also
+                # covers genuine insufficient-margin rejections. Only treat it
+                # as "already placed" when the message explicitly indicates a
+                # duplicate. Otherwise a failed-for-insufficient-balance order
+                # would be falsely reported as opened.
+                self.logger.info(
+                    f"Futures short already placed (duplicate clientOrderId): "
+                    f"{futures_client_order_id}"
+                )
+                if self._verify_short_exists(futures_symbol, futures_client_order_id):
+                    return "opened"
+                self.logger.warning(
+                    f"Futures -2010 duplicate indicated but no existing order "
+                    f"found for {futures_client_order_id}; returning idle"
+                )
+                return "idle"
             self.logger.error(f"Futures short failed: {e}")
-            return 'idle'
+            return "idle"
         except Exception as e:
             self.logger.error(f"Futures short error: {e}")
             return 'idle'
@@ -643,6 +714,12 @@ class FuturesManager:
             # BUY = close short (reduceOnly ensures we don't accidentally go long).
             # Keep the server stop live until after the market close succeeds;
             # if close fails, protection remains intact.
+            # Deterministic clientOrderId scoped by the opening order id makes a
+            # timeout+retry idempotent: Binance rejects the duplicate instead of
+            # placing a second reduce-only close.
+            close_coid = self._generate_futures_client_order_id(
+                "CLOSE", pos.symbol, pos.quantity, extra=str(pos.order_id)
+            )
             close_order = self.client.futures_create_order(
                 symbol=pos.symbol,
                 side="BUY",
@@ -650,6 +727,7 @@ class FuturesManager:
                 quantity=pos.quantity,
                 reduceOnly="true",
                 newOrderRespType="RESULT",
+                newClientOrderId=close_coid,
             )
 
             # Confirm the position is actually flat before canceling protection.
@@ -724,6 +802,11 @@ class FuturesManager:
                 entry_price * (1 + self.stop_loss_pct / 100),
                 rounding=ROUND_CEILING,
             )
+            # Deterministic clientOrderId so a timeout+retry does not place a
+            # second hard stop (which could double effective stop quantity).
+            stop_coid = self._generate_futures_client_order_id(
+                "STOP", symbol, quantity, extra=f"{entry_price:.8f}"
+            )
             stop = self.client.futures_create_order(
                 symbol=symbol,
                 side="BUY",
@@ -732,6 +815,7 @@ class FuturesManager:
                 stopPrice=str(stop_price),
                 workingType="MARK_PRICE",
                 reduceOnly="true",
+                newClientOrderId=stop_coid,
             )
             self._stop_order_id = stop.get("algoId", stop.get("orderId", 0))
             if not self._stop_order_id:
@@ -798,6 +882,12 @@ class FuturesManager:
             return False
 
         try:
+            # Deterministic clientOrderId so a timeout+retry does not stack a
+            # second trailing stop alongside the hard stop.
+            trail_coid = self._generate_futures_client_order_id(
+                "TRAIL", symbol, quantity,
+                extra=f"{entry_price:.8f}{activation_price:.8f}{callback_rate:.4f}"
+            )
             trail = self.client.futures_create_algo_order(
                 algoType="CONDITIONAL",
                 symbol=symbol,
@@ -808,6 +898,7 @@ class FuturesManager:
                 callbackRate=str(round(callback_rate, 2)),
                 workingType="MARK_PRICE",
                 reduceOnly="true",
+                newClientOrderId=trail_coid,
             )
             algo_id = trail.get("algoId", trail.get("orderId", 0))
             if not algo_id:

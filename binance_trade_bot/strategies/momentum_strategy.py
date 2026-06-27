@@ -141,6 +141,33 @@ class Strategy(AutoTrader):
         self.futures_manager.new_risk_blocked = self._new_spot_risk_blocked
         self.futures_manager.initialize()
 
+        # Eagerly seed circuit-breaker equity baselines on startup so the
+        # breaker protects capital immediately, not lazily on the next entry
+        # attempt. Without this the breaker is dormant (no baseline to compare
+        # against) until a trade happens — which is exactly when the ~15%
+        # realized drawdown occurred while the breaker was enabled but unseeded.
+        # Only seed when the breaker is enabled; this does NOT change thresholds.
+        if getattr(self.config, 'PORTFOLIO_CIRCUIT_BREAKER_ENABLED', False):
+            try:
+                equity = self._estimate_spot_equity()
+                if equity is not None:
+                    self._ensure_circuit_breaker_baselines(equity, time.time())
+                    self.logger.info(
+                        "Circuit breaker baselines seeded eagerly on startup",
+                        notification=False,
+                    )
+                else:
+                    self.logger.warning(
+                        "Circuit breaker enabled but equity unavailable at "
+                        "startup; baselines will seed on first entry attempt",
+                        notification=False,
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not seed circuit breaker baselines on startup: {e}",
+                    notification=False,
+                )
+
     def _persist_trade_state(self):
         """Save trade state to DB so it survives container restarts."""
         self.db.set_bot_state("last_trade_time", str(self._last_trade_time))
