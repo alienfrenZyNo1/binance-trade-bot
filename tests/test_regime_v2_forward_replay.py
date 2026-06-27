@@ -483,3 +483,105 @@ def test_rolling_peak_rebase_softens_early_recovery_watermark():
         f"rolling-peak maxDD {maxdd_rolling:.2f}% should not exceed "
         f"instantaneous-rebase maxDD {maxdd_instant:.2f}%"
     )
+
+
+def test_selector_re_engages_only_on_confirmation():
+    """Regression for issue #72 (direction #1): confirmation-gated re-engagement.
+
+    On a synthetic crash -> CHOPPY early-recovery -> true recovery series, the
+    selector must:
+      (a) NOT re-engage during the choppy phase when confirmation gating is ON
+          (because trailing return turns negative and advancing < threshold
+          there, so the cooldown re-check stays in cash), whereas the plain
+          (confirmation OFF) re-entry trades back into that choppy phase;
+      (b) DOES re-engage once a positive trailing return appears during the true
+          decisive recovery (not permanently locked in cash).
+
+    This is the core property of direction #1: re-engagement must be gated on
+    evidence the market is actually recovering, not on the cooldown timer alone.
+
+    Phase layout produced by ``_synthetic_choppy_recovery_records``:
+      indices 0-13  : warmup (14 strong bull windows, +4%)
+      indices 14-16 : crash (3 deep negative windows, -13%, trips 15% stop)
+      indices 17-32 : choppy (16 alternating -8%/+1%, net-negative, advancing <50%)
+      indices 33-46 : recovery (14 strong positive windows, +5%)
+    """
+    evaluator, records = _synthetic_choppy_recovery_records()
+    route_candidates = {
+        "regime_v2": "v2_smoothed",
+        "research_v1": "v1_regime",
+        "legacy_sol": "legacy_regime",
+    }
+    # min_trailing_objective=-999999 so the quality gate never blocks; only the
+    # equity stop forces cash, isolating the confirmation-gate behavior.
+    base_kwargs = dict(
+        route_candidates=route_candidates,
+        fee_bps=10.0,
+        lookback=12,
+        min_trailing_objective=-999999.0,
+        selector_equity_stop_drawdown_pct=15.0,
+        selector_equity_stop_cooldown_windows=1,
+    )
+
+    routed_plain = evaluator.build_selector_route(
+        records,
+        selector_re_engage_confirmation=False,
+        **base_kwargs,
+    )
+    routed_gated = evaluator.build_selector_route(
+        records,
+        selector_re_engage_confirmation=True,
+        selector_re_engage_breadth_pct=0.60,
+        **base_kwargs,
+    )
+
+    # Phase boundaries from _synthetic_choppy_recovery_records().
+    choppy_start, choppy_end = 17, 33  # choppy phase covers indices [17, 33)
+    recovery_start = 33
+
+    # (a) The confirmation gate must defer re-engagement during the choppy phase:
+    # the gated run should make FEWER active (non-cash) choices in the choppy
+    # phase than the plain run, because the choppy phase has a negative trailing
+    # return and advancing fraction well below the threshold.
+    plain_choppy_active = sum(
+        1 for i in range(choppy_start, choppy_end)
+        if routed_plain[i]["selector_route_key"] != "cash"
+    )
+    gated_choppy_active = sum(
+        1 for i in range(choppy_start, choppy_end)
+        if routed_gated[i]["selector_route_key"] != "cash"
+    )
+    assert gated_choppy_active < plain_choppy_active, (
+        f"confirmation-gated selector should re-engage LESS during the choppy "
+        f"phase than plain re-entry (gated active={gated_choppy_active} vs "
+        f"plain active={plain_choppy_active} in indices [{choppy_start},{choppy_end}))"
+    )
+
+    # (b) The gated selector must still re-engage during the true recovery once a
+    # positive trailing return scrolls into the lookback — not permanently locked
+    # in cash.
+    recovery_bull = sum(
+        1 for i in range(recovery_start, len(routed_gated))
+        if routed_gated[i]["selector_smoothed"] == evaluator.BULL
+    )
+    assert recovery_bull > 0, (
+        "confirmation-gated selector stayed in cash through the entire true "
+        "recovery phase — confirmation gate must eventually fire when a positive "
+        "trailing return appears"
+    )
+
+    # Cross-check: the gated run should defer re-engagement relative to plain —
+    # the first re-engagement (first non-cash choice at/after the choppy start)
+    # in the gated run should not be earlier than in the plain run.
+    def _first_active_after(routed, start_idx):
+        for i in range(start_idx, len(routed)):
+            if routed[i]["selector_route_key"] != "cash":
+                return i
+        return len(routed)
+
+    gated_first = _first_active_after(routed_gated, choppy_start)
+    plain_first = _first_active_after(routed_plain, choppy_start)
+    assert gated_first >= plain_first, (
+        f"gated first re-engagement (idx {gated_first}) should not be earlier "
+        f"than plain re-entry (idx {plain_first})"
+    )
