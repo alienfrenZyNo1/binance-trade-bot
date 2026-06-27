@@ -47,6 +47,11 @@ from binance_trade_bot.indicators import (
     compute_rsi as _compute_rsi_func,
 )
 from binance_trade_bot.regime_hysteresis import RegimeHysteresis
+from binance_trade_bot.risk_circuit_breaker import (
+    circuit_breaker_status_summary,
+    evaluate_circuit_breaker,
+    is_circuit_breaker_cooling_down,
+)
 
 # ── Regime constants ────────────────────────────────────────────────────────
 
@@ -77,6 +82,10 @@ GRID_SPACING_PCT_DEFAULT = 0.025 # 2.5% between grid levels
 GRID_LEVELS_DEFAULT = 4
 TRANSITION_FRACTION_DEFAULT = 0.5
 BEAR_ACTION_DEFAULT = "short"    # "short" or "cash"
+
+# Max total exposure (spot value + futures notional) as a multiple of equity.
+# Default 1.5× prevents unbounded leverage stacking across spot + futures.
+MAX_TOTAL_EXPOSURE_DEFAULT = 1.5
 
 
 class RegimeSignal:
@@ -346,6 +355,11 @@ class Strategy(AutoTrader):
             getattr(self.config, "RT_BEAR_ACTION", BEAR_ACTION_DEFAULT)
         ).lower()
 
+        # ── Max total exposure (spot + futures notional) / equity ──────────
+        self._max_total_exposure = float(
+            getattr(self.config, "RT_MAX_TOTAL_EXPOSURE", MAX_TOTAL_EXPOSURE_DEFAULT)
+        )
+
         # ── Paper mode (observation only) ───────────────────────────────────
         self._paper_mode = str(
             getattr(self.config, "RT_PAPER_MODE", "no")
@@ -399,7 +413,35 @@ class Strategy(AutoTrader):
         self.futures_manager = FuturesManager(
             self.manager.binance_client, self.logger, self.config
         )
+        # Wire circuit breaker callback so futures entries are gated by the
+        # portfolio-level circuit breaker (mirrors momentum_strategy.py).
+        self.futures_manager.new_risk_blocked = self._new_spot_risk_blocked
         self.futures_manager.initialize()
+
+        # ── Seed circuit-breaker equity baselines on startup ────────────────
+        # Without this the breaker is dormant (no baseline to compare against)
+        # until the first trade happens.  Only seed when enabled; this does
+        # NOT change thresholds.  Pattern from momentum_strategy.py L144-158.
+        if getattr(self.config, "PORTFOLIO_CIRCUIT_BREAKER_ENABLED", False):
+            try:
+                equity = self._estimate_spot_equity()
+                if equity is not None:
+                    self._ensure_circuit_breaker_baselines(equity, time.time())
+                    self.logger.info(
+                        "Circuit breaker baselines seeded eagerly on startup",
+                        notification=False,
+                    )
+                else:
+                    self.logger.warning(
+                        "Circuit breaker enabled but equity unavailable at "
+                        "startup; baselines will seed on first entry attempt",
+                        notification=False,
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not seed circuit breaker baselines on startup: {e}",
+                    notification=False,
+                )
 
         # ── Performance cache ───────────────────────────────────────────────
         self._perf_cache: Dict[str, float] = {}
@@ -650,6 +692,229 @@ class Strategy(AutoTrader):
         )
 
     # ────────────────────────────────────────────────────────────────────────
+    #  CIRCUIT BREAKER INTEGRATION
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _estimate_spot_equity(self):
+        """Estimate portfolio equity in bridge currency for circuit-breaker checks.
+
+        Includes spot bridge balance, spot coin value, and futures wallet
+        balance + unrealized P&L.  Pattern from momentum_strategy.py.
+        """
+        equity = 0.0
+        bridge_symbol = self.config.BRIDGE.symbol
+        try:
+            bridge_balance = self.manager.get_currency_balance(bridge_symbol) or 0.0
+            equity += float(bridge_balance)
+        except Exception:
+            pass
+
+        try:
+            current_coin = self.db.get_current_coin()
+            if current_coin:
+                balance = self.manager.get_currency_balance(current_coin.symbol) or 0.0
+                price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                if price:
+                    equity += float(balance) * float(price)
+        except Exception as e:
+            self.logger.debug(f"Circuit breaker spot equity estimate failed: {e}")
+
+        try:
+            futures_manager = getattr(self, "futures_manager", None)
+            if futures_manager is not None:
+                wallet_balance = (
+                    futures_manager._get_futures_usdc_wallet_balance()
+                    if hasattr(futures_manager, "_get_futures_usdc_wallet_balance")
+                    else futures_manager._get_futures_usdc_balance()
+                )
+                equity += float(wallet_balance or 0.0)
+                pos = getattr(futures_manager, "_open_position", None)
+                if pos is not None:
+                    mark = futures_manager._get_mark_price(pos.symbol)
+                    if mark:
+                        # Short unrealized P&L: positive when mark < entry.
+                        equity += (float(pos.entry_price) - float(mark)) * float(pos.quantity)
+        except Exception as e:
+            self.logger.debug(f"Circuit breaker futures equity estimate failed: {e}")
+
+        return equity if equity > 0 else None
+
+    def _get_float_state(self, key):
+        try:
+            value = self.db.get_bot_state(key)
+            return float(value) if value is not None else None
+        except Exception:
+            return None
+
+    def _get_string_state(self, key):
+        try:
+            value = self.db.get_bot_state(key)
+            return str(value) if value is not None else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _circuit_breaker_periods(now_ts):
+        now_dt = datetime.fromtimestamp(now_ts, timezone.utc)
+        iso_year, iso_week, _ = now_dt.isocalendar()
+        return now_dt.strftime("%Y-%m-%d"), f"{iso_year:04d}-W{iso_week:02d}"
+
+    def _ensure_circuit_breaker_baselines(self, equity, now_ts):
+        """Seed or reset UTC daily/weekly circuit-breaker baselines."""
+        daily_period, weekly_period = self._circuit_breaker_periods(now_ts)
+        daily = self._get_float_state("portfolio_daily_start_equity")
+        weekly = self._get_float_state("portfolio_weekly_start_equity")
+        stored_daily_period = self._get_string_state("portfolio_daily_period")
+        stored_weekly_period = self._get_string_state("portfolio_weekly_period")
+        reset_scopes = []
+
+        if daily is None or daily <= 0:
+            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+            daily = equity
+            reset_scopes.append("daily")
+        elif stored_daily_period is None:
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+        elif stored_daily_period != daily_period:
+            self.db.set_bot_state("portfolio_daily_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_daily_period", daily_period)
+            daily = equity
+            reset_scopes.append("daily")
+
+        if weekly is None or weekly <= 0:
+            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+            weekly = equity
+            reset_scopes.append("weekly")
+        elif stored_weekly_period is None:
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+        elif stored_weekly_period != weekly_period:
+            self.db.set_bot_state("portfolio_weekly_start_equity", str(equity))
+            self.db.set_bot_state("portfolio_weekly_period", weekly_period)
+            weekly = equity
+            reset_scopes.append("weekly")
+
+        if reset_scopes:
+            self.logger.info(
+                f"Seeded/reset circuit-breaker baseline ({'/'.join(reset_scopes)}): ${equity:.2f}",
+                notification=False,
+            )
+        return daily, weekly
+
+    CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL = 600  # seconds (10 min)
+
+    def _alert_circuit_breaker_fail_open(self):
+        """Escalate the circuit-breaker blind/fail-open path to a visible alert."""
+        now = time.time()
+        last = getattr(self, "_cb_fail_open_last_alert_ts", 0.0)
+        if now - last < self.CIRCUIT_BREAKER_FAIL_OPEN_ALERT_INTERVAL:
+            self.logger.warning(
+                "Circuit breaker enabled but equity estimate unavailable; "
+                "allowing new risk (fail-open, alert rate-limited)",
+                notification=False,
+            )
+            return
+        self._cb_fail_open_last_alert_ts = now
+        self.logger.warning(
+            "🚨 CIRCUIT BREAKER BLIND: breaker is enabled but spot equity could "
+            "not be estimated — the breaker is FAILING OPEN and allowing all new "
+            "risk without drawdown protection. Investigate balance/price feeds.",
+            notification=True,
+        )
+
+    def _new_spot_risk_blocked(self):
+        """Return True when portfolio circuit breaker should block new spot buys.
+
+        This is the gate called before every new spot buy and is also wired as
+        the futures_manager.new_risk_blocked callback for futures entries.
+        Pattern from momentum_strategy.py.
+        """
+        if not getattr(self.config, "PORTFOLIO_CIRCUIT_BREAKER_ENABLED", False):
+            return False
+
+        equity = self._estimate_spot_equity()
+        if equity is None:
+            # Fail-open so we don't trap the bot, but escalate visibility.
+            self._alert_circuit_breaker_fail_open()
+            return False
+
+        now = time.time()
+        last_triggered = self._get_float_state("portfolio_circuit_breaker_last_triggered")
+        if is_circuit_breaker_cooling_down(last_triggered, now, self.config):
+            self.logger.warning("Circuit breaker cooldown active — blocking new risk")
+            return True
+
+        daily, weekly = self._ensure_circuit_breaker_baselines(equity, now)
+
+        result = evaluate_circuit_breaker(equity, daily, weekly, self.config)
+        if result.block_new_risk:
+            self.db.set_bot_state("portfolio_circuit_breaker_last_triggered", str(now))
+            self.logger.warning(circuit_breaker_status_summary(result))
+            return True
+        self.logger.debug(circuit_breaker_status_summary(result))
+        return False
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  TOTAL EXPOSURE GUARD
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _compute_total_exposure_ratio(self) -> Optional[float]:
+        """Return (spot_value + futures_notional) / equity, or None if unknown.
+
+        Used by the max_total_exposure guard to prevent unbounded leverage
+        stacking across spot and futures positions.
+        """
+        equity = self._estimate_spot_equity()
+        if equity is None or equity <= 0:
+            return None
+
+        spot_value = 0.0
+        try:
+            current_coin = self.db.get_current_coin()
+            if current_coin:
+                balance = self.manager.get_currency_balance(current_coin.symbol) or 0.0
+                price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                if price:
+                    spot_value = float(balance) * float(price)
+        except Exception:
+            pass
+
+        futures_notional = 0.0
+        try:
+            pos = getattr(self.futures_manager, "_open_position", None)
+            if pos is not None:
+                futures_notional = float(pos.entry_price) * float(pos.quantity)
+        except Exception:
+            pass
+
+        return (spot_value + futures_notional) / equity
+
+    def _total_exposure_allows_entry(self, additional_notional: float = 0.0) -> bool:
+        """Return True if adding ``additional_notional`` won't breach the limit."""
+        current_ratio = self._compute_total_exposure_ratio()
+        if current_ratio is None:
+            # Can't compute — allow (fail-open) but log.
+            self.logger.debug(
+                "Total exposure check skipped — equity unavailable"
+            )
+            return True
+
+        equity = self._estimate_spot_equity()
+        if equity is None or equity <= 0:
+            return True
+
+        new_ratio = current_ratio + (additional_notional / equity)
+        if new_ratio > self._max_total_exposure:
+            self.logger.warning(
+                f"Max total exposure check FAILED: current ratio "
+                f"{current_ratio:.2f}x + new {additional_notional/equity:.2f}x = "
+                f"{new_ratio:.2f}x > limit {self._max_total_exposure:.2f}x — "
+                f"skipping trade"
+            )
+            return False
+        return True
+
+    # ────────────────────────────────────────────────────────────────────────
     #  TRAILING STOP MANAGEMENT
     # ────────────────────────────────────────────────────────────────────────
 
@@ -824,6 +1089,23 @@ class Strategy(AutoTrader):
                 )
                 return
 
+            # ── Risk Gate: Circuit breaker ────────────────────────────────
+            if self._new_spot_risk_blocked():
+                return
+
+            # ── Risk Gate: Max total exposure ──────────────────────────────
+            equity = self._estimate_spot_equity()
+            if equity and equity > 0:
+                frac, _lev = compute_position_size(
+                    self._market_regime, equity,
+                    trend_leverage=self._trend_leverage,
+                    transition_fraction=self._transition_fraction,
+                )
+                available = self.manager.get_currency_balance(self.config.BRIDGE.symbol) or 0.0
+                max_notional = frac * float(available)
+                if not self._total_exposure_allows_entry(max_notional):
+                    return
+
             self.logger.info(
                 f"BULL rotation: {current_coin} → {best_coin} "
                 f"(edge: {best_perf - cur_perf:+.2f}%)"
@@ -859,8 +1141,14 @@ class Strategy(AutoTrader):
                     f"Grid BUY fill: {current_coin} at ~{fill['price']:.6f}"
                 )
                 if not self._paper_mode:
-                    bridge_bal = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
-                    if bridge_bal and bridge_bal > self.manager.get_min_notional(
+                    # ── Risk Gate: Circuit breaker ────────────────────────
+                    if self._new_spot_risk_blocked():
+                        continue
+                    # ── Risk Gate: Max total exposure ──────────────────────
+                    bridge_bal_snap = self.manager.get_currency_balance(self.config.BRIDGE.symbol) or 0.0
+                    if not self._total_exposure_allows_entry(float(bridge_bal_snap)):
+                        continue
+                    if bridge_bal_snap and bridge_bal_snap > self.manager.get_min_notional(
                         current_coin.symbol, self.config.BRIDGE.symbol
                     ):
                         self.manager.buy_alt(current_coin, self.config.BRIDGE)
@@ -913,6 +1201,30 @@ class Strategy(AutoTrader):
             self.logger.info("[PAPER] BEAR: would manage futures short")
             return
 
+        # ── Risk Gate: Max total exposure (futures) ────────────────────────
+        # The circuit breaker is checked inside futures_manager.manage_bear
+        # via the new_risk_blocked callback.  Here we add the exposure guard
+        # to prevent over-leveraging into futures.
+        equity = self._estimate_spot_equity()
+        if equity and equity > 0:
+            futures_wallet = 0.0
+            try:
+                if hasattr(self.futures_manager, "_get_futures_usdc_balance"):
+                    futures_wallet = float(
+                        self.futures_manager._get_futures_usdc_balance() or 0.0
+                    )
+            except Exception:
+                pass
+            # Max notional for a new short = fraction * available margin
+            frac, _lev = compute_position_size(
+                self._market_regime, equity,
+                trend_leverage=self._trend_leverage,
+                transition_fraction=self._transition_fraction,
+            )
+            max_margin = frac * futures_wallet if futures_wallet > 0 else 0.0
+            if not self._total_exposure_allows_entry(max_margin):
+                return
+
         performance = self._get_all_performance()
         action = self.futures_manager.manage_bear(performance, self._market_regime)
         if action in ("opened", "closed"):
@@ -948,6 +1260,14 @@ class Strategy(AutoTrader):
         if best_coin is not None:
             if self._paper_mode:
                 self.logger.info(f"[PAPER] Re-entry: would buy {best_coin} (perf: {best_perf:+.2f}%)")
+                return
+
+            # ── Risk Gate: Circuit breaker ────────────────────────────────
+            if self._new_spot_risk_blocked():
+                return
+
+            # ── Risk Gate: Max total exposure ──────────────────────────────
+            if not self._total_exposure_allows_entry(float(bridge_balance)):
                 return
 
             min_notional = self.manager.get_min_notional(best_coin.symbol, self.config.BRIDGE.symbol)
@@ -1078,7 +1398,15 @@ class Strategy(AutoTrader):
                 self.logger.info(f"[PAPER] Bridge scout: would buy {best_coin}")
                 return
 
+            # ── Risk Gate: Circuit breaker ────────────────────────────────
+            if self._new_spot_risk_blocked():
+                return
+
             bridge_balance = self.manager.get_currency_balance(self.config.BRIDGE.symbol)
+            # ── Risk Gate: Max total exposure ──────────────────────────────
+            if not self._total_exposure_allows_entry(float(bridge_balance or 0.0)):
+                return
+
             if bridge_balance and bridge_balance > self.manager.get_min_notional(
                 best_coin.symbol, self.config.BRIDGE.symbol
             ):
