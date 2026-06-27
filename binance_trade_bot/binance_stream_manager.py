@@ -162,7 +162,14 @@ class BinanceStreamManager:
                         self._invalidate_balances()
             if stream_data is not False and stream_data is not None:
                 self._process_stream_data(stream_data)
-            if stream_data is False and stream_signal is False:
+            # `pop_stream_data_from_stream_buffer()` returns None on an empty
+            # buffer (not False), so the idle-sleep below must treat both None
+            # and False as "nothing to process". The previous gate checked only
+            # `stream_data is False`, which meant the 0.01s throttle was never
+            # reached and this housekeeping thread spun at ~100% CPU for the
+            # bot's entire uptime (issue #103). This does not change order,
+            # risk, or trading logic — it only restores the intended idle wait.
+            if (stream_data is None or stream_data is False) and stream_signal is False:
                 time.sleep(0.01)
 
     def _process_stream_data(self, stream_data):
