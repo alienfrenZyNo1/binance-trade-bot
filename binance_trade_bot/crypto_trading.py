@@ -113,6 +113,36 @@ def _reconcile_position(manager, db, logger, config):
     except Exception:
         pass
 
+    # Final fallback: the DB coin balance is below min_notional AND bridge is
+    # small (or zero).  Before declaring "seems OK", scan the account for the
+    # largest non-bridge, non-BNB holding and set current_coin to match
+    # reality.  This fixes the dangerous divergence where the DB says one coin
+    # but we actually hold another (issue #111).
+    try:
+        account = manager.get_account()
+        best_asset = None
+        best_free = 0.0
+        for bal in account.get("balances", []):
+            asset = bal["asset"]
+            free = float(bal["free"])
+            if asset in (bridge_symbol, "BNB") or free <= 0:
+                continue
+            # Found a non-bridge asset we hold — track the largest one
+            if free > best_free:
+                best_free = free
+                best_asset = asset
+        if best_asset and best_free > 0.001:
+            coin_obj = db.get_coin(best_asset)
+            if coin_obj and coin_obj.enabled:
+                logger.info(
+                    f"Reconciliation: DB says {current_coin.symbol} but actual holding is "
+                    f"{best_free} {best_asset}. Setting current_coin to {best_asset}."
+                )
+                db.set_current_coin(best_asset)
+                return
+    except Exception as e:
+        logger.warning(f"Could not scan account for reconciliation fallback: {e}")
+
     logger.info(f"Reconciliation: holding {coin_balance} {current_coin.symbol}, {bridge_balance} {bridge_symbol} — seems OK")
 
 
