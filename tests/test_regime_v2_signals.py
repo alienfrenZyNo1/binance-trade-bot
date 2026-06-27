@@ -173,6 +173,114 @@ class TestVolatilityRegime:
         assert result["realized_vol"] == 0.0
 
 
+def _crash_cluster_series(n=80, base=100.0, bar_amp=0.02):
+    """A sustained, alternating +/-``bar_amp`` series modeling a crash cluster.
+
+    Mirrors a real late-Jan-2026-style drawdown window: not a single flash-crash
+    bar, but a sustained period of large per-bar swings (each bar ~±2%). The
+    per-bar stdev is ~``bar_amp`` (~0.02) but the DAILYIZED vol is ~``bar_amp *
+    sqrt(24)`` (~0.098 ⇒ ~10%/day) — clearly STORMY territory (>7%/day).
+    """
+    prices = []
+    p = base
+    for i in range(n):
+        p *= (1.0 + bar_amp) if i % 2 == 0 else (1.0 - bar_amp)
+        prices.append(p)
+    return prices
+
+
+class TestVolatilityUnitBug:
+    """Regression for the realized-vol threshold unit bug (issue #102/#72).
+
+    Before the fix, ``volatility_regime`` compared a RAW per-bar stdev against
+    the VOL_*_MAX thresholds, which are calibrated as DAILYIZED vol fractions.
+    That ~4.9x (sqrt(24)) unit mismatch meant a sustained 2%/bar crash cluster
+    (~10%/day) computed to a per-bar stdev of ~0.02, never reached
+    VOL_HIGH_MAX (0.07), and so STORMY never fired on real crash clusters — only
+    on single-bar flash crashes. These tests lock in the dailyization.
+    """
+
+    def test_sustained_crash_cluster_is_extreme_after_dailyization(self):
+        # ±2%/bar for 80 bars ⇒ per-bar stdev ~0.02, dailyized ~0.098 (~10%/day).
+        # Pre-fix this read as NORMAL/HIGH (per-bar 0.02 < 0.07); post-fix it
+        # is EXTREME, which is what enables STORMY to fire on a real crash.
+        closes = _crash_cluster_series(bar_amp=0.02)
+        result = rv2.volatility_regime(closes)
+        assert result["regime"] == rv2.VOL_EXTREME
+        assert result["is_extreme"] is True
+        assert result["realized_vol"] >= rv2.VOL_HIGH_MAX  # ≥7%/day
+        assert result["score"] == -1.0
+
+    def test_realized_vol_is_dailyized_not_raw_per_bar(self):
+        # Per-bar stdev of a ±2%/bar series ≈ 0.02; dailyized ≈ 0.098.
+        # The returned realized_vol must be on the dailyized scale, i.e. roughly
+        # sqrt(24) × the per-bar stdev, NOT the raw per-bar value.
+        import math as _math
+        closes = _crash_cluster_series(bar_amp=0.02)
+        result = rv2.volatility_regime(closes, window=24)
+        rv = result["realized_vol"]
+        # Sanity: must be far above the raw per-bar stdev (~0.02)...
+        assert rv > 0.05, f"realized_vol {rv} looks like a raw per-bar value, not dailyized"
+        # ...and close to 0.02 * sqrt(24) ≈ 0.098 (allow tolerance for log vs simple).
+        assert abs(rv - 0.02 * _math.sqrt(24)) < 0.01
+
+    def test_calm_market_stays_not_extreme_and_quiet(self):
+        # A genuinely calm market (0.05%/bar) dailyizes to ~0.0024/day — must
+        # stay LOW/NORMAL and never approach STORMY.
+        closes = uptrend(n=48, drift=0.0005)
+        result = rv2.volatility_regime(closes)
+        assert result["regime"] in (rv2.VOL_LOW, rv2.VOL_NORMAL)
+        assert result["is_extreme"] is False
+        assert result["realized_vol"] < rv2.VOL_HIGH_MAX
+        assert result["score"] >= 0.0
+
+    def test_threshold_boundary_dailyized(self):
+        # A series engineered so its DAILYIZED vol sits just above VOL_HIGH_MAX.
+        # Target dailyized vol = 0.075 (>0.07) ⇒ per-bar stdev = 0.075/sqrt(24).
+        import math as _math
+        target_daily = rv2.VOL_HIGH_MAX + 0.005  # 0.075
+        bar_amp = target_daily / _math.sqrt(24)   # per-bar stdev target
+        closes = _crash_cluster_series(bar_amp=bar_amp)
+        result = rv2.volatility_regime(closes)
+        assert result["regime"] == rv2.VOL_EXTREME
+
+    def test_stormy_fires_on_crash_cluster_composite(self):
+        # End-to-end: a sustained crash cluster in the vol input must force the
+        # composite classifier to STORMY even when breadth/BTC are non-bear,
+        # because the (now-correctly-dailyized) volatility sub-detector reads
+        # EXTREME. This is the exact failure mode the unit bug hid.
+        coin_closes = {  # mildly bearish breadth, not itself stormy
+            "SOL": downtrend(n=80, drift=-0.001),
+            "ETH": downtrend(n=80, start=200.0, drift=-0.001),
+            "SUI": downtrend(n=80, start=10.0, drift=-0.001),
+        }
+        result = rv2.composite_regime(
+            coin_closes=coin_closes,
+            btc_closes=downtrend(n=80, start=60000.0, drift=-0.001),
+            vol_closes=_crash_cluster_series(bar_amp=0.02),  # crash-cluster vol
+            funding_rates=[-0.0002, 0.0, 0.0001],
+        )
+        assert result["regime"] == rv2.STORMY
+        assert result["components"]["volatility"]["is_extreme"] is True
+        assert any("STORMY" in r for r in result["reasons"])
+
+    def test_stormy_stays_quiet_in_calm_composite(self):
+        # Symmetric negative: a calm market must NOT promote to STORMY.
+        coin_closes = {
+            "SOL": uptrend(),
+            "ETH": uptrend(start=200.0),
+            "SUI": uptrend(start=10.0),
+        }
+        result = rv2.composite_regime(
+            coin_closes=coin_closes,
+            btc_closes=uptrend(n=80, start=60000.0),
+            vol_closes=uptrend(n=48, drift=0.0005),  # calm
+            funding_rates=[0.0001, 0.0, -0.0001],
+        )
+        assert result["regime"] != rv2.STORMY
+        assert result["components"]["volatility"]["is_extreme"] is False
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # 4. Funding rate signal
 # ──────────────────────────────────────────────────────────────────────────

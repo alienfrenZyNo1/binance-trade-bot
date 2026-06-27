@@ -51,12 +51,27 @@ BREADTH_BEAR_THRESHOLD = 0.30   # <30% above EMA50 ⇒ broad bear
 # BTC confirmation.
 BTC_EMA_PERIOD = 50
 
-# Realized volatility classification (24h stdev of hourly returns).
-# Daily (24-bar) stdev of per-bar returns expressed as a fraction (0.01 = 1%).
-VOL_LOW_MAX = 0.015      # <1.5%/bar stdev  → low
-VOL_NORMAL_MAX = 0.035   # <3.5%/bar stdev  → normal
-VOL_HIGH_MAX = 0.07      # <7%/bar stdev    → high
-# anything ≥ VOL_HIGH_MAX → extreme (stormy territory)
+# Realized volatility classification — DAILYIZED realized vol.
+#
+# UNITS: all four thresholds below are expressed as a DAILYIZED realized-vol
+# fraction (0.01 = 1%/day). They are NOT per-bar stdevs. The detector computes
+# the per-bar stdev of log returns over `window` (default 24 hourly bars) and
+# then scales it by sqrt(window) → an annualizing-free dailyization that turns
+# "stdev of hourly returns" into a single-day (24h) realized-vol number, exactly
+# matching the convention used by `scripts/research_regime_classifier.py
+# ::realized_volatility` (`stdev * sqrt(24) * 100` for the percent form) and the
+# gate called out in research/strategy-hypotheses-2026-06.md §2.2.2
+# ("threshold ~5–8% daily").
+#
+# Why this matters: a 2%/bar crash-cluster has a per-bar stdev of ~0.02 but a
+# dailyized vol of ~0.10 (10%/day) — clearly STORMY territory. Comparing the
+# raw per-bar stdev (0.02) against VOL_HIGH_MAX (0.07) would NEVER trip EXTREME,
+# so STORMY would only fire on single-bar flash crashes, never on a sustained
+# crash cluster. The dailyization is what makes the threshold mean what it says.
+VOL_LOW_MAX = 0.015      # <1.5%/day dailyized vol → low
+VOL_NORMAL_MAX = 0.035   # <3.5%/day dailyized vol → normal
+VOL_HIGH_MAX = 0.07      # <7%/day dailyized vol   → high
+# anything ≥ VOL_HIGH_MAX (≥7%/day) → extreme (stormy territory)
 
 # Funding-rate thresholds (fractional funding rate per interval, e.g. 0.001 = 0.1%).
 FUNDING_OVERHEATED_LONG = 0.0010   # >+0.10%  ⇒ overheated longs (bull exhaustion)
@@ -245,7 +260,11 @@ def volatility_regime(
 
     Returns:
         Dict with keys:
-            - ``realized_vol``: stdev of log returns over the window
+            - ``realized_vol``: DAILYIZED realized vol = per-bar stdev of log
+              returns over the window × sqrt(window), as a fraction
+              (0.01 = 1%/day). This is the same convention as
+              ``research_regime_classifier.realized_volatility`` (percent form)
+              and is what the VOL_*_MAX thresholds are calibrated against.
             - ``regime``: one of ``low``/``normal``/``high``/``extreme``
             - ``score``: ∈ [-1, 1]; higher vol ⇒ more defensive (negative)
             - ``is_extreme``: bool convenience flag
@@ -274,7 +293,18 @@ def volatility_regime(
 
     mean = sum(log_rets) / len(log_rets)
     variance = sum((r - mean) ** 2 for r in log_rets) / len(log_rets)
-    stdev = math.sqrt(variance)
+    per_bar_stdev = math.sqrt(variance)
+
+    # Dailyize: scale the per-bar stdev by sqrt(window) to express it as a
+    # single-day (window-bar) realized vol. This is the same dailyization used
+    # by scripts/research_regime_classifier.py::realized_volatility and the one
+    # the VOL_*_MAX thresholds (§2.2.2, "5–8%/day") are calibrated against.
+    #
+    # CRITICAL UNITS: without this factor, a sustained 2%/bar crash (~10%/day)
+    # has a per-bar stdev of ~0.02 and never reaches VOL_HIGH_MAX (0.07), so
+    # STORMY would never fire on a real crash cluster — only on single-bar
+    # flash crashes. Dailyization is what makes the threshold meaningful.
+    stdev = per_bar_stdev * math.sqrt(window)
 
     if stdev < VOL_LOW_MAX:
         regime = VOL_LOW

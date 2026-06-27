@@ -1334,6 +1334,56 @@ def route_failure_diagnostics(records: list[dict[str, Any]], route_key: str, *, 
     return {"route_key": route_key, "worst_windows": sorted(windows, key=lambda item: item["route_return_pct"])[:limit]}
 
 
+# Issue #72 research: alternative robustness-gate definitions. The legacy gate
+# (``absolute``) marks a chronological sub-window passing only when the route's
+# compound return is ≥ ``min_window_return_pct`` AND its max drawdown is ≤
+# ``max_window_drawdown_pct``, and requires ALL sub-windows to pass (3/3). On a
+# window whose middle segment straddles a ~−90% basket crash, that absolute bar
+# is unsatisfiable by any non-cash route (cash at 0% return also fails it), so
+# the selector — which *survives* the crash at only ~6% maxDD — is scored 2/3
+# despite being unambiguously excellent on that segment relative to the
+# benchmark. The modes below re-examine that definition (research-only; all
+# modes preserve the no-lookahead chronological slicing and all carry an
+# anti-cash backstop so none rewards a degenerate always-cash strategy).
+GATE_MODES = ("absolute", "relative", "maxdd-only", "segment-aware")
+
+
+def _route_window_returns(records_chunk: list[dict[str, Any]], route_key: str, *, fee_bps: float) -> list[float]:
+    return [
+        route_window_return(
+            str(row.get(route_key, SIDEWAYS)),
+            future_basket_ret=float(row.get("future_basket_ret", 0.0)),
+            future_btc_ret=float(row.get("future_btc_ret", 0.0)),
+            fee_bps=fee_bps,
+        )
+        for row in records_chunk
+    ]
+
+
+def _buy_and_hold_window_returns(records_chunk: list[dict[str, Any]], *, fee_bps: float) -> list[float]:
+    fee_pct = fee_bps / 100.0
+    return [float(row.get("future_basket_ret", 0.0)) - fee_pct for row in records_chunk]
+
+
+def _has_monotone_bleed_tail(returns_pct: list[float], *, min_run: int) -> bool:
+    """True iff the run of strictly-negative returns at the end is ≥ ``min_run``.
+
+    "No monotone-bleed tail" (segment-aware rule): a route whose final sub-window
+    ends in a sustained monotonic decline (≥ ``min_run`` consecutive losses
+    running to the last record) is bleeding out and must not be called robust,
+    even if 2/3 segments technically pass. ``min_run`` ≤ 0 disables the check.
+    """
+    if min_run <= 0 or not returns_pct:
+        return False
+    run = 0
+    for ret in reversed(returns_pct):
+        if ret < 0.0:
+            run += 1
+        else:
+            break
+    return run >= min_run
+
+
 def build_route_robustness_gates(
     records: list[dict[str, Any]],
     route_key: str,
@@ -1342,44 +1392,189 @@ def build_route_robustness_gates(
     windows: int = 3,
     min_window_return_pct: float = 0.25,
     max_window_drawdown_pct: float = 20.0,
+    gate_mode: str = "absolute",
+    benchmark: str = "buy_and_hold_basket",
+    require_positive_total_return: bool | None = None,
+    positive_total_return_floor_pct: float = 0.0,
+    segment_min_passing_frac: float = 2.0 / 3.0,
+    bleed_min_run: int = 0,
 ) -> dict[str, Any]:
-    """Evaluate whether a route survives multiple chronological slices."""
+    """Evaluate whether a route survives multiple chronological slices.
+
+    ``gate_mode`` selects how each sub-window is judged and how the route-level
+    pass verdict is reached (issue #72 research — re-examining the 3/3 gate):
+
+    - ``absolute`` (DEFAULT, unchanged legacy behaviour): a sub-window passes
+      when ``total_return_pct >= min_window_return_pct`` AND
+      ``max_drawdown_pct <= max_window_drawdown_pct``; the route passes only if
+      ALL sub-windows pass. This is the original definition; on a crash-straddling
+      segment it is unsatisfiable by any non-cash route (cash also fails it).
+    - ``relative``: a sub-window passes when the route's compound return STRICTLY
+      beats the ``benchmark`` route's compound return over the same slice. The
+      benchmark is the buy-and-hold basket (default) — i.e. the selector must
+      add alpha in every segment, not merely be positive. Because cash can also
+      beat a crashing basket, the ``require_positive_total_return`` anti-cash
+      backstop (default ON for this mode) additionally requires the route's FULL
+      compound return to exceed ``positive_total_return_floor_pct`` (default 0%),
+      so a degenerate always-cash route (0% total) cannot pass.
+    - ``maxdd-only``: a sub-window passes when ``max_drawdown_pct <=
+      max_window_drawdown_pct`` only (no absolute-return floor). The selector's
+      crash-segment maxDD is only ~6%, so this clears 3/3; the
+      ``require_positive_total_return`` anti-cash backstop (default ON for this
+      mode) keeps cash (0% total) from passing.
+    - ``segment-aware``: uses the ``absolute`` per-window verdict, but the route
+      passes when at least ``segment_min_passing_frac`` (default 2/3) of
+      sub-windows pass AND there is no monotone-bleed tail (the last window does
+      not end in ``bleed_min_run`` consecutive losses). This explicitly tolerates
+      one crash-straddling segment failing while rejecting a strategy that bleeds
+      out at the end. Cash fails every absolute window (0% < min_return) so it
+      scores 0/N here regardless.
+
+    Anti-cash guarantee (all non-absolute modes): a degenerate always-cash route
+    (return 0% every window, maxDD 0%) is reported via ``cash_also_passes`` and,
+    with the backstops on, never receives ``passed=True``. ``absolute`` already
+    rejects cash (0% < min_window_return_pct).
+
+    All inputs are the route's own realized window returns; the slicing is purely
+    chronological (contiguous, non-overlapping, covering the full span), so the
+    gate is strictly no-lookahead.
+    """
+    if gate_mode not in GATE_MODES:
+        raise ValueError(f"unknown gate_mode {gate_mode!r}; expected one of {GATE_MODES}")
     if not records:
-        return {"route_key": route_key, "passed": False, "total_windows": 0, "passing_windows": 0, "windows": []}
-    windows = max(1, min(windows, len(records)))
-    chunk_size = math.ceil(len(records) / windows)
+        return {
+            "route_key": route_key,
+            "gate_mode": gate_mode,
+            "passed": False,
+            "total_windows": 0,
+            "passing_windows": 0,
+            "cash_also_passes": False,
+            "windows": [],
+        }
+    # Anti-cash backstop defaults ON for the modes that would otherwise reward a
+    # 0%-return cash route (relative-to-crashing-basket, maxdd-only). ``absolute``
+    # and ``segment-aware`` already reject cash via the absolute per-window floor,
+    # so the backstop defaults OFF for them to preserve prior behaviour. The caller
+    # can ALWAYS force-enable or force-disable via ``require_positive_total_return``
+    # (the CLI uses this for the diagnostic cash-rewarding A/B).
+    if require_positive_total_return is None:
+        require_positive_total_return = gate_mode in ("relative", "maxdd-only")
+    n = max(1, min(windows, len(records)))
+    chunk_size = math.ceil(len(records) / n)
+
+    def _benchmark_returns(chunk: list[dict[str, Any]]) -> list[float]:
+        if benchmark == "cash":
+            return [0.0 for _ in chunk]
+        # buy_and_hold_basket (default) and any unknown benchmark resolve to the
+        # basket net of fees — the same series build_route_outcomes uses for B&H.
+        return _buy_and_hold_window_returns(chunk, fee_bps=fee_bps)
+
     window_rows = []
-    for idx in range(windows):
+    all_route_returns: list[float] = []
+    for idx in range(n):
         chunk = records[idx * chunk_size : (idx + 1) * chunk_size]
         if not chunk:
             continue
-        returns = [
-            route_window_return(
-                str(row.get(route_key, SIDEWAYS)),
-                future_basket_ret=float(row.get("future_basket_ret", 0.0)),
-                future_btc_ret=float(row.get("future_btc_ret", 0.0)),
-                fee_bps=fee_bps,
-            )
-            for row in chunk
-        ]
+        returns = _route_window_returns(chunk, route_key, fee_bps=fee_bps)
+        all_route_returns.extend(returns)
         result = _compound_returns(returns)
+        bench_returns = _benchmark_returns(chunk)
+        bench = _compound_returns(bench_returns)
+        # Per-window verdict by mode.
+        if gate_mode == "maxdd-only":
+            window_passed = result["max_drawdown_pct"] <= max_window_drawdown_pct
+        elif gate_mode == "relative":
+            window_passed = result["total_return_pct"] > bench["total_return_pct"]
+        else:  # absolute + segment-aware use the absolute per-window floor
+            window_passed = (
+                result["total_return_pct"] >= min_window_return_pct
+                and result["max_drawdown_pct"] <= max_window_drawdown_pct
+            )
         result.update(
             {
                 "window_index": idx + 1,
                 "start_time": chunk[0].get("time"),
                 "end_time": chunk[-1].get("time"),
-                "passed": result["total_return_pct"] >= min_window_return_pct and result["max_drawdown_pct"] <= max_window_drawdown_pct,
+                "benchmark": benchmark,
+                "benchmark_total_return_pct": bench["total_return_pct"],
+                "benchmark_max_drawdown_pct": bench["max_drawdown_pct"],
+                "excess_return_pct": result["total_return_pct"] - bench["total_return_pct"],
+                "n_records": len(chunk),
+                "passed": window_passed,
             }
         )
         window_rows.append(result)
     passing = sum(1 for row in window_rows if row["passed"])
+
+    route_total = _compound_returns(all_route_returns)["total_return_pct"]
+    positive_total_ok = route_total > positive_total_return_floor_pct
+    last_window_returns = (
+        _route_window_returns(records[(len(window_rows) - 1) * chunk_size:], route_key, fee_bps=fee_bps)
+        if window_rows
+        else []
+    )
+    bleed = _has_monotone_bleed_tail(last_window_returns, min_run=bleed_min_run)
+
+    if gate_mode == "segment-aware":
+        min_passing = math.ceil(segment_min_passing_frac * len(window_rows))
+        route_passed = bool(window_rows) and passing >= min_passing and not bleed
+    else:
+        route_passed = bool(window_rows) and passing == len(window_rows)
+    if require_positive_total_return:
+        route_passed = route_passed and positive_total_ok
+
+    # cash_also_passes diagnostic: re-run the SAME gate logic on a pure-cash
+    # route (0% every window, maxDD 0%) and report whether it would pass. This
+    # makes it explicit when a gate rewards cash-like behaviour.
+    cash_windows = []
+    cash_all: list[float] = []
+    for idx in range(n):
+        chunk = records[idx * chunk_size : (idx + 1) * chunk_size]
+        if not chunk:
+            continue
+        cash_rets = [0.0 for _ in chunk]
+        cash_all.extend(cash_rets)
+        cres = _compound_returns(cash_rets)
+        bret = _compound_returns(_benchmark_returns(chunk))
+        if gate_mode == "maxdd-only":
+            cw_passed = cres["max_drawdown_pct"] <= max_window_drawdown_pct
+        elif gate_mode == "relative":
+            cw_passed = cres["total_return_pct"] > bret["total_return_pct"]
+        else:
+            cw_passed = (
+                cres["total_return_pct"] >= min_window_return_pct
+                and cres["max_drawdown_pct"] <= max_window_drawdown_pct
+            )
+        cash_windows.append(cw_passed)
+    cash_passing = sum(1 for cw in cash_windows if cw)
+    cash_total = _compound_returns(cash_all)["total_return_pct"]
+    cash_positive_ok = cash_total > positive_total_return_floor_pct
+    if gate_mode == "segment-aware":
+        cash_min_passing = math.ceil(segment_min_passing_frac * len(cash_windows))
+        cash_route_passed = bool(cash_windows) and cash_passing >= cash_min_passing
+    else:
+        cash_route_passed = bool(cash_windows) and cash_passing == len(cash_windows)
+    if require_positive_total_return:
+        cash_route_passed = cash_route_passed and cash_positive_ok
+
     return {
         "route_key": route_key,
-        "passed": bool(window_rows) and passing == len(window_rows),
+        "gate_mode": gate_mode,
+        "benchmark": benchmark,
+        "passed": bool(route_passed),
         "passing_windows": passing,
         "total_windows": len(window_rows),
         "min_window_return_pct": min_window_return_pct,
         "max_window_drawdown_pct": max_window_drawdown_pct,
+        "require_positive_total_return": require_positive_total_return,
+        "route_total_return_pct": route_total,
+        "positive_total_return_floor_pct": positive_total_return_floor_pct,
+        "positive_total_ok": positive_total_ok,
+        "monotone_bleed_tail": bleed,
+        "segment_min_passing_frac": segment_min_passing_frac,
+        "bleed_min_run": bleed_min_run,
+        "cash_also_passes": bool(cash_route_passed),
+        "cash_passing_windows": cash_passing,
         "windows": window_rows,
     }
 
@@ -1496,6 +1691,17 @@ def evaluate_regime_v2_history(
     momentum_bull_deceleration_cap: float = -1.0,
     momentum_bull_deceleration_roc12_precondition: float = 1.0,
     momentum_bear_divergence_only_floor: float = 1000.0,
+    # Issue #72 research: alternative robustness-gate definitions. The legacy
+    # ``absolute`` gate (3/3 sub-windows each with return≥0.25% AND maxDD≤cap) is
+    # unsatisfiable-by-design on a crash-straddling segment. These select one of
+    # the re-examined definitions (see build_route_robustness_gates). Defaults
+    # preserve the prior behaviour (absolute) so unflagged runs are unchanged.
+    robustness_gate_mode: str = "absolute",
+    robustness_benchmark: str = "buy_and_hold_basket",
+    robustness_require_positive_total_return: bool | None = None,
+    robustness_positive_total_return_floor_pct: float = 0.0,
+    robustness_segment_min_passing_frac: float = 2.0 / 3.0,
+    robustness_bleed_min_run: int = 0,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels.
 
@@ -1748,20 +1954,30 @@ def evaluate_regime_v2_history(
         "research_v1": route_failure_diagnostics(raw_records, "v1_regime", fee_bps=fee_bps),
         "regime_v2": route_failure_diagnostics(raw_records, "v2_smoothed", fee_bps=fee_bps),
     }
+    _robust_kw = dict(
+        fee_bps=fee_bps,
+        max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct,
+        gate_mode=robustness_gate_mode,
+        benchmark=robustness_benchmark,
+        require_positive_total_return=robustness_require_positive_total_return,
+        positive_total_return_floor_pct=robustness_positive_total_return_floor_pct,
+        segment_min_passing_frac=robustness_segment_min_passing_frac,
+        bleed_min_run=robustness_bleed_min_run,
+    )
     route_robustness = {
-        "legacy_sol": build_route_robustness_gates(raw_records, "legacy_regime", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
-        "research_v1": build_route_robustness_gates(raw_records, "v1_regime", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
-        "regime_v2": build_route_robustness_gates(raw_records, "v2_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
+        "legacy_sol": build_route_robustness_gates(raw_records, "legacy_regime", **_robust_kw),
+        "research_v1": build_route_robustness_gates(raw_records, "v1_regime", **_robust_kw),
+        "regime_v2": build_route_robustness_gates(raw_records, "v2_smoothed", **_robust_kw),
     }
     if raw_records and "v2_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_tuned"] = route_failure_diagnostics(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_tuned"] = build_route_robustness_gates(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
+        route_robustness["regime_v2_tuned"] = build_route_robustness_gates(raw_records, "v2_tuned_smoothed", **_robust_kw)
     if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_route_tuned"] = route_failure_diagnostics(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
+        route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", **_robust_kw)
     if raw_records and "selector_smoothed" in raw_records[0]:
         route_failure["regime_v2_selector"] = route_failure_diagnostics(raw_records, "selector_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_selector"] = build_route_robustness_gates(raw_records, "selector_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
+        route_robustness["regime_v2_selector"] = build_route_robustness_gates(raw_records, "selector_smoothed", **_robust_kw)
 
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()
@@ -1813,6 +2029,12 @@ def evaluate_regime_v2_history(
                 "momentum_bull_deceleration_cap": momentum_bull_deceleration_cap,
                 "momentum_bull_deceleration_roc12_precondition": momentum_bull_deceleration_roc12_precondition,
                 "momentum_bear_divergence_only_floor": momentum_bear_divergence_only_floor,
+                "robustness_gate_mode": robustness_gate_mode,
+                "robustness_benchmark": robustness_benchmark,
+                "robustness_require_positive_total_return": robustness_require_positive_total_return,
+                "robustness_positive_total_return_floor_pct": robustness_positive_total_return_floor_pct,
+                "robustness_segment_min_passing_frac": robustness_segment_min_passing_frac,
+                "robustness_bleed_min_run": robustness_bleed_min_run,
             },
         },
         "records": raw_records,
