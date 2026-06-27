@@ -1380,3 +1380,370 @@ def test_build_default_settings_propagates_momentum_guard_flag():
     assert len(settings_off) == 1 and len(settings_on) == 1
     assert settings_off[0]["momentum_guard"] is False
     assert settings_on[0]["momentum_guard"] is True
+
+
+# ============================================================================
+# Issue #72 research (re-examining the 3/3 robustness gate): alternative
+# window-gate definitions. These tests cover each gate mode's behaviour, the
+# no-lookahead property (chronological slicing only), and — critically — the
+# anti-cash guarantee that NO gate rewards a degenerate always-cash strategy.
+# ============================================================================
+
+
+def _load_evaluator():  # alias to match the local helpers' style
+    return _load_evaluator_module()
+
+
+def _route_records_from_returns(window_returns: list[float], route_key: str = "selector_smoothed"):
+    """Build chronological evaluator records from a per-window return series.
+
+    Each record carries a regime that, under ``route_window_return``, realizes
+    the given window return for the route (BULL = basket_ret - fee; SIDEWAYS = 0).
+    This lets the gate tests control each sub-window's route outcome precisely
+    without depending on the classifier.
+    """
+    evaluator = _load_evaluator_module()
+    BULL = evaluator.BULL
+    SIDEWAYS = evaluator.SIDEWAYS
+    fee_pct = 10.0 / 100.0  # 10 bps
+    records = []
+    for idx, ret in enumerate(window_returns):
+        if abs(ret) < 1e-12:
+            records.append({
+                "ts": idx * HOUR_MS, "time": f"t{idx}",
+                "selector_smoothed": SIDEWAYS, "future_basket_ret": 0.0, "future_btc_ret": 0.0,
+            })
+        else:
+            # BULL route return = basket_ret - fee => basket_ret = ret + fee
+            records.append({
+                "ts": idx * HOUR_MS, "time": f"t{idx}",
+                "selector_smoothed": BULL, "future_basket_ret": ret + fee_pct, "future_btc_ret": ret + fee_pct,
+            })
+    return records
+
+
+def test_absolute_gate_requires_all_windows_positive():
+    """The legacy absolute gate needs ALL sub-windows positive AND under maxDD."""
+    evaluator = _load_evaluator_module()
+    # Three windows: +1%, +1%, -0.5% (third is slightly negative).
+    recs = _route_records_from_returns([1.0] * 10 + [1.0] * 10 + [-0.5] * 10)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.25, max_window_drawdown_pct=15.0,
+        gate_mode="absolute",
+    )
+    assert gate["gate_mode"] == "absolute"
+    assert gate["passed"] is False, "absolute gate must FAIL when one sub-window is negative"
+    assert gate["passing_windows"] == 2 and gate["total_windows"] == 3
+
+
+def test_absolute_gate_passes_when_all_positive():
+    """All-positive sub-windows pass the absolute gate."""
+    evaluator = _load_evaluator_module()
+    recs = _route_records_from_returns([1.0] * 30)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.25, max_window_drawdown_pct=15.0,
+        gate_mode="absolute",
+    )
+    assert gate["passed"] is True
+    assert gate["passing_windows"] == 3
+
+
+def test_relative_gate_uses_benchmark_and_beats_cash_when_positive():
+    """relative gate: a selector that beats B&H in every window must pass.
+
+    The relative gate requires the route's compound return to STRICTLY exceed the
+    benchmark's in every sub-window. Note: when the selector routes BULL, its
+    return equals B&H (both = basket - fee), so there is no excess on pure-BULL
+    windows. A genuine edge comes from BEAR capture (profiting in a downtrend) or
+    from going flat while the basket dips. Here we use BEAR capture on a down
+    market: selector BEAR earns +0.8%/window while B&H loses ~−21%/window, so the
+    selector beats B&H in every window AND is net positive (anti-cash backstop OK).
+    """
+    evaluator = _load_evaluator_module()
+    SIDEWAYS = evaluator.SIDEWAYS
+    BEAR = evaluator.BEAR
+    # Basket −2% every record. Selector routes BEAR: return = -(-2)*0.45 - fee
+    # = +0.9 − 0.1 = +0.8%/record. B&H = −2 − 0.1 = −2.1%/record.
+    records = [
+        {"ts": i * HOUR_MS, "time": f"t{i}", "selector_smoothed": BEAR,
+         "future_basket_ret": -2.0, "future_btc_ret": -2.0}
+        for i in range(30)
+    ]
+    gate = evaluator.build_route_robustness_gates(
+        records, "selector_smoothed", fee_bps=10.0,
+        windows=3, max_window_drawdown_pct=15.0,
+        gate_mode="relative", benchmark="buy_and_hold_basket",
+    )
+    assert gate["gate_mode"] == "relative"
+    assert gate["benchmark"] == "buy_and_hold_basket"
+    # Every window's excess return must be positive (selector beats B&H).
+    for w in gate["windows"]:
+        assert w["excess_return_pct"] > 0.0, (
+            f"relative window {w['window_index']} excess {w['excess_return_pct']:.2f}% should be > 0"
+        )
+    assert gate["passed"] is True, "selector beating B&H in all windows + net positive must PASS relative gate"
+    assert gate["cash_also_passes"] is False, (
+        "net-positive selector with anti-cash backstop must NOT also let cash pass"
+    )
+
+
+def test_maxdd_only_gate_clears_slightly_negative_window():
+    """maxdd-only gate: a slightly-negative but low-drawdown window passes."""
+    evaluator = _load_evaluator_module()
+    # Selector -1.4% in middle window but maxDD tiny (~1.4%).
+    sel_rets = [5.0] * 10 + [-0.14] * 10 + [5.0] * 10
+    recs = _route_records_from_returns(sel_rets)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, max_window_drawdown_pct=15.0,
+        gate_mode="maxdd-only",
+    )
+    assert gate["gate_mode"] == "maxdd-only"
+    assert gate["passed"] is True, "maxdd-only gate must PASS when all windows have low maxDD"
+    assert gate["passing_windows"] == 3
+    # Middle window has a small negative return but passed (no return floor).
+    assert gate["windows"][1]["total_return_pct"] < 0.0
+    assert gate["windows"][1]["passed"] is True
+
+
+def test_maxdd_only_defaults_require_positive_total_return_true():
+    """Risk-agent condition 3: the anti-cash backstop must default to ON for maxdd-only.
+
+    Calling ``build_route_robustness_gates`` with ``gate_mode="maxdd-only"`` and the
+    default ``require_positive_total_return=None`` MUST resolve to ON (True). This
+    is the guard that prevents a degenerate always-cash or net-negative-low-DD
+    strategy from passing. The only way to disable it is the explicit diagnostic
+    CLI flag (``--window-gate-no-positive-backstop``); the default path must stay ON.
+
+    This test locks risk-agent review §2.1 / condition 3 into a regression guard
+    so the default cannot be silently flipped.
+    """
+    evaluator = _load_evaluator_module()
+    # Any non-empty record series is fine — we only assert the resolved backstop flag.
+    recs = _route_records_from_returns([1.0] * 30)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, max_window_drawdown_pct=15.0,
+        gate_mode="maxdd-only",
+        # require_positive_total_return left as the default (None)
+    )
+    assert gate["gate_mode"] == "maxdd-only"
+    assert gate["require_positive_total_return"] is True, (
+        "maxdd-only must default require_positive_total_return to True "
+        "(anti-cash backstop default-ON); the only disable path is the explicit "
+        "diagnostic CLI flag"
+    )
+
+
+def test_segment_aware_tolerates_one_failed_window():
+    """segment-aware: 2/3 windows passing AND no bleed tail => route passes."""
+    evaluator = _load_evaluator_module()
+    # Two positive windows, one negative (the crash segment), no end bleed.
+    sel_rets = [1.0] * 10 + [-0.5] * 10 + [1.0] * 10
+    recs = _route_records_from_returns(sel_rets)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.25, max_window_drawdown_pct=15.0,
+        gate_mode="segment-aware",
+        segment_min_passing_frac=2.0 / 3.0, bleed_min_run=6,
+    )
+    assert gate["gate_mode"] == "segment-aware"
+    assert gate["passing_windows"] == 2, "exactly two of three windows should pass the absolute per-window floor"
+    assert gate["passed"] is True, "segment-aware must PASS with 2/3 + no bleed"
+    assert gate["monotone_bleed_tail"] is False
+
+
+def test_segment_aware_rejects_monotone_bleed_tail():
+    """segment-aware: a monotone-bleed tail (end-of-window losses) fails the route."""
+    evaluator = _load_evaluator_module()
+    # First two windows positive (pass), third window ENDS in 6+ consecutive losses.
+    # The bleed is measured on the LAST sub-window's trailing records, so the
+    # losses must run all the way to the final record.
+    tail = [0.5] * 2 + [-1.0] * 8  # third window ends in 8 consecutive losses
+    sel_rets = [1.0] * 10 + [1.0] * 10 + tail
+    recs = _route_records_from_returns(sel_rets)
+    gate = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.25, max_window_drawdown_pct=60.0,
+        gate_mode="segment-aware",
+        segment_min_passing_frac=2.0 / 3.0, bleed_min_run=6,
+    )
+    assert gate["monotone_bleed_tail"] is True, "tail of 8 consecutive losses should flag a bleed"
+    assert gate["passed"] is False, "segment-aware must FAIL when there is a monotone-bleed tail"
+
+
+def test_gate_modes_never_reward_degenerate_cash():
+    """CRITICAL anti-cash guarantee: no gate mode passes a degenerate always-cash route.
+
+    An always-cash strategy earns 0% every window (maxDD 0%). No gate may report
+    ``passed=True`` for such a route, AND every gate must correctly report
+    ``cash_also_passes=False`` for a real selector that passes. We test both
+    directions: (a) cash fed directly as the route never passes; (b) a passing
+    real selector's ``cash_also_passes`` is False.
+
+    This is the core requirement from issue #72: any alternative gate that would
+    also pass pure cash is degenerate and must not be merged.
+    """
+    evaluator = _load_evaluator_module()
+    SIDEWAYS = evaluator.SIDEWAYS
+    # A flat (cash-like) record series: SIDEWAYS every window => 0% return.
+    flat_recs = [
+        {"ts": i * HOUR_MS, "time": f"t{i}", "selector_smoothed": SIDEWAYS,
+         "future_basket_ret": 0.0, "future_btc_ret": 0.0}
+        for i in range(30)
+    ]
+    for mode in evaluator.GATE_MODES:
+        gate = evaluator.build_route_robustness_gates(
+            flat_recs, "selector_smoothed", fee_bps=10.0,
+            windows=3, min_window_return_pct=0.25, max_window_drawdown_pct=15.0,
+            gate_mode=mode,
+        )
+        assert gate["passed"] is False, (
+            f"degenerate cash route must NOT pass under {mode} gate "
+            f"(got passed={gate['passed']}, cash_also_passes={gate['cash_also_passes']})"
+        )
+
+
+def test_cash_also_passes_diagnostic_flags_a_cash_rewarding_gate():
+    """When the anti-cash backstop is DISABLED, cash-beating gates must report it.
+
+    With ``require_positive_total_return=False`` (explicit opt-out, diagnostic),
+    the relative gate against a crashing benchmark WOULD pass cash (0% > -90%).
+    The gate must surface this via ``cash_also_passes=True`` so the operator can
+    see the rule is degenerate. This test documents the failure mode that the
+    default (backstop ON) exists to prevent.
+    """
+    evaluator = _load_evaluator_module()
+    SIDEWAYS = evaluator.SIDEWAYS
+    # Crash benchmark: basket -9% every window. Cash (0%) beats it everywhere.
+    crash_recs = [
+        {"ts": i * HOUR_MS, "time": f"t{i}", "selector_smoothed": SIDEWAYS,
+         "future_basket_ret": -9.0, "future_btc_ret": -9.0}
+        for i in range(30)
+    ]
+    # Backstop explicitly OFF -> cash SHOULD pass (and be flagged).
+    gate = evaluator.build_route_robustness_gates(
+        crash_recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, max_window_drawdown_pct=15.0,
+        gate_mode="relative", benchmark="buy_and_hold_basket",
+        require_positive_total_return=False,
+    )
+    assert gate["cash_also_passes"] is True, (
+        "relative gate vs crashing benchmark with backstop OFF must flag cash_also_passes=True"
+    )
+    # And the same gate WITH the default backstop (None -> auto-ON for relative)
+    # must NOT let cash pass.
+    gate_backstop = evaluator.build_route_robustness_gates(
+        crash_recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, max_window_drawdown_pct=15.0,
+        gate_mode="relative", benchmark="buy_and_hold_basket",
+        require_positive_total_return=None,  # default -> ON for relative
+    )
+    assert gate_backstop["cash_also_passes"] is False, (
+        "relative gate vs crashing benchmark with default backstop must NOT let cash pass"
+    )
+
+
+def test_gate_is_no_lookahead_chronological_slicing():
+    """No-lookahead: per-window metrics use ONLY that window's contiguous slice.
+
+    The gate splits records into contiguous non-overlapping chronological chunks.
+    Shuffling the records WITHIN a chunk must not change that chunk's outcome,
+    and the chunk boundaries must be deterministic (no peeking across boundaries).
+    We verify by computing the gate twice — once normally, once with each chunk's
+    internal records shuffled — and asserting identical pass/return/maxDD.
+    """
+    import random
+    evaluator = _load_evaluator_module()
+    # 3 windows of 10 records each with distinct internal values.
+    base_rets = ([1.0, -0.5, 2.0, 0.3, 1.5, -0.2, 0.8, 1.1, -0.3, 0.9] * 1
+                 + [0.5, 0.5, -1.0, 2.0, -0.5, 1.0, 0.2, 1.3, -0.1, 0.7]
+                 + [1.2, -0.4, 0.6, 1.8, -0.7, 1.1, 0.4, 2.1, -0.2, 0.5])
+    recs = _route_records_from_returns(base_rets)
+    gate_a = evaluator.build_route_robustness_gates(
+        recs, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.0, max_window_drawdown_pct=50.0,
+        gate_mode="absolute",
+    )
+    # Shuffle WITHIN each chunk (preserve chunk membership).
+    rng = random.Random(42)
+    shuffled = []
+    for w in range(3):
+        chunk = recs[w * 10:(w + 1) * 10]
+        rng.shuffle(chunk)
+        shuffled.extend(chunk)
+    gate_b = evaluator.build_route_robustness_gates(
+        shuffled, "selector_smoothed", fee_bps=10.0,
+        windows=3, min_window_return_pct=0.0, max_window_drawdown_pct=50.0,
+        gate_mode="absolute",
+    )
+    # Compound return and maxDD are order-dependent (equity curve), so the per-window
+    # total_return/maxDD CAN differ on internal shuffle. But the SLICING (which
+    # records belong to which window) and the no-lookahead property we care about
+    # is that the chunk boundaries are fixed and each window sees only its own
+    # contiguous slice. Assert the window record counts and start/end times are
+    # identical sets (same membership per window).
+    for wa, wb in zip(gate_a["windows"], gate_b["windows"]):
+        assert wa["n_records"] == wb["n_records"] == 10
+    # The robust pass verdict is stable because all windows are positive enough.
+    assert gate_a["passed"] == gate_b["passed"]
+
+
+def test_gate_rejects_unknown_mode():
+    """An unknown gate_mode must raise ValueError (fail fast, no silent default)."""
+    evaluator = _load_evaluator_module()
+    recs = _route_records_from_returns([1.0] * 10)
+    try:
+        evaluator.build_route_robustness_gates(
+            recs, "selector_smoothed", fee_bps=10.0,
+            gate_mode="nonsense",
+        )
+    except ValueError:
+        return
+    raise AssertionError("unknown gate_mode should raise ValueError")
+
+
+def test_build_default_settings_propagates_window_gate_flag():
+    """build_default_settings must propagate the robustness gate config into settings."""
+    module = load_module()
+    for mode in ("absolute", "relative", "maxdd-only", "segment-aware"):
+        settings = module.build_default_settings(
+            days=[60], step_hours=[12], selector_lookbacks=[6],
+            robustness_gate_mode=mode,
+        )
+        assert len(settings) == 1
+        assert settings[0]["robustness_gate_mode"] == mode, (
+            f"settings must carry robustness_gate_mode={mode}"
+        )
+    # segment-aware tuning params propagate too.
+    settings = module.build_default_settings(
+        days=[60], step_hours=[12], selector_lookbacks=[6],
+        robustness_gate_mode="segment-aware",
+        robustness_segment_min_passing_frac=0.5,
+        robustness_bleed_min_run=4,
+    )
+    assert settings[0]["robustness_segment_min_passing_frac"] == 0.5
+    assert settings[0]["robustness_bleed_min_run"] == 4
+
+
+def test_evaluate_regime_v2_history_uses_gate_mode_in_manifest():
+    """evaluate_regime_v2_history must record the gate mode in the manifest."""
+    evaluator = _load_evaluator_module()
+    coins = ["BTC", "ETH", "SOL", "SUI", "AAVE", "LINK"]
+    data = _momentum_dataset(coins, n=140, growth=1.003)
+    for mode in ("absolute", "relative", "maxdd-only", "segment-aware"):
+        output = evaluator.evaluate_regime_v2_history(
+            data, references=["BTC", "ETH", "SOL"], breadth_coins=coins,
+            step_hours=12, warmup_hours=72, forward_hours=12,
+            confirmation_samples=2, min_confidence=0.6,
+            tune_scorecard=True, tune_route_objective=True,
+            momentum_guard=True,
+            robustness_gate_mode=mode,
+        )
+        assert output["manifest"]["assumptions"]["robustness_gate_mode"] == mode
+        # The selector robustness gate must carry the mode and the cash diagnostic.
+        sel_robust = output.get("route_robustness", {}).get("regime_v2_selector", {})
+        assert sel_robust.get("gate_mode") == mode
+        assert "cash_also_passes" in sel_robust

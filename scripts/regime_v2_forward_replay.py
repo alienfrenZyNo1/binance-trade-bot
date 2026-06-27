@@ -28,6 +28,10 @@ _regime_v2 = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _regime_v2
 _spec.loader.exec_module(_regime_v2)
 
+# Issue #72 research: alternative robustness-gate definitions. Mirrors the
+# evaluator's GATE_MODES tuple. CLI choices are the same strings.
+GATE_MODES_CLI = tuple(getattr(_regime_v2, "GATE_MODES", ("absolute", "relative", "maxdd-only", "segment-aware")))
+
 HOUR_MS = 3600 * 1000
 DEFAULT_CACHE_DIR = _REPO_ROOT / ".cache" / "regime_v2_forward_replay"
 
@@ -110,6 +114,13 @@ def build_default_settings(
     selector_recent_pnl_lookback_windows: int = 0,
     selector_recent_pnl_stop_pct: float = 0.0,
     momentum_guard: bool = True,
+    # Issue #72 research: alternative robustness-gate definitions.
+    robustness_gate_mode: str = "absolute",
+    robustness_benchmark: str = "buy_and_hold_basket",
+    robustness_require_positive_total_return: bool | None = None,
+    robustness_positive_total_return_floor_pct: float = 0.0,
+    robustness_segment_min_passing_frac: float = 2.0 / 3.0,
+    robustness_bleed_min_run: int = 0,
 ) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
@@ -159,6 +170,12 @@ def build_default_settings(
                                             "selector_recent_pnl_lookback_windows": int(selector_recent_pnl_lookback_windows),
                                             "selector_recent_pnl_stop_pct": float(selector_recent_pnl_stop_pct),
                                             "momentum_guard": bool(momentum_guard),
+                                            "robustness_gate_mode": str(robustness_gate_mode),
+                                            "robustness_benchmark": str(robustness_benchmark),
+                                            "robustness_require_positive_total_return": robustness_require_positive_total_return,
+                                            "robustness_positive_total_return_floor_pct": float(robustness_positive_total_return_floor_pct),
+                                            "robustness_segment_min_passing_frac": float(robustness_segment_min_passing_frac),
+                                            "robustness_bleed_min_run": int(robustness_bleed_min_run),
                                         }
                                     )
     return settings
@@ -250,6 +267,12 @@ def evaluate_settings_grid(
             selector_recent_pnl_lookback_windows=int(setting.get("selector_recent_pnl_lookback_windows", 0)),
             selector_recent_pnl_stop_pct=float(setting.get("selector_recent_pnl_stop_pct", 0.0)),
             momentum_guard=bool(setting.get("momentum_guard", False)),
+            robustness_gate_mode=str(setting.get("robustness_gate_mode", "absolute")),
+            robustness_benchmark=str(setting.get("robustness_benchmark", "buy_and_hold_basket")),
+            robustness_require_positive_total_return=setting.get("robustness_require_positive_total_return", None),
+            robustness_positive_total_return_floor_pct=float(setting.get("robustness_positive_total_return_floor_pct", 0.0)),
+            robustness_segment_min_passing_frac=float(setting.get("robustness_segment_min_passing_frac", 2.0 / 3.0)),
+            robustness_bleed_min_run=int(setting.get("robustness_bleed_min_run", 0)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -369,6 +392,44 @@ def main() -> int:
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
+    parser.add_argument(
+        "--window-gate",
+        default="absolute",
+        choices=list(GATE_MODES_CLI),
+        help=(
+            "Issue #72 research: robustness window-gate definition. 'absolute' "
+            "is the legacy 3/3-each-window-positive bar. 'relative' requires the "
+            "selector to STRICTLY beat buy-and-hold (or --window-gate-benchmark) "
+            "in every sub-window. 'maxdd-only' drops the absolute-return floor "
+            "(crash-segment selector maxDD is only ~6 pct). 'segment-aware' allows "
+            "2/3 segments to pass AND rejects a monotone-bleed tail. All "
+            "non-absolute modes carry an anti-cash backstop (route must be net "
+            "positive) so a degenerate always-cash route cannot pass."
+        ),
+    )
+    parser.add_argument(
+        "--window-gate-benchmark",
+        default="buy_and_hold_basket",
+        choices=["buy_and_hold_basket", "cash"],
+        help="Benchmark for the 'relative' window-gate mode (default buy_and_hold_basket)",
+    )
+    parser.add_argument(
+        "--window-gate-no-positive-backstop",
+        action="store_true",
+        help="Disable the anti-cash net-positive total-return backstop for relative/maxdd-only modes (DIAGNOSTIC ONLY)",
+    )
+    parser.add_argument(
+        "--window-gate-segment-min-passing-frac",
+        type=float,
+        default=2.0 / 3.0,
+        help="segment-aware: min fraction of sub-windows that must pass (default 0.667)",
+    )
+    parser.add_argument(
+        "--window-gate-bleed-min-run",
+        type=int,
+        default=6,
+        help="segment-aware: min consecutive end-of-window losses to flag a monotone-bleed tail (0 disables; default 6)",
+    )
     args = parser.parse_args()
 
     days = _parse_int_csv(args.days)
@@ -403,6 +464,15 @@ def main() -> int:
         selector_recent_pnl_lookback_windows=args.selector_recent_pnl_lookback_windows,
         selector_recent_pnl_stop_pct=args.selector_recent_pnl_stop_pct,
         momentum_guard=args.momentum_guard,
+        robustness_gate_mode=args.window_gate,
+        robustness_benchmark=args.window_gate_benchmark,
+        # The anti-cash backstop is ON by default for relative/maxdd-only inside
+        # build_route_robustness_gates; the CLI flag lets you DISABLE it for the
+        # diagnostic cash-rewarding A/B. We pass a sentinel so the default (ON)
+        # is preserved unless the user explicitly opts out.
+        robustness_require_positive_total_return=(not args.window_gate_no_positive_backstop),
+        robustness_segment_min_passing_frac=args.window_gate_segment_min_passing_frac,
+        robustness_bleed_min_run=args.window_gate_bleed_min_run,
     )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta
@@ -411,15 +481,25 @@ def main() -> int:
     if args.output:
         Path(args.output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
+    # Issue #72 research: build a name -> selector-robustness lookup from the
+    # full candidates (the leaderboard strips the artifact for compactness).
+    cand_by_name = {c["name"]: c for c in payload.get("candidates", [])}
     print(
         f"Regime v2 forward replay candidates={payload['summary']['total_candidates']} "
         f"cache_hit={cache_meta['cache_hit']} cache={cache_meta['cache_path']}"
     )
     for row in payload["leaderboard"][:10]:
         robust = "✅" if row["robustness_passed"] else f"❌ {row['passing_windows']}/{row['total_windows']}"
+        cand = cand_by_name.get(row["name"], {})
+        artifact = cand.get("artifact") or {}
+        sel_robust = (artifact.get("route_robustness") or {}).get(row.get("best_route") or "") or {}
+        gate_mode = sel_robust.get("gate_mode", "absolute")
+        cash_flag = sel_robust.get("cash_also_passes", False)
+        cash_warn = " ⚠️CASH-PASSING" if cash_flag else ""
         print(
             f"{row['name']}: route={row['best_route']} return={row['best_return_pct']:+.2f}% "
-            f"maxDD={row['best_max_drawdown_pct']:.2f}% score={row['score']:.2f} robust={robust}"
+            f"maxDD={row['best_max_drawdown_pct']:.2f}% score={row['score']:.2f} "
+            f"robust={robust} gate={gate_mode}{cash_warn}"
         )
     return 0
 
