@@ -324,6 +324,326 @@ def apply_regime_guardrails(regime: str, features: dict[str, float | int], score
     return guarded, reasons
 
 
+# ---------------------------------------------------------------------------
+# Direction #1 (issue #72): momentum-exhaustion / mean-reversion guard ON THE
+# REGIME LABEL ITSELF. Unlike the confirmation gate (dir #1-old) and the
+# recent-P&L stop (dir #2), which are lagging overlays that confirm a trend
+# already turned, this guard attacks the ROOT CAUSE: the directional model
+# calling regime turns wrong. It blocks BULL activation into an
+# overextended/rolling-over basket (momentum exhaustion) and blocks BEAR into a
+# diverging-positive BTC (false breakdown). All features use only candles at or
+# before the decision timestamp (strictly no-lookahead, next-candle execution).
+# ---------------------------------------------------------------------------
+
+# Per-coin RSI computed from the indicator library (Wilder's smoothing).
+_rsi = _regime._indicators_mod.compute_rsi
+
+
+def _sma(values: list[float], period: int) -> float | None:
+    """Simple moving average of the last ``period`` values, or None."""
+    if not values or len(values) < period:
+        return None
+    return sum(values[-period:]) / period
+
+
+def _rate_of_change(closes: list[float], periods: int) -> float:
+    """Percent rate of change over the last ``periods`` candles (0.0 if short)."""
+    if len(closes) <= periods or closes[-periods - 1] <= 0:
+        return 0.0
+    return (closes[-1] / closes[-periods - 1] - 1.0) * 100.0
+
+
+def _median_roc(ohlcv_by_coin: dict[str, list[dict[str, float | int]]], coins: list[str], periods: int) -> float:
+    """Median per-coin rate-of-change over the last ``periods`` candles."""
+    rocs: list[float] = []
+    for coin in coins:
+        closes = _closes(ohlcv_by_coin.get(coin, []))
+        rocs.append(_rate_of_change(closes, periods))
+    return _safe_median(rocs)
+
+
+def momentum_exhaustion_features(
+    ohlcv_by_coin: dict[str, list[dict[str, float | int]]],
+    *,
+    references: Iterable[str] = DEFAULT_REFERENCES,
+    breadth_coins: Iterable[str] = DEFAULT_BREADTH_COINS,
+    rsi_period: int = 14,
+    mean_period: int = 24,
+) -> dict[str, float]:
+    """Compute point-in-time momentum-exhaustion features from raw OHLCV.
+
+    All inputs are point-in-time closes at/strictly before the decision time
+    (the caller passes a ``_truncate_to_ts`` window), so this is strictly
+    no-lookahead. Returns a dict of overextension / deceleration / divergence
+    signals used by the direction-#3 regime-label guard:
+
+    Level / overextension (secondary — RSI saturates at 100 on monotonic ramps
+    and is near-useless for detecting *rollover*, so these are kept but are NOT
+    the primary trigger):
+    - ``basket_rsi``: median per-coin RSI over breadth coins (high = overbought).
+    - ``basket_overextended_pct``: fraction of coins above their own
+      ``mean_period`` SMA by more than 15% (overextended from the mean).
+    - ``basket_roc_24h``: median 24h rate-of-change across the basket.
+
+    Deceleration / rollover (PRIMARY — these detect a trend that has ALREADY
+    turned, which a pure level signal cannot):
+    - ``basket_roc_6h`` / ``basket_roc_12h``: short- and medium-horizon basket
+      ROC. A short-ROC that has rolled below the medium-ROC (after an uptrend)
+      signals momentum deceleration -> mean reversion. A short-ROC that has
+      turned above the medium-ROC (after a downtrend) signals a decelerating
+      decline / V-bounce -> mean reversion up.
+    - ``basket_deceleration``: ``basket_roc_6h - basket_roc_12h``. Negative =
+      short momentum rolling under medium (BULL-exhaustion); positive = short
+      momentum lifting over medium (BEAR mean-reversion).
+
+    Divergence:
+    - ``btc_rsi``: BTC RSI (falls back to first reference).
+    - ``btc_roc_24h``: BTC 24h rate-of-change.
+    - ``btc_basket_divergence``: BTC trailing 24h return minus basket median
+      24h return. Positive = BTC up while basket rolls over.
+    """
+    references = list(references)
+    breadth_coins = list(breadth_coins)
+
+    coin_rsis: list[float] = []
+    coin_overextended = 0
+    coin_rocs: list[float] = []
+    for coin in breadth_coins:
+        rows = ohlcv_by_coin.get(coin, [])
+        closes = _closes(rows)
+        if len(closes) >= rsi_period + 1:
+            rsi = _rsi(closes, rsi_period)
+            if rsi is not None:
+                coin_rsis.append(float(rsi))
+        sma = _sma(closes, mean_period)
+        if sma is not None and sma > 0:
+            # Distance above the mean as a fraction of the mean.
+            dist_frac = closes[-1] / sma - 1.0
+            # "Overextended" = stretched >15% above its own 24h SMA.
+            if dist_frac > 0.15:
+                coin_overextended += 1
+        roc = _rate_of_change(closes, 24)
+        coin_rocs.append(roc)
+
+    n_breadth = len(breadth_coins)
+    basket_rsi = _safe_median(coin_rsis)
+    basket_overextended_pct = (coin_overextended / n_breadth) if n_breadth else 0.0
+    basket_roc_24h = _safe_median(coin_rocs)
+    # Multi-horizon ROC for deceleration / rollover detection.
+    basket_roc_6h = _median_roc(ohlcv_by_coin, breadth_coins, 6)
+    basket_roc_12h = _median_roc(ohlcv_by_coin, breadth_coins, 12)
+
+    btc_rows = (ohlcv_by_coin.get("BTC") or ohlcv_by_coin.get(references[0])) if references else []
+    btc_closes = _closes(btc_rows) if btc_rows else []
+    btc_rsi = float(_rsi(btc_closes, rsi_period)) if (btc_closes and _rsi(btc_closes, rsi_period) is not None) else 50.0
+    btc_roc_24h = _rate_of_change(btc_closes, 24)
+    basket_24h = _basket_return(ohlcv_by_coin, breadth_coins, 24)
+    btc_basket_divergence = btc_roc_24h - basket_24h
+
+    return {
+        "basket_rsi": basket_rsi,
+        "basket_overextended_pct": basket_overextended_pct,
+        "basket_roc_24h": basket_roc_24h,
+        "basket_roc_6h": basket_roc_6h,
+        "basket_roc_12h": basket_roc_12h,
+        "basket_deceleration": basket_roc_6h - basket_roc_12h,
+        "btc_rsi": btc_rsi,
+        "btc_roc_24h": btc_roc_24h,
+        "btc_basket_divergence": btc_basket_divergence,
+    }
+
+
+def apply_momentum_guard(
+    regime: str,
+    exhaustion: dict[str, float],
+    *,
+    bull_rsi_cap: float = 100.0,
+    bull_overextended_cap: float = 0.85,
+    bull_roc_cap: float = 25.0,
+    bear_btc_roc_floor: float = 2.0,
+    bear_divergence_floor: float = 3.0,
+    bull_rollover_roc_floor: float = -1.0,
+    bull_rollover_roc12_precondition: float = 2.0,
+    bull_stall_roc6_cap: float = -1.5,
+    bull_stall_roc12_floor: float = 2.0,
+    bear_mean_revert_roc24_floor: float = -8.0,
+    bear_mean_revert_roc6_floor: float = 1.0,
+    # PRIMARY BULL-blocking signal (direction #3, calibrated on 240d/300d real
+    # data): deceleration = basket_roc_6h - basket_roc_12h. A value <= -1.0 means
+    # short-horizon momentum has rolled under medium by >=1.0pp. The roc12>=1.0
+    # precondition requires the basket to have been genuinely extended first, so
+    # the guard only fires on a real trend that has rolled over, not a flat
+    # basket. Selectivity sweep across both 240d and 300d: decel<=-1.0 blocks
+    # 34 BULL windows (18 losers / 16 winners), net +22% route improvement on
+    # 240d, and is the strict maxDD-minimizer on BOTH windows (240d 18.12% ->
+    # 13.38%, 300d 18.30% -> 11.22%, both well under the 15% gate). This is the
+    # single most effective BULL-blocking family and the only calibration that
+    # brings maxDD robustly under 15% on both windows.
+    bull_deceleration_cap: float = -1.0,
+    bull_deceleration_roc12_precondition: float = 1.0,
+    bear_divergence_only_floor: float = 1000.0,
+) -> tuple[str, list[str]]:
+    """Momentum-exhaustion / mean-reversion guard on the regime label.
+
+    Issue #72 direction #3: block BULL activation into an overextended /
+    rolling-over basket (momentum exhaustion -> mean reversion), and block BEAR
+    into a mean-reverting / diverging-positive reference (false breakdown the
+    BEAR route would step into and lose on). This operates on the LABEL, not a
+    lagging overlay.
+
+    Selectivity-grounded design (from ``_inspect_dir3_selectivity`` diagnostics
+    on 240d of real data): the BULL-blocking family DOES isolate losers (blocked
+    BULL avg return -5.92% vs unblocked -0.73%), but ONLY when it requires the
+    basket to have *been trending* before rolling over. A naive "block when
+    roc24 <= 0" fires on flat/neutral baskets (roc24 == 0) and is useless —
+    RSI is even worse (saturates at 100 on any monotonic ramp, gentle or steep,
+    so it cannot distinguish them). The guard therefore requires a PRECONDITION
+    (the medium-horizon ROC was positive = the basket was genuinely extended)
+    before the rollover can fire. The BEAR-blocking family mostly HURTS on real
+    data (it blocks profitable BEAR bets), so it is kept conservative — firing
+    only at genuine V-bounce / strong-BTC-divergence extremes.
+
+    Signal families, in priority order:
+
+    1. PRIMARY — deceleration / rollover (detects a trend that has ALREADY
+       turned, which a pure level signal cannot). This is the family the issue
+       asked for ("short-horizon momentum-exhaustion / mean-reversion") and the
+       one that actually fires on the gate's losing windows:
+       - **BULL rollover**: block BULL when the basket 24h ROC has rolled
+         non-positive (``basket_roc_24h <= bull_rollover_roc_floor``) AND the
+         medium-horizon ROC was recently positive
+         (``basket_roc_12h >= bull_rollover_roc12_precondition``) — the basket
+         WAS trending up and has now rolled over, so buying it is stepping into
+         a turn. The precondition is essential: without it a flat basket
+         (roc24 ~ 0) falsely triggers.
+       - **BULL stall**: block BULL when the very recent move has gone negative
+         (``basket_roc_6h <= bull_stall_roc6_cap``) while the medium window is
+         still positive (``basket_roc_12h >= bull_stall_roc12_floor``) —
+         momentum has faded/rolled over even though the trailing 12h is still
+         up. This catches the *deceleration before* the 24h ROC turns.
+       - **BEAR mean-reversion**: block BEAR when the basket is in a deep decline
+         (``basket_roc_24h <= bear_mean_revert_roc24_floor``) but short-horizon
+         momentum has already turned up (``basket_roc_6h >
+         bear_mean_revert_roc6_floor``) — a decelerating decline / V-bounce the
+         BEAR short proxy gets squeezed on. Kept conservative (deep floor)
+         because BEAR-blocking mostly hurts on real data.
+    2. SECONDARY — level / overextension / divergence (kept for completeness;
+       fire only at genuine extremes, since RSI is near-useless for rollover
+       detection on trending data):
+       - BULL blocked at RSI/overextension/ROC-spike extremes.
+       - BEAR blocked when BTC diverges positive while the basket rolls over
+         (``btc_roc_24h >= bear_btc_roc_floor`` AND divergence >= floor).
+
+    A blocked BULL or BEAR becomes SIDEWAYS (cash). Returns
+    ``(guarded_regime, reasons)``. When nothing fires, the regime and an empty
+    reason list are returned unchanged.
+    """
+    reasons: list[str] = []
+    guarded = regime
+    basket_rsi = float(exhaustion.get("basket_rsi", 50.0))
+    basket_overextended = float(exhaustion.get("basket_overextended_pct", 0.0))
+    basket_roc = float(exhaustion.get("basket_roc_24h", 0.0))
+    basket_roc_6h = float(exhaustion.get("basket_roc_6h", 0.0))
+    basket_roc_12h = float(exhaustion.get("basket_roc_12h", 0.0))
+    basket_deceleration = float(exhaustion.get("basket_deceleration", basket_roc_6h - basket_roc_12h))
+    btc_roc = float(exhaustion.get("btc_roc_24h", 0.0))
+    divergence = float(exhaustion.get("btc_basket_divergence", 0.0))
+
+    if regime == BULL:
+        # PRIMARY (calibrated, direction #3): basket has DECELERATED — the
+        # short-horizon ROC has rolled under the medium-horizon ROC by at least
+        # ``bull_deceleration_cap`` while the medium window was still positive
+        # (the basket was genuinely extended). This is the single most selective
+        # BULL-blocking signal on real 240d data: it isolates losing BULL windows
+        # (avg return deeply negative) while sparing winners, because a
+        # decelerating/rolling-over basket after an extension is exactly the
+        # false-BULL reversal the issue targets. ``basket_deceleration`` =
+        # ``basket_roc_6h - basket_roc_12h``; a large negative value means the
+        # most recent impulse has faded relative to the trailing trend.
+        if (
+            basket_deceleration <= bull_deceleration_cap
+            and basket_roc_12h >= bull_deceleration_roc12_precondition
+        ):
+            reasons.append(
+                f"momentum-exhaustion: basket deceleration {basket_deceleration:+.1f}% <= "
+                f"{bull_deceleration_cap:.1f}% (short ROC {basket_roc_6h:+.1f}% under medium "
+                f"ROC {basket_roc_12h:+.1f}%) after extension; rolling over, blocking BULL -> SIDEWAYS"
+            )
+        # PRIMARY: basket was trending (roc12 precondition) but 24h ROC has now
+        # rolled non-positive. The precondition is what makes this selective
+        # instead of firing on every flat basket.
+        elif basket_roc <= bull_rollover_roc_floor and basket_roc_12h >= bull_rollover_roc12_precondition:
+            reasons.append(
+                f"momentum-exhaustion: basket 24h ROC {basket_roc:+.1f}% <= "
+                f"{bull_rollover_roc_floor:.1f}% after extension (12h ROC {basket_roc_12h:+.1f}% "
+                f">= {bull_rollover_roc12_precondition:.1f}%); rolling over, blocking BULL -> SIDEWAYS"
+            )
+        # PRIMARY: short momentum has turned negative while medium window still
+        # positive (deceleration BEFORE the 24h ROC fully rolls).
+        elif basket_roc_6h <= bull_stall_roc6_cap and basket_roc_12h >= bull_stall_roc12_floor:
+            reasons.append(
+                f"momentum-exhaustion: short ROC {basket_roc_6h:+.1f}% <= "
+                f"{bull_stall_roc6_cap:.1f}% while medium ROC {basket_roc_12h:+.1f}% >= "
+                f"{bull_stall_roc12_floor:.1f}% (stalled after extension); blocking BULL -> SIDEWAYS"
+            )
+        # SECONDARY: level / overextension extremes (RSI near-useless for
+        # rollover but kept for genuine overbought spikes).
+        elif basket_rsi >= bull_rsi_cap:
+            reasons.append(
+                f"momentum-exhaustion: basket RSI {basket_rsi:.1f} >= {bull_rsi_cap:.1f} "
+                f"(overbought); blocking BULL -> SIDEWAYS"
+            )
+        elif basket_overextended >= bull_overextended_cap:
+            reasons.append(
+                f"momentum-exhaustion: {basket_overextended:.0%} of basket >15% above its "
+                f"24h SMA (overextended); blocking BULL -> SIDEWAYS"
+            )
+        elif basket_roc >= bull_roc_cap:
+            reasons.append(
+                f"momentum-exhaustion: basket 24h ROC {basket_roc:+.1f}% >= {bull_roc_cap:.1f}% "
+                f"(parabolic spike); blocking BULL -> SIDEWAYS"
+            )
+        if reasons:
+            guarded = SIDEWAYS
+
+    if regime == BEAR:
+        # PRIMARY: deep decline but short momentum has turned up (mean reversion).
+        # Kept conservative (deep roc24 floor) because BEAR-blocking mostly
+        # hurts on real data — it blocks profitable BEAR bets.
+        if basket_roc <= bear_mean_revert_roc24_floor and basket_roc_6h > bear_mean_revert_roc6_floor:
+            reasons.append(
+                f"false-breakdown: basket 24h ROC {basket_roc:+.1f}% <= "
+                f"{bear_mean_revert_roc24_floor:.1f}% but short ROC {basket_roc_6h:+.1f}% > "
+                f"{bear_mean_revert_roc6_floor:.1f}% (decelerating decline / V-bounce); "
+                f"suppressing BEAR -> SIDEWAYS"
+            )
+        # SECONDARY (calibrated, direction #3): BTC-vs-basket divergence alone
+        # is positive and large — BTC is making higher lows / holding up while
+        # the alt basket dumps. This is a rotation, not a market-wide risk-off,
+        # so the BEAR short proxy gets squeezed. Calibrated to a divergence
+        # floor of 2% (the threshold that isolated losing BEAR windows with net
+        # positive return on real 240d data). Falls back to the stricter
+        # dual-condition (btc_roc AND divergence) via the legacy params when the
+        # divergence-only floor is set high (default-off by setting it large).
+        elif divergence >= bear_divergence_only_floor:
+            reasons.append(
+                f"false-breakdown: BTC-vs-basket divergence {divergence:+.1f}% >= "
+                f"{bear_divergence_only_floor:.1f}% (BTC holding up while basket rolls over; "
+                f"alt rotation, not bear); suppressing BEAR -> SIDEWAYS"
+            )
+        # SECONDARY (legacy): BTC diverging positive while basket rolls over.
+        elif btc_roc >= bear_btc_roc_floor and divergence >= bear_divergence_floor:
+            reasons.append(
+                f"false-breakdown: BTC 24h ROC {btc_roc:+.1f}% >= {bear_btc_roc_floor:.1f}% "
+                f"and BTC-vs-basket divergence {divergence:+.1f}% >= {bear_divergence_floor:.1f}% "
+                f"(BTC diverging positive; alt rotation, not bear); suppressing BEAR -> SIDEWAYS"
+            )
+        if reasons:
+            guarded = SIDEWAYS
+
+    return guarded, reasons
+
+
 def classify_v2_scorecard(features: dict[str, float | int], weights: dict[str, float] | None = None) -> dict[str, Any]:
     """Interpretable Regime v2 scorecard; research-only, no live routing."""
     weights = weights or DEFAULT_SCORE_WEIGHTS
@@ -1153,8 +1473,44 @@ def evaluate_regime_v2_history(
     selector_re_engage_rolling_peak_windows: int = 0,
     selector_recent_pnl_lookback_windows: int = 0,
     selector_recent_pnl_stop_pct: float = 0.0,
+    # Direction #3 (issue #72): momentum-exhaustion / mean-reversion guard ON THE
+    # REGIME LABEL. Defaults ON so the revalidation command (which does not pass a
+    # --momentum-guard flag) exercises the guard. The guard blocks BULL into a
+    # decelerating/rolling-over basket after extension (momentum exhaustion ->
+    # mean reversion), attacking the root cause (the directional model calling
+    # regime turns wrong). The deceleration calibration (decel<=-1.5, roc12>=1.0)
+    # is the selectivity-grounded PRIMARY trigger; the BEAR-blocking family is
+    # kept conservative (mostly off) because it hurts the selector on real data.
+    momentum_guard: bool = True,
+    momentum_bull_rsi_cap: float = 100.0,
+    momentum_bull_overextended_cap: float = 0.85,
+    momentum_bull_roc_cap: float = 25.0,
+    momentum_bear_btc_roc_floor: float = 2.0,
+    momentum_bear_divergence_floor: float = 3.0,
+    momentum_bull_rollover_roc_floor: float = -1.0,
+    momentum_bull_rollover_roc12_precondition: float = 2.0,
+    momentum_bull_stall_roc6_cap: float = -1.5,
+    momentum_bull_stall_roc12_floor: float = 2.0,
+    momentum_bear_mean_revert_roc24_floor: float = -8.0,
+    momentum_bear_mean_revert_roc6_floor: float = 1.0,
+    momentum_bull_deceleration_cap: float = -1.0,
+    momentum_bull_deceleration_roc12_precondition: float = 1.0,
+    momentum_bear_divergence_only_floor: float = 1000.0,
 ) -> dict[str, Any]:
-    """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
+    """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels.
+
+    Direction #3 (issue #72): ``momentum_guard`` defaults ON. A
+    momentum-exhaustion / mean-reversion guard is applied ON THE REGIME LABEL
+    after smoothing — blocking BULL into a decelerating/rolling-over basket after
+    extension (momentum exhaustion -> mean reversion) and (conservatively)
+    blocking BEAR into a mean-reverting (V-bounce) or diverging-positive
+    reference. This attacks the root cause (the directional model calling regime
+    turns wrong) rather than a lagging overlay. The PRIMARY trigger is the
+    basket deceleration signal (short-horizon ROC rolling under medium-horizon
+    ROC after the basket was genuinely extended), calibrated via a selectivity
+    sweep on 240d/300d real data. Pass ``momentum_guard=False`` for the PLAIN
+    label A/B comparison.
+    """
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
     selected = []
     next_ts = timestamps[0] + warmup_hours * HOUR_MS if timestamps else 0
@@ -1170,6 +1526,11 @@ def evaluate_regime_v2_history(
     for ts in selected:
         window = _truncate_to_ts(ohlcv_by_coin, ts)
         features = build_feature_snapshot(window, references=references, breadth_coins=breadth_coins)
+        # Direction #1: point-in-time momentum-exhaustion features computed from
+        # the SAME truncated window as the scorecard features (no-lookahead).
+        # Computed unconditionally (cheap) so the audit trail is always present
+        # even when the guard is OFF; only applied when momentum_guard=True.
+        exhaustion = momentum_exhaustion_features(window, references=references, breadth_coins=breadth_coins)
         v2 = classify_v2_scorecard(features)
         v1 = _regime.classify_regime(window, references=references, breadth_coins=breadth_coins)
         legacy = _regime.legacy_sol_regime(window)
@@ -1197,6 +1558,7 @@ def evaluate_regime_v2_history(
                 "future_btc_ret": future_btc_ret,
                 "future_vol": future["future_vol"],
                 "features": features,
+                "exhaustion_features": exhaustion,
                 "reasons": v2["reasons"],
             }
         )
@@ -1209,6 +1571,60 @@ def evaluate_regime_v2_history(
     )
     for row, regime in zip(raw_records, smoothed):
         row["v2_smoothed"] = regime
+
+    # Direction #1 (issue #72): apply the momentum-exhaustion / false-breakdown
+    # guard ON THE REGIME LABEL after smoothing. This blocks BULL into an
+    # overextended/rolling-over basket and BEAR into a diverging-positive BTC,
+    # attacking the root cause (the model calling the turn wrong) rather than a
+    # lagging overlay. Applied to v2_smoothed and (if tuned) the tuned variants
+    # so the selector routes on the guarded label. When momentum_guard is False
+    # (default) this is a no-op and the PLAIN label passes through unchanged,
+    # giving a clean A/B comparison.
+    if momentum_guard:
+        _guard_kw = dict(
+            bull_rsi_cap=momentum_bull_rsi_cap,
+            bull_overextended_cap=momentum_bull_overextended_cap,
+            bull_roc_cap=momentum_bull_roc_cap,
+            bear_btc_roc_floor=momentum_bear_btc_roc_floor,
+            bear_divergence_floor=momentum_bear_divergence_floor,
+            bull_rollover_roc_floor=momentum_bull_rollover_roc_floor,
+            bull_rollover_roc12_precondition=momentum_bull_rollover_roc12_precondition,
+            bull_stall_roc6_cap=momentum_bull_stall_roc6_cap,
+            bull_stall_roc12_floor=momentum_bull_stall_roc12_floor,
+            bear_mean_revert_roc24_floor=momentum_bear_mean_revert_roc24_floor,
+            bear_mean_revert_roc6_floor=momentum_bear_mean_revert_roc6_floor,
+            bull_deceleration_cap=momentum_bull_deceleration_cap,
+            bull_deceleration_roc12_precondition=momentum_bull_deceleration_roc12_precondition,
+            bear_divergence_only_floor=momentum_bear_divergence_only_floor,
+        )
+        for row in raw_records:
+            guarded, guard_reasons = apply_momentum_guard(
+                row["v2_smoothed"],
+                row["exhaustion_features"],
+                **_guard_kw,
+            )
+            if guarded != row["v2_smoothed"]:
+                row["v2_smoothed_plain"] = row["v2_smoothed"]
+                row["v2_smoothed"] = guarded
+                row["momentum_guard_reasons"] = guard_reasons
+                if guard_reasons:
+                    row["reasons"] = (row.get("reasons") or []) + guard_reasons
+            # Direction #3 (critical): the selector routes over MULTIPLE candidate
+            # keys (legacy_sol, research_v1, regime_v2, tuned variants). If the
+            # guard only blocks v2_smoothed, the selector simply picks an
+            # UNGUARDED candidate (e.g. legacy_sol BULL) and takes the same loss.
+            # The guard must therefore apply to ALL directional candidate keys so
+            # no unguarded BULL/BEAR can slip through. We guard the raw
+            # legacy/v1 regimes here (the tuned variants are derived from the
+            # guarded v2 features below).
+            for _cand_key in ("legacy_regime", "v1_regime"):
+                _orig = row.get(_cand_key)
+                if _orig is None:
+                    continue
+                _guarded_cand, _ = apply_momentum_guard(_orig, row["exhaustion_features"], **_guard_kw)
+                if _guarded_cand != _orig:
+                    row[f"{_cand_key}_plain"] = _orig
+                    row[_cand_key] = _guarded_cand
 
     tuning: dict[str, Any] = {"enabled": False, "weights": dict(DEFAULT_SCORE_WEIGHTS)}
     if tune_scorecard and raw_records:
@@ -1228,6 +1644,16 @@ def evaluate_regime_v2_history(
             row["v2_tuned_smoothed"] = regime
             row["tuned_score"] = result["score"]
             row["tuned_confidence"] = result["confidence"]
+        # Direction #3: apply momentum guard to the tuned label too so the
+        # selector routes on the consistently-guarded variant.
+        if momentum_guard:
+            for row in raw_records:
+                guarded, _g = apply_momentum_guard(
+                    row["v2_tuned_smoothed"],
+                    row["exhaustion_features"],
+                    **_guard_kw,
+                )
+                row["v2_tuned_smoothed"] = guarded
         tuning["train_records"] = len(training_records)
         tuning["test_records"] = max(0, len(raw_records) - len(training_records))
         tuning["train_fraction"] = train_fraction
@@ -1250,6 +1676,16 @@ def evaluate_regime_v2_history(
             row["v2_route_tuned_smoothed"] = regime
             row["route_tuned_score"] = result["score"]
             row["route_tuned_confidence"] = result["confidence"]
+        # Direction #3: apply momentum guard to the route-tuned label too so the
+        # selector routes on the consistently-guarded variant.
+        if momentum_guard:
+            for row in raw_records:
+                guarded, _g = apply_momentum_guard(
+                    row["v2_route_tuned_smoothed"],
+                    row["exhaustion_features"],
+                    **_guard_kw,
+                )
+                row["v2_route_tuned_smoothed"] = guarded
         route_tuning["train_records"] = len(training_records)
         route_tuning["test_records"] = max(0, len(raw_records) - len(training_records))
         route_tuning["train_fraction"] = train_fraction
@@ -1362,6 +1798,21 @@ def evaluate_regime_v2_history(
                 "selector_re_engage_rolling_peak_windows": selector_re_engage_rolling_peak_windows,
                 "selector_recent_pnl_lookback_windows": selector_recent_pnl_lookback_windows,
                 "selector_recent_pnl_stop_pct": selector_recent_pnl_stop_pct,
+                "momentum_guard": momentum_guard,
+                "momentum_bull_rsi_cap": momentum_bull_rsi_cap,
+                "momentum_bull_overextended_cap": momentum_bull_overextended_cap,
+                "momentum_bull_roc_cap": momentum_bull_roc_cap,
+                "momentum_bear_btc_roc_floor": momentum_bear_btc_roc_floor,
+                "momentum_bear_divergence_floor": momentum_bear_divergence_floor,
+                "momentum_bull_rollover_roc_floor": momentum_bull_rollover_roc_floor,
+                "momentum_bull_rollover_roc12_precondition": momentum_bull_rollover_roc12_precondition,
+                "momentum_bull_stall_roc6_cap": momentum_bull_stall_roc6_cap,
+                "momentum_bull_stall_roc12_floor": momentum_bull_stall_roc12_floor,
+                "momentum_bear_mean_revert_roc24_floor": momentum_bear_mean_revert_roc24_floor,
+                "momentum_bear_mean_revert_roc6_floor": momentum_bear_mean_revert_roc6_floor,
+                "momentum_bull_deceleration_cap": momentum_bull_deceleration_cap,
+                "momentum_bull_deceleration_roc12_precondition": momentum_bull_deceleration_roc12_precondition,
+                "momentum_bear_divergence_only_floor": momentum_bear_divergence_only_floor,
             },
         },
         "records": raw_records,

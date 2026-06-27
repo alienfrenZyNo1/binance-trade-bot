@@ -109,6 +109,7 @@ def build_default_settings(
     selector_re_engage_rolling_peak_windows: list[int] | None = None,
     selector_recent_pnl_lookback_windows: int = 0,
     selector_recent_pnl_stop_pct: float = 0.0,
+    momentum_guard: bool = True,
 ) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
@@ -157,6 +158,7 @@ def build_default_settings(
                                             "selector_re_engage_rolling_peak_windows": int(rolling_peak),
                                             "selector_recent_pnl_lookback_windows": int(selector_recent_pnl_lookback_windows),
                                             "selector_recent_pnl_stop_pct": float(selector_recent_pnl_stop_pct),
+                                            "momentum_guard": bool(momentum_guard),
                                         }
                                     )
     return settings
@@ -247,6 +249,7 @@ def evaluate_settings_grid(
             selector_re_engage_rolling_peak_windows=int(setting.get("selector_re_engage_rolling_peak_windows", 0)),
             selector_recent_pnl_lookback_windows=int(setting.get("selector_recent_pnl_lookback_windows", 0)),
             selector_recent_pnl_stop_pct=float(setting.get("selector_recent_pnl_stop_pct", 0.0)),
+            momentum_guard=bool(setting.get("momentum_guard", False)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -349,6 +352,20 @@ def main() -> int:
         default=0.0,
         help="Direction #2: cumulative recent selector P&L threshold (pct) that trips risk-off (0 disables)",
     )
+    parser.add_argument(
+        "--momentum-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Direction #3: momentum-exhaustion / mean-reversion guard ON THE "
+            "REGIME LABEL ITSELF. Blocks BULL activation into a "
+            "decelerating/rolling-over basket after extension (momentum "
+            "exhaustion -> mean reversion) and (conservatively) blocks BEAR "
+            "into a diverging-positive BTC. Attacks the root cause (the model "
+            "calling the turn wrong) rather than a lagging overlay. Defaults "
+            "ON; use --no-momentum-guard for the PLAIN label A/B comparison."
+        ),
+    )
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
@@ -385,6 +402,7 @@ def main() -> int:
         selector_re_engage_rolling_peak_windows=_parse_int_csv(args.selector_re_engage_rolling_peak_windows) or None,
         selector_recent_pnl_lookback_windows=args.selector_recent_pnl_lookback_windows,
         selector_recent_pnl_stop_pct=args.selector_recent_pnl_stop_pct,
+        momentum_guard=args.momentum_guard,
     )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta
