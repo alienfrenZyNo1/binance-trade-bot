@@ -162,8 +162,18 @@ class BinanceStreamManager:
                         self._invalidate_balances()
             if stream_data is not False and stream_data is not None:
                 self._process_stream_data(stream_data)
-            if stream_data is False and stream_signal is False:
+            if (stream_data is None or stream_data is False) and stream_signal is False:
+                # Idle: no signal and no data to drain. Sleep longer so we
+                # don't spin while waiting for the next message.
                 time.sleep(0.01)
+            else:
+                # We are actively draining messages (with 210+ subscribed
+                # pairs, market data arrives continuously and stream_data is
+                # almost never empty). Yield the CPU every iteration to
+                # release the GIL and prevent a permanent ~100% busy-loop
+                # on this thread (issue #103). This does not change the
+                # polling pattern or order-processing timing.
+                time.sleep(0.001)
 
     def _process_stream_data(self, stream_data):
         if stream_data is None:
