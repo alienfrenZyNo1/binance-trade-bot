@@ -69,7 +69,8 @@ def backtest_symbol(df: pd.DataFrame, cfg: RegimeConfig) -> dict:
 
     Position is +1 (long), -1 (short), or 0 (cash). Rebalanced at each bar close
     on next-bar open with slippage+fee on flips. Funding charged hourly on notional.
-    Returns equity curve (indexed to 1.0 start) + trade stats.
+    Returns metrics + a normalized 'strategy_ret' per-bar return series (key for
+    correct portfolio combination). Equity curve indexed to 1.0 start.
     """
     close = df["close"].astype(float).to_numpy()
     n = len(close)
@@ -98,6 +99,7 @@ def backtest_symbol(df: pd.DataFrame, cfg: RegimeConfig) -> dict:
     equity = 1.0
     pos = 0.0          # current position direction in [-1,1]
     equity_curve = np.empty(n)
+    strat_ret = np.empty(n)   # strategy return realized AT this bar (for portfolio)
     trades = 0
     wins = 0
     gross_pnl = 0.0
@@ -139,16 +141,19 @@ def backtest_symbol(df: pd.DataFrame, cfg: RegimeConfig) -> dict:
         else:
             flip_cost = 0.0
 
+        prev_equity = equity
         equity = equity + price_pnl - funding_cost - flip_cost
         if equity <= 0:  # liquidation guard
             equity = 0.0
             pos = 0.0
         equity_curve[i] = equity
+        strat_ret[i] = equity / prev_equity - 1.0 if prev_equity > 0 else 0.0
 
     df_out = df.copy()
     df_out["equity"] = equity_curve
     metrics = _metrics(df_out, cfg, trades, wins)
     metrics["equity_curve"] = equity_curve
+    metrics["strategy_ret"] = strat_ret
     return metrics
 
 
@@ -200,9 +205,14 @@ def _metrics(df: pd.DataFrame, cfg: RegimeConfig, trades: int, wins: int) -> dic
 
 
 def portfolio_backtest(symbols: list[str], cfg: RegimeConfig) -> tuple[dict, pd.DataFrame]:
-    """Run each symbol with equal capital allocation, combine into portfolio curve."""
+    """Run each symbol with EQUAL-WEIGHT REBALANCED allocation, combine into a
+    portfolio curve. Combines per-bar strategy returns (not equity levels), which
+    is the correct way to capture diversification: each bar the portfolio earns
+    the average of the per-symbol strategy returns that bar.
+    """
     curves = []
     per_symbol = {}
+    total_trades = 0
     for sym in symbols:
         df = load_symbol(sym)
         res = backtest_symbol(df, cfg)
@@ -210,16 +220,25 @@ def portfolio_backtest(symbols: list[str], cfg: RegimeConfig) -> tuple[dict, pd.
             per_symbol[sym] = res
             continue
         eq = res.pop("equity_curve")
+        sret = res.pop("strategy_ret")
+        total_trades += res.get("trade_count", 0)
         per_symbol[sym] = res
-        curves.append((sym, df["dt"].to_numpy(), eq))
+        curves.append((sym, df["dt"].to_numpy(), sret))
 
-    # align on dt, average normalized equity across symbols (equal weight)
     if not curves:
         return per_symbol, pd.DataFrame()
+    # equal-weight rebalanced: portfolio return each bar = mean of symbol returns
     idx_dt = curves[0][1]
-    mat = np.vstack([np.interp(np.arange(len(idx_dt)), np.arange(len(c[2])), c[2]) for c in curves])
-    port_eq = mat.mean(axis=0)
-    port_df = pd.DataFrame({"dt": idx_dt, "equity": port_eq})
+    mat = np.vstack([np.full(len(idx_dt), np.nan) for _ in curves])
+    for r, (sym, dt, sret) in enumerate(curves):
+        L = min(len(sret), len(idx_dt))
+        mat[r, :L] = sret[:L]
+    port_ret = np.nanmean(mat, axis=0)
+    port_ret = np.nan_to_num(port_ret, nan=0.0)
+    # compound to equity curve starting at 1.0
+    port_eq = np.cumprod(1.0 + port_ret)
+    port_df = pd.DataFrame({"dt": idx_dt, "equity": port_eq, "ret": port_ret})
+    port_df.attrs["total_trades"] = total_trades
     return per_symbol, port_df
 
 
@@ -246,6 +265,8 @@ def portfolio_metrics(port_df: pd.DataFrame, cfg: RegimeConfig) -> dict:
         "max_drawdown_pct": float(np.nanmin(dd) * 100.0),
         "max_drawdown_abs_pct": max_dd_abs,
         "calmar": calmar,
+        "trade_count": int(port_df.attrs.get("total_trades", 0)),
+        "win_rate_pct": 0.0,
         "bars": n,
         "years": years,
         "leverage": cfg.leverage,

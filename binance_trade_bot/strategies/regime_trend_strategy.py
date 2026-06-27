@@ -661,6 +661,12 @@ class Strategy(AutoTrader):
                     f"[PAPER] Would sell orphaned {asset} for {bridge_symbol}",
                     notification=False,
                 )
+            elif price <= 0:
+                self.logger.warning(
+                    f"Spot reconcile: skipping orphaned {asset} — no valid price "
+                    f"(no {asset}{bridge_symbol} pair). Leaving as dust.",
+                    notification=True,
+                )
             else:
                 try:
                     from binance_trade_bot.models import Coin
