@@ -87,6 +87,13 @@ class Config:  # pylint: disable=too-few-public-methods,too-many-instance-attrib
         # strategies via persistent config without needing Coolify env changes)
         cfg_strategy = config.get(USER_CFG_SECTION, "strategy", fallback="default")
         self.STRATEGY = cfg_strategy if cfg_strategy and cfg_strategy != "default" else (os.environ.get("STRATEGY") or "default")
+        # Regime-trend strategy config
+        self.RT_COIN_UNIVERSE = os.environ.get("RT_COIN_UNIVERSE") or config.get(USER_CFG_SECTION, "rt_coin_universe", fallback=None)
+        self.RT_TREND_LEVERAGE = float(os.environ.get("RT_TREND_LEVERAGE") or config.get(USER_CFG_SECTION, "rt_trend_leverage", fallback="2.0"))
+        self.RT_STOP_LOSS = float(os.environ.get("RT_STOP_LOSS") or config.get(USER_CFG_SECTION, "rt_stop_loss", fallback="0.15"))
+        self.RT_TRAIL_STOP = float(os.environ.get("RT_TRAIL_STOP") or config.get(USER_CFG_SECTION, "rt_trail_stop", fallback="0.12"))
+        self.RT_BEAR_ACTION = os.environ.get("RT_BEAR_ACTION") or config.get(USER_CFG_SECTION, "rt_bear_action", fallback="short")
+        self.RT_PAPER_MODE = os.environ.get("RT_PAPER_MODE") or config.get(USER_CFG_SECTION, "rt_paper_mode", fallback="no")
 
         self.SELL_TIMEOUT = os.environ.get("SELL_TIMEOUT") or config.get(USER_CFG_SECTION, "sell_timeout")
         self.BUY_TIMEOUT = os.environ.get("BUY_TIMEOUT") or config.get(USER_CFG_SECTION, "buy_timeout")
