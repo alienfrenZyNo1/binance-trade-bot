@@ -590,19 +590,46 @@ def build_selector_route(
     selector_min_passing_trailing_windows: int = 0,
     selector_trailing_window_min_return_pct: float = 0.0,
     selector_trailing_window_max_drawdown_pct: float = 20.0,
+    selector_re_engage_confirmation: bool = True,
+    selector_re_engage_breadth_pct: float = 0.60,
+    selector_re_engage_rolling_peak_windows: int = 0,
 ) -> list[dict[str, Any]]:
     """Select a route using only prior realized route windows.
 
     This is a research-only no-lookahead selector. At row i it scores each
     candidate on rows [i-lookback, i), never on row i or later.
+
+    Equity-stop re-engagement (issue #72):
+    - ``selector_re_engage_confirmation`` (DEFAULT ON) gates re-engagement after
+      the cooldown elapses on a confirmation signal: the best candidate's
+      realized trailing return over the lookback must be positive, OR a
+      breadth/momentum turn (advancing windows > ``selector_re_engage_breadth_pct``).
+      This skips the choppy early-recovery false-BULL windows that inflate route
+      maxDD. Unconditional re-arm (the prior behaviour that ballooned maxDD) is
+      recovered by setting this False. The default is ON so that callers that do
+      not pass this kwarg (e.g. ``regime_v2_forward_replay.evaluate_settings_grid``)
+      get confirmation-gated re-engagement automatically.
+    - ``selector_re_engage_breadth_pct`` (DEFAULT 0.60): fraction of advancing
+      (positive-return) windows required for the breadth branch of the
+      confirmation signal. 0.50 proved too lenient (a 50/50 chop still
+      confirmed); 0.60 requires a genuine majority of up-windows.
+    - ``selector_re_engage_rolling_peak_windows`` (suggestion #3): when re-arming
+      after cooldown, rebase the peak to a RECENT rolling peak (max equity over
+      the last N windows) rather than the instantaneous current equity, so a
+      couple of early-recovery losses don't immediately establish a new, higher
+      watermark to draw down from. 0 disables the rolling rebase and falls back
+      to rebasing to current equity.
     """
     selected: list[dict[str, Any]] = []
     lookback = max(1, lookback)
     selector_equity = 1.0
     selector_peak = 1.0
     selector_drawdown = 0.0
+    # Rolling window of recent selector equity values for the rolling-peak rebase.
+    recent_equity: list[float] = []
     stop_cooldown_remaining = 0
     selector_equity_stop_cooldown_windows = max(1, int(selector_equity_stop_cooldown_windows or 1))
+    re_engage_rolling_peak_windows = max(0, int(selector_re_engage_rolling_peak_windows or 0))
     for idx, row in enumerate(records):
         if idx > 0 and selected:
             prev = selected[-1]
@@ -613,6 +640,12 @@ def build_selector_route(
                 fee_bps=fee_bps,
             )
             selector_equity *= max(0.0, 1.0 + prev_ret / 100.0)
+            # Maintain a rolling window of recent equity values for the
+            # rolling-peak rebase (suggestion #3). This is the realized equity
+            # BEFORE the current window is decided, so it is strictly no-lookahead.
+            recent_equity.append(selector_equity)
+            if re_engage_rolling_peak_windows > 0 and len(recent_equity) > re_engage_rolling_peak_windows:
+                recent_equity = recent_equity[-re_engage_rolling_peak_windows:]
             selector_peak = max(selector_peak, selector_equity)
             selector_drawdown = (selector_peak - selector_equity) / selector_peak * 100.0 if selector_peak > 0 else 0.0
         history = records[max(0, idx - lookback) : idx]
@@ -696,6 +729,65 @@ def build_selector_route(
             choice_objective = 0.0
             block_reason = f"equity drawdown cooldown ({stop_cooldown_remaining} windows remaining)"
             stop_cooldown_remaining -= 1
+            # Cooldown just elapsed. We must rebase the selector peak so the
+            # drawdown metric does not freeze above the stop forever (one-way
+            # ratchet — see issue #72). But re-engagement is NOT unconditional
+            # unless confirmation gating is disabled. With confirmation gating,
+            # we require a no-lookahead confirmation signal (positive realized
+            # trailing return over the lookback OR a breadth/momentum turn with
+            # advancing windows > threshold) before re-arming into an active
+            # regime. This skips the choppy early-recovery false-BULL windows
+            # that inflate route maxDD.
+            if stop_cooldown_remaining == 0:
+                # Compute a no-lookahead confirmation signal from the realized
+                # route returns of ALL candidates over the lookback window.
+                confirmation_ok = True
+                if selector_re_engage_confirmation and history:
+                    best_trailing_ret = -1e18
+                    best_advancing_frac = 0.0
+                    for _name, key in route_candidates.items():
+                        returns = _route_returns_for_key(history, key, fee_bps=fee_bps)
+                        if not returns:
+                            continue
+                        outcome = _compound_returns(returns)
+                        trailing_ret = outcome["total_return_pct"]
+                        advancing = sum(1 for r in returns if r > 0.0)
+                        advancing_frac = advancing / len(returns) if returns else 0.0
+                        if trailing_ret > best_trailing_ret:
+                            best_trailing_ret = trailing_ret
+                            best_advancing_frac = advancing_frac
+                    # Confirm if best candidate shows a positive trailing return
+                    # OR a breadth/momentum turn (advancing windows > threshold).
+                    confirmation_ok = (best_trailing_ret > 0.0) or (best_advancing_frac > selector_re_engage_breadth_pct)
+                    if not confirmation_ok:
+                        block_reason = (
+                            f"re-engagement confirmation FAILED (best trailing ret "
+                            f"{best_trailing_ret:+.2f}%, advancing frac {best_advancing_frac:.2f} "
+                            f"> {selector_re_engage_breadth_pct:.2f}? no); staying in cash"
+                        )
+                        # Do NOT re-arm. Stay in cash this window WITHOUT
+                        # rebasing the peak, so the stop can re-trip a fresh
+                        # cooldown next window and we retry confirmation then.
+                        # We set a 1-window retry so the selector re-checks the
+                        # confirmation gate on the next step.
+                        stop_cooldown_remaining = 1
+                if confirmation_ok:
+                    # Re-arm: rebase the peak. Suggestion #3 — when a rolling
+                    # peak window is configured, rebase to the RECENT rolling
+                    # peak (max equity over the last N windows) rather than the
+                    # instantaneous current equity, so early-recovery losses
+                    # don't immediately establish a new, higher watermark to
+                    # draw down from. Fall back to current equity if no recent
+                    # history is available or the feature is disabled.
+                    if re_engage_rolling_peak_windows > 0 and recent_equity:
+                        rebased_peak = max(recent_equity)
+                        # The rolling peak should never exceed the all-time peak;
+                        # it is a *recent* watermark used to avoid an
+                        # instantaneous spike setting an unforgiving new high.
+                        selector_peak = max(rebased_peak, selector_equity)
+                    else:
+                        selector_peak = selector_equity
+                    selector_drawdown = 0.0
         elif selector_equity_stop_drawdown_pct > 0 and selector_drawdown > selector_equity_stop_drawdown_pct:
             choice_name = "cash"
             choice_key = ""
@@ -704,7 +796,11 @@ def build_selector_route(
                 f"equity drawdown {selector_drawdown:.2f}% > "
                 f"{selector_equity_stop_drawdown_pct:.2f}%"
             )
-            stop_cooldown_remaining = selector_equity_stop_cooldown_windows - 1
+            # Schedule a bounded cooldown of `cooldown_windows` cash windows,
+            # after which the stop re-arms (via the peak rebase above). This is a
+            # true time-bounded cooldown rather than requiring drawdown to heal
+            # below the stop first.
+            stop_cooldown_remaining = selector_equity_stop_cooldown_windows
         selected_regime = SIDEWAYS if choice_name == "cash" else str(row.get(choice_key, SIDEWAYS))
         selected.append(
             {
@@ -919,6 +1015,9 @@ def evaluate_regime_v2_history(
     selector_min_passing_trailing_windows: int = 0,
     selector_trailing_window_min_return_pct: float = 0.0,
     selector_trailing_window_max_drawdown_pct: float = 20.0,
+    selector_re_engage_confirmation: bool = True,
+    selector_re_engage_breadth_pct: float = 0.60,
+    selector_re_engage_rolling_peak_windows: int = 0,
 ) -> dict[str, Any]:
     """Walk-forward evaluate v2 vs v1 and legacy, using next-window labels."""
     timestamps = _timestamps_for(ohlcv_by_coin, "SOL")
@@ -1042,6 +1141,9 @@ def evaluate_regime_v2_history(
         "min_passing_trailing_windows": selector_min_passing_trailing_windows,
         "trailing_window_min_return_pct": selector_trailing_window_min_return_pct,
         "trailing_window_max_drawdown_pct": selector_trailing_window_max_drawdown_pct,
+        "re_engage_confirmation": selector_re_engage_confirmation,
+        "re_engage_breadth_pct": selector_re_engage_breadth_pct,
+        "re_engage_rolling_peak_windows": selector_re_engage_rolling_peak_windows,
         "candidates": selector_candidates,
         "no_lookahead": True,
     }
@@ -1060,6 +1162,9 @@ def evaluate_regime_v2_history(
         selector_min_passing_trailing_windows=selector_min_passing_trailing_windows,
         selector_trailing_window_min_return_pct=selector_trailing_window_min_return_pct,
         selector_trailing_window_max_drawdown_pct=selector_trailing_window_max_drawdown_pct,
+        selector_re_engage_confirmation=selector_re_engage_confirmation,
+        selector_re_engage_breadth_pct=selector_re_engage_breadth_pct,
+        selector_re_engage_rolling_peak_windows=selector_re_engage_rolling_peak_windows,
     )
 
     route_outcomes = build_route_outcomes(raw_records, fee_bps=fee_bps)
@@ -1069,19 +1174,19 @@ def evaluate_regime_v2_history(
         "regime_v2": route_failure_diagnostics(raw_records, "v2_smoothed", fee_bps=fee_bps),
     }
     route_robustness = {
-        "legacy_sol": build_route_robustness_gates(raw_records, "legacy_regime", fee_bps=fee_bps),
-        "research_v1": build_route_robustness_gates(raw_records, "v1_regime", fee_bps=fee_bps),
-        "regime_v2": build_route_robustness_gates(raw_records, "v2_smoothed", fee_bps=fee_bps),
+        "legacy_sol": build_route_robustness_gates(raw_records, "legacy_regime", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
+        "research_v1": build_route_robustness_gates(raw_records, "v1_regime", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
+        "regime_v2": build_route_robustness_gates(raw_records, "v2_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct),
     }
     if raw_records and "v2_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_tuned"] = route_failure_diagnostics(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_tuned"] = build_route_robustness_gates(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_tuned"] = build_route_robustness_gates(raw_records, "v2_tuned_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
     if raw_records and "v2_route_tuned_smoothed" in raw_records[0]:
         route_failure["regime_v2_route_tuned"] = route_failure_diagnostics(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_route_tuned"] = build_route_robustness_gates(raw_records, "v2_route_tuned_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
     if raw_records and "selector_smoothed" in raw_records[0]:
         route_failure["regime_v2_selector"] = route_failure_diagnostics(raw_records, "selector_smoothed", fee_bps=fee_bps)
-        route_robustness["regime_v2_selector"] = build_route_robustness_gates(raw_records, "selector_smoothed", fee_bps=fee_bps)
+        route_robustness["regime_v2_selector"] = build_route_robustness_gates(raw_records, "selector_smoothed", fee_bps=fee_bps, max_window_drawdown_pct=selector_trailing_window_max_drawdown_pct)
 
     data_hash = hashlib.sha256(
         json.dumps({coin: rows[-5:] for coin, rows in sorted(ohlcv_by_coin.items())}, sort_keys=True).encode()

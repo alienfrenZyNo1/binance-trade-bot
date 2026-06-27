@@ -105,12 +105,16 @@ def build_default_settings(
     selector_trailing_robust_windows: int = 0,
     selector_min_passing_trailing_windows: int = 0,
     selector_trailing_window_max_drawdown_pct: float = 20.0,
+    selector_re_engage_confirmations: list[bool] | None = None,
+    selector_re_engage_rolling_peak_windows: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Build a compact grid of replay settings."""
     settings = []
     drawdowns = selector_max_trailing_drawdowns or [0.0]
     equity_stops = selector_equity_stop_drawdowns or [0.0]
     win_rates = selector_min_trailing_win_rates or [0.0]
+    confirmations = selector_re_engage_confirmations if selector_re_engage_confirmations is not None else [False]
+    rolling_peaks = selector_re_engage_rolling_peak_windows if selector_re_engage_rolling_peak_windows is not None else [0]
     for day in days:
         for step in step_hours:
             for selector in selector_lookbacks:
@@ -120,29 +124,37 @@ def build_default_settings(
                             dd_suffix = "" if float(drawdown_cap) <= 0 else f"_dd{float(drawdown_cap):g}"
                             stop_suffix = "" if float(equity_stop) <= 0 else f"_eqstop{float(equity_stop):g}"
                             win_suffix = "" if float(win_rate) <= 0 else f"_wr{float(win_rate):g}"
-                            settings.append(
-                                {
-                                    "name": f"{day}d_step{step}_sel{selector}{dd_suffix}{stop_suffix}{win_suffix}",
-                                    "days": day,
-                                    "step_hours": step,
-                                    "warmup_hours": 72 if day <= 30 else 120,
-                                    "forward_hours": 24,
-                                    "confirmation_samples": 3 if day <= 30 else 2,
-                                    "min_confidence": 0.60,
-                                    "tune_scorecard": True,
-                                    "tune_route_objective": True,
-                                    "train_fraction": 0.60,
-                                    "selector_lookback": selector,
-                                    "selector_min_objective": 0.0,
-                                    "selector_max_trailing_drawdown_pct": float(drawdown_cap),
-                                    "selector_equity_stop_drawdown_pct": float(equity_stop),
-                                    "selector_equity_stop_cooldown_windows": 1,
-                                    "selector_min_trailing_win_rate_pct": float(win_rate),
-                                    "selector_trailing_robust_windows": int(selector_trailing_robust_windows),
-                                    "selector_min_passing_trailing_windows": int(selector_min_passing_trailing_windows),
-                                    "selector_trailing_window_max_drawdown_pct": float(selector_trailing_window_max_drawdown_pct),
-                                }
-                            )
+                            base_suffix = f"{dd_suffix}{stop_suffix}{win_suffix}"
+                            for confirm in confirmations:
+                                for rolling_peak in rolling_peaks:
+                                    confirm_suffix = "_confirm" if confirm else ""
+                                    rpeak_suffix = f"_rpeak{int(rolling_peak)}" if int(rolling_peak) > 0 else ""
+                                    settings.append(
+                                        {
+                                            "name": f"{day}d_step{step}_sel{selector}{base_suffix}{confirm_suffix}{rpeak_suffix}",
+                                            "days": day,
+                                            "step_hours": step,
+                                            "warmup_hours": 72 if day <= 30 else 120,
+                                            "forward_hours": 24,
+                                            "confirmation_samples": 3 if day <= 30 else 2,
+                                            "min_confidence": 0.60,
+                                            "tune_scorecard": True,
+                                            "tune_route_objective": True,
+                                            "train_fraction": 0.60,
+                                            "selector_lookback": selector,
+                                            "selector_min_objective": 0.0,
+                                            "selector_max_trailing_drawdown_pct": float(drawdown_cap),
+                                            "selector_equity_stop_drawdown_pct": float(equity_stop),
+                                            "selector_equity_stop_cooldown_windows": 1,
+                                            "selector_min_trailing_win_rate_pct": float(win_rate),
+                                            "selector_trailing_robust_windows": int(selector_trailing_robust_windows),
+                                            "selector_min_passing_trailing_windows": int(selector_min_passing_trailing_windows),
+                                            "selector_trailing_window_max_drawdown_pct": float(selector_trailing_window_max_drawdown_pct),
+                                            "selector_re_engage_confirmation": bool(confirm),
+                                            "selector_re_engage_breadth_pct": 0.50,
+                                            "selector_re_engage_rolling_peak_windows": int(rolling_peak),
+                                        }
+                                    )
     return settings
 
 
@@ -192,6 +204,9 @@ def evaluate_settings_grid(
             selector_trailing_robust_windows=int(setting.get("selector_trailing_robust_windows", 0)),
             selector_min_passing_trailing_windows=int(setting.get("selector_min_passing_trailing_windows", 0)),
             selector_trailing_window_max_drawdown_pct=float(setting.get("selector_trailing_window_max_drawdown_pct", 20.0)),
+            selector_re_engage_confirmation=bool(setting.get("selector_re_engage_confirmation", False)),
+            selector_re_engage_breadth_pct=float(setting.get("selector_re_engage_breadth_pct", 0.50)),
+            selector_re_engage_rolling_peak_windows=int(setting.get("selector_re_engage_rolling_peak_windows", 0)),
         )
         route = _best_route(output)
         robustness = output.get("route_robustness", {}).get(route.get("name"), {}) or {}
@@ -272,6 +287,16 @@ def main() -> int:
     parser.add_argument("--selector-trailing-robust-windows", type=int, default=0)
     parser.add_argument("--selector-min-passing-trailing-windows", type=int, default=0)
     parser.add_argument("--selector-trailing-window-max-drawdown-pct", type=float, default=20.0)
+    parser.add_argument(
+        "--selector-re-engage-confirmation",
+        action="store_true",
+        help="Gate re-engagement after equity-stop cooldown on a confirmation signal (positive trailing return OR breadth turn)",
+    )
+    parser.add_argument(
+        "--selector-re-engage-rolling-peak-windows",
+        default="0",
+        help="Comma-separated rolling-peak rebase window sizes for re-engagement (0 disables, uses current equity)",
+    )
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--output", default="")
@@ -304,6 +329,8 @@ def main() -> int:
         selector_trailing_robust_windows=args.selector_trailing_robust_windows,
         selector_min_passing_trailing_windows=args.selector_min_passing_trailing_windows,
         selector_trailing_window_max_drawdown_pct=args.selector_trailing_window_max_drawdown_pct,
+        selector_re_engage_confirmations=[True] if args.selector_re_engage_confirmation else None,
+        selector_re_engage_rolling_peak_windows=_parse_int_csv(args.selector_re_engage_rolling_peak_windows) or None,
     )
     payload = evaluate_settings_grid(data, settings, references=references, breadth_coins=coins)
     payload["cache"] = cache_meta
