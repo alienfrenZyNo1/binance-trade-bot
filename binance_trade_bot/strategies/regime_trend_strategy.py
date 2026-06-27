@@ -41,6 +41,7 @@ from typing import Dict, List, Optional, Tuple
 
 from binance_trade_bot.auto_trader import AutoTrader
 from binance_trade_bot.futures_manager import FuturesManager
+from binance_trade_bot.spot_stop_manager import SpotStopManager
 from binance_trade_bot.indicators import (
     compute_adx as _compute_adx_func,
     compute_ema as _compute_ema_func,
@@ -419,6 +420,20 @@ class Strategy(AutoTrader):
         self.futures_manager.new_risk_blocked = self._new_spot_risk_blocked
         self.futures_manager.initialize()
 
+        # ── Server-side stop manager for spot positions ──────────────────────
+        # Places OCO/STOP_LOSS_LIMIT orders on Binance's servers so that a
+        # hard stop (15% below entry) executes even when the bot is offline.
+        # Falls back to a background watchdog thread for pairs that don't
+        # support server-side stop orders.
+        self.spot_stop_manager = SpotStopManager(
+            self.manager.binance_client,
+            self.logger,
+            self.config,
+            stop_loss_pct=self._stop_loss_pct,
+        )
+        # Wire the watchdog's sell callback so it can execute market sells
+        self.spot_stop_manager.sell_callback = self._watchdog_sell
+
         # ── Seed circuit-breaker equity baselines on startup ────────────────
         # Without this the breaker is dormant (no baseline to compare against)
         # until the first trade happens.  Only seed when enabled; this does
@@ -449,6 +464,12 @@ class Strategy(AutoTrader):
         self._perf_cache_time = 0
         self._cache_ttl = int(getattr(self.config, "INDICATOR_CACHE_TTL", 300))
 
+        # ── Reconcile spot positions on startup ─────────────────────────────
+        # Detect orphaned spot holdings from a crashed trade and set up trailing
+        # stop tracking for any expected positions. This runs after all state is
+        # initialised but before the first scout cycle.
+        self._reconcile_spot_positions()
+
         self.logger.info(
             f"RegimeTrendStrategy initialized | "
             f"Coins: {', '.join(self._coin_universe)} | "
@@ -459,6 +480,224 @@ class Strategy(AutoTrader):
             f"Bear: {self._bear_action} | "
             f"Paper: {self._paper_mode}"
         )
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  SPOT SERVER-SIDE STOP PROTECTION
+    # ────────────────────────────────────────────────────────────────────────
+
+    def _place_spot_stop(self, coin_symbol: str, entry_price: float):
+        """Place a server-side stop after a successful spot buy.
+
+        Called immediately after every spot LONG position is established.
+        The stop lives on Binance's servers and executes even if the bot
+        is offline.  If server-side stops aren't available for the pair,
+        the SpotStopManager falls back to its background watchdog thread.
+        """
+        if self._paper_mode:
+            self.logger.info(f"[PAPER] Would place server-side stop for {coin_symbol}")
+            return
+
+        try:
+            balance = self.manager.get_currency_balance(coin_symbol)
+            if not balance or balance <= 0:
+                return
+
+            pair_info = None
+            try:
+                pair_info = self.manager.binance_client.get_symbol_info(
+                    coin_symbol + self.config.BRIDGE.symbol
+                )
+            except Exception:
+                pass
+
+            self.spot_stop_manager.place_stop(
+                coin_symbol=coin_symbol,
+                bridge_symbol=self.config.BRIDGE.symbol,
+                entry_price=entry_price,
+                quantity=balance,
+                pair_info=pair_info,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"SpotStop: failed to place server-side stop for {coin_symbol}: {e}; "
+                f"client-side stops remain active"
+            )
+
+    def _cancel_spot_stop(self, coin_symbol: str):
+        """Cancel a server-side stop when the bot sells via its normal path."""
+        try:
+            self.spot_stop_manager.cancel_stop(
+                coin_symbol, self.config.BRIDGE.symbol
+            )
+        except Exception as e:
+            self.logger.debug(f"SpotStop: cancel failed for {coin_symbol}: {e}")
+
+    def _check_spot_stop_filled(self, coin_symbol: str) -> bool:
+        """Return True if the server-side stop has been triggered/filled.
+
+        When this returns True, the bot should treat the position as sold
+        (the exchange executed the stop) and clean up local tracking state.
+        """
+        try:
+            return self.spot_stop_manager.is_stop_filled(
+                coin_symbol, self.config.BRIDGE.symbol
+            )
+        except Exception:
+            return False
+
+    def _watchdog_sell(self, coin_symbol: str, bridge_symbol: str) -> bool:
+        """Sell callback for the SpotStopManager watchdog.
+
+        Executes a market sell of the coin to the bridge.  Returns True on
+        success so the watchdog can remove the position from monitoring.
+        """
+        try:
+            from binance_trade_bot.models import Coin
+            from binance_trade_bot.models import Pair
+            coin = self.db.get_coin(coin_symbol)
+            if coin is None:
+                self.logger.error(f"SpotStop watchdog: {coin_symbol} not in DB")
+                return False
+            bridge = self.config.BRIDGE
+            result = self.manager.sell_alt(coin, bridge)
+            if result is not None:
+                self.logger.warning(
+                    f"SpotStop WATCHDOG: sold {coin_symbol} via market sell"
+                )
+                self._position_peak_price.pop(coin_symbol, None)
+                self._position_entry_price.pop(coin_symbol, None)
+                self._awaiting_reentry = True
+                self._last_trade_time = time.time()
+                self._persist_trade_state()
+                return True
+            return False
+        except Exception as e:
+            self.logger.error(f"SpotStop watchdog: sell failed for {coin_symbol}: {e}")
+            return False
+
+    # ────────────────────────────────────────────────────────────────────────
+    #  SPOT POSITION RECONCILIATION
+    # ────────────────────────────────────────────────────────────────────────
+
+    # Assets that are always excluded from spot reconciliation (fees, bridge).
+    _RECON_SKIP_ASSETS = frozenset()  # bridge + BNB added dynamically at runtime
+
+    def _reconcile_spot_positions(self):
+        """On startup, check Binance for actual spot holdings and reconcile.
+
+        For each non-bridge, non-BNB asset with a meaningful balance (> 0.001):
+          - If the asset is in the strategy's coin universe → treat it as an
+            expected position: log it, record the entry price if obtainable,
+            and seed trailing-stop tracking.
+          - If the asset is NOT in the coin universe → log a WARNING (likely an
+            orphan from a crashed trade) and sell it immediately for bridge
+            currency unless we are in paper mode.
+
+        A clear summary is logged at the end.
+        """
+        bridge_symbol = self.config.BRIDGE.symbol
+        skip_assets = {bridge_symbol, "BNB"}
+
+        try:
+            account = self.manager.get_account()
+        except Exception as e:
+            self.logger.warning(
+                f"Spot reconciliation skipped — could not fetch account: {e}",
+                notification=False,
+            )
+            return
+
+        balances = account.get("balances", [])
+
+        expected_holdings: List[Tuple[str, float, float]] = []   # (symbol, qty, price)
+        unexpected_holdings: List[Tuple[str, float, float]] = []  # (symbol, qty, price)
+
+        for bal in balances:
+            asset = bal.get("asset", "")
+            free = float(bal.get("free", 0))
+            if asset in skip_assets or free <= 0.001:
+                continue
+
+            # Try to get current price for the asset
+            ticker = f"{asset}{bridge_symbol}"
+            try:
+                price = self.manager.get_ticker_price(ticker)
+            except Exception:
+                price = None
+            price_val = float(price) if price else 0.0
+
+            if asset in self._coin_universe:
+                expected_holdings.append((asset, free, price_val))
+            else:
+                unexpected_holdings.append((asset, free, price_val))
+
+        # ── Handle expected holdings: seed trailing-stop tracking ───────────
+        for asset, qty, price in expected_holdings:
+            # Seed peak price at current market price and entry at current price.
+            # The real entry price from the DB is not tracked for the regime
+            # strategy (positions are managed via trailing stop only), so we use
+            # the current price as the conservative fallback.
+            self._position_peak_price[asset] = price if price > 0 else 0.0
+            self._position_entry_price[asset] = price if price > 0 else 0.0
+            value_str = f" (${qty * price:.2f})" if price > 0 else ""
+            self.logger.info(
+                f"Spot reconcile: expected holding {asset} "
+                f"qty={qty}{value_str} — trailing stop tracking enabled",
+                notification=False,
+            )
+
+        # ── Handle unexpected holdings: warn and sell ───────────────────────
+        for asset, qty, price in unexpected_holdings:
+            value_str = f" (~${qty * price:.2f})" if price > 0 else ""
+            self.logger.warning(
+                f"⚠️ Spot reconcile: UNEXPECTED holding {asset} "
+                f"qty={qty}{value_str} — not in coin universe "
+                f"({', '.join(self._coin_universe)}). "
+                f"Likely orphaned from a crashed trade.",
+                notification=True,
+            )
+            if self._paper_mode:
+                self.logger.info(
+                    f"[PAPER] Would sell orphaned {asset} for {bridge_symbol}",
+                    notification=False,
+                )
+            else:
+                try:
+                    from binance_trade_bot.models import Coin
+                    coin_obj = Coin(asset)
+                    bridge_coin = self.config.BRIDGE
+                    result = self.manager.sell_alt(coin_obj, bridge_coin)
+                    if result is not None:
+                        self.logger.warning(
+                            f"Spot reconcile: sold orphaned {asset} for {bridge_symbol}",
+                            notification=True,
+                        )
+                    else:
+                        self.logger.error(
+                            f"Spot reconcile: FAILED to sell orphaned {asset} "
+                            f"— flagging for manual review",
+                            notification=True,
+                        )
+                except Exception as e:
+                    self.logger.error(
+                        f"Spot reconcile: error selling orphaned {asset}: {e} "
+                        f"— flagging for manual review",
+                        notification=True,
+                    )
+
+        # ── Summary ─────────────────────────────────────────────────────────
+        if not expected_holdings and not unexpected_holdings:
+            self.logger.info(
+                "Spot reconcile: no spot holdings found (all in bridge) — clean state",
+                notification=False,
+            )
+        else:
+            self.logger.info(
+                f"Spot reconcile summary: "
+                f"{len(expected_holdings)} expected, "
+                f"{len(unexpected_holdings)} unexpected",
+                notification=False,
+            )
 
     # ────────────────────────────────────────────────────────────────────────
     #  REGIME DETECTION
@@ -624,6 +863,8 @@ class Strategy(AutoTrader):
             price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
             if balance and price and balance * price > 5.0:
                 self.logger.info(f"Exiting to cash: selling {current_coin} ({reason})")
+                # Cancel server-side stop before selling
+                self._cancel_spot_stop(current_coin.symbol)
                 result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
                 if result is not None:
                     self._awaiting_reentry = True
@@ -642,6 +883,8 @@ class Strategy(AutoTrader):
             price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
             if balance and price and balance * price > 5.0:
                 self.logger.info(f"Bear prep: selling {current_coin} for futures margin")
+                # Cancel server-side stop before selling
+                self._cancel_spot_stop(current_coin.symbol)
                 result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
                 if result is None:
                     self.logger.error(f"Failed to sell {current_coin} for bear transition")
@@ -946,6 +1189,8 @@ class Strategy(AutoTrader):
             if balance and balance * current_price > self.manager.get_min_notional(
                 symbol, self.config.BRIDGE.symbol
             ):
+                # Cancel server-side stop before manual sell (OCO would conflict)
+                self._cancel_spot_stop(symbol)
                 result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
                 if result is not None:
                     self._awaiting_reentry = True
@@ -965,6 +1210,18 @@ class Strategy(AutoTrader):
         if entry is None or entry <= 0:
             return False
 
+        # Check if server-side stop has already been triggered externally
+        if self._check_spot_stop_filled(symbol):
+            self.logger.warning(
+                f"Server-side stop already executed externally for {symbol}"
+            )
+            self._awaiting_reentry = True
+            self._position_peak_price.pop(symbol, None)
+            self._position_entry_price.pop(symbol, None)
+            self._last_trade_time = time.time()
+            self._persist_trade_state()
+            return True
+
         if check_stop_loss(entry, current_price, self._stop_loss_pct, is_short=False):
             self.logger.warning(
                 f"Hard stop loss: {symbol} "
@@ -980,6 +1237,8 @@ class Strategy(AutoTrader):
             if balance and balance * current_price > self.manager.get_min_notional(
                 symbol, self.config.BRIDGE.symbol
             ):
+                # Cancel server-side stop before manual sell (OCO would conflict)
+                self._cancel_spot_stop(symbol)
                 result = self.manager.sell_alt(current_coin, self.config.BRIDGE)
                 if result is not None:
                     self._awaiting_reentry = True
@@ -1153,6 +1412,10 @@ class Strategy(AutoTrader):
                         current_coin.symbol, self.config.BRIDGE.symbol
                     ):
                         self.manager.buy_alt(current_coin, self.config.BRIDGE)
+                        # Place server-side stop on the grid buy
+                        price = self.manager.get_ticker_price(current_coin + self.config.BRIDGE)
+                        if price:
+                            self._place_spot_stop(current_coin.symbol, price)
             elif fill["side"] == "sell":
                 self.logger.info(
                     f"Grid SELL fill: {current_coin} at ~{fill['price']:.6f}"
@@ -1162,6 +1425,8 @@ class Strategy(AutoTrader):
                     if balance and balance * current_price > self.manager.get_min_notional(
                         current_coin.symbol, self.config.BRIDGE.symbol
                     ):
+                        # Cancel server-side stop before grid sell
+                        self._cancel_spot_stop(current_coin.symbol)
                         self.manager.sell_alt(current_coin, self.config.BRIDGE)
 
         # Reset grid periodically (every 4 hours) to adapt to drift
@@ -1286,6 +1551,8 @@ class Strategy(AutoTrader):
                     price = self.manager.get_ticker_price(best_coin + self.config.BRIDGE)
                     if price:
                         self._reset_position_tracking(best_coin.symbol, price)
+                        # Place server-side stop on the new position
+                        self._place_spot_stop(best_coin.symbol, price)
                     self.logger.info(f"Re-entry complete: now holding {best_coin}")
 
     # ────────────────────────────────────────────────────────────────────────
@@ -1306,6 +1573,9 @@ class Strategy(AutoTrader):
             self.logger.info("Skipping rotation — insufficient balance")
             return False
 
+        # Cancel server-side stop on the coin we're about to sell
+        self._cancel_spot_stop(from_coin.symbol)
+
         if self.manager.sell_alt(from_coin, self.config.BRIDGE) is None:
             self.logger.info("Rotation sell failed")
             return False
@@ -1317,6 +1587,8 @@ class Strategy(AutoTrader):
             new_price = self.manager.get_ticker_price(to_coin + self.config.BRIDGE)
             if new_price:
                 self._reset_position_tracking(to_coin.symbol, new_price)
+                # Place server-side stop on the new position
+                self._place_spot_stop(to_coin.symbol, new_price)
             return True
 
         self.logger.info("Rotation buy failed")
@@ -1414,6 +1686,10 @@ class Strategy(AutoTrader):
                 self.logger.info(f"Bridge scout: buying {best_coin}")
                 self.manager.buy_alt(best_coin, self.config.BRIDGE)
                 self.db.set_current_coin(best_coin)
+                # Place server-side stop on the new position
+                price = self.manager.get_ticker_price(best_coin + self.config.BRIDGE)
+                if price:
+                    self._place_spot_stop(best_coin.symbol, price)
 
     def initialize_current_coin(self):
         """Decide what the current coin is, and set it up in the DB."""
