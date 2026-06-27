@@ -1,0 +1,1060 @@
+{
+  "quality_ranking": [
+    {
+      "coin": "BNB",
+      "avg_adx": 21.197120963588436,
+      "trend_efficiency": -0.02050129503959757,
+      "regime_correct_ratio": 0.47317073170731705,
+      "r_squared": 0.11119599115051108,
+      "signed_r_squared": -0.11119599115051108,
+      "bh_sharpe": -0.03510235206715339,
+      "net_return": -0.1569713342338285,
+      "adx_norm": 0.3098560481794218,
+      "eff_norm": 0.3974935248020121,
+      "regime_norm": 0.6507760532150775,
+      "rsq_norm": 0.4444020044247445,
+      "bh_norm": 0.49122441198321165,
+      "composite_score": 0.45515470029042976,
+      "split_idx": null
+    },
+    {
+      "coin": "ETH",
+      "avg_adx": 22.04654110246341,
+      "trend_efficiency": -0.031264589764847216,
+      "regime_correct_ratio": 0.4853658536585366,
+      "r_squared": 0.37045563291589995,
+      "signed_r_squared": -0.37045563291589995,
+      "bh_sharpe": -0.17702152021842174,
+      "net_return": -0.320999181418193,
+      "adx_norm": 0.3523270551231706,
+      "eff_norm": 0.3436770511757639,
+      "regime_norm": 0.7062084257206207,
+      "rsq_norm": 0.31477218354205005,
+      "bh_norm": 0.45574461994539456,
+      "composite_score": 0.4215901766152683,
+      "split_idx": null
+    },
+    {
+      "coin": "NEAR",
+      "avg_adx": 20.945524441466798,
+      "trend_efficiency": -0.022829567275945716,
+      "regime_correct_ratio": 0.43658536585365854,
+      "r_squared": 0.42683946131685424,
+      "signed_r_squared": -0.42683946131685424,
+      "bh_sharpe": 0.11118788535209603,
+      "net_return": -0.35251550654720887,
+      "adx_norm": 0.2972762220733399,
+      "eff_norm": 0.3858521636202714,
+      "regime_norm": 0.4844789356984478,
+      "rsq_norm": 0.2865802693415729,
+      "bh_norm": 0.5277969713380241,
+      "composite_score": 0.40299161127365657,
+      "split_idx": null
+    },
+    {
+      "coin": "XLM",
+      "avg_adx": 23.08565928536248,
+      "trend_efficiency": -0.03319814376436483,
+      "regime_correct_ratio": 0.41585365853658535,
+      "r_squared": 0.5838089722579026,
+      "signed_r_squared": -0.5838089722579026,
+      "bh_sharpe": -0.16363757151760727,
+      "net_return": -0.4113067027758971,
+      "adx_norm": 0.40428296426812393,
+      "eff_norm": 0.33400928117817585,
+      "regime_norm": 0.39024390243902424,
+      "rsq_norm": 0.2080955138710487,
+      "bh_norm": 0.4590906071205982,
+      "composite_score": 0.35907310485497546,
+      "split_idx": null
+    },
+    {
+      "coin": "LINK",
+      "avg_adx": 22.283458931787788,
+      "trend_efficiency": -0.04404968695836569,
+      "regime_correct_ratio": 0.4475609756097561,
+      "r_squared": 0.5975559241759167,
+      "signed_r_squared": -0.5975559241759167,
+      "bh_sharpe": -0.5045212827088553,
+      "net_return": -0.5390137328339576,
+      "adx_norm": 0.36417294658938937,
+      "eff_norm": 0.27975156520817157,
+      "regime_norm": 0.5343680709534367,
+      "rsq_norm": 0.20122203791204163,
+      "bh_norm": 0.37386967932278614,
+      "composite_score": 0.3384308713465717,
+      "split_idx": null
+    },
+    {
+      "coin": "XRP",
+      "avg_adx": 22.807361599512436,
+      "trend_efficiency": -0.05498502446439973,
+      "regime_correct_ratio": 0.4926829268292683,
+      "r_squared": 0.73222727766073,
+      "signed_r_squared": -0.73222727766073,
+      "bh_sharpe": -0.729609988320285,
+      "net_return": -0.5489183769253745,
+      "adx_norm": 0.39036807997562184,
+      "eff_norm": 0.22507487767800138,
+      "regime_norm": 0.7394678492239467,
+      "rsq_norm": 0.13388636116963498,
+      "bh_norm": 0.3175975029199287,
+      "composite_score": 0.3319207567633448,
+      "split_idx": null
+    },
+    {
+      "coin": "INJ",
+      "avg_adx": 21.666879391431497,
+      "trend_efficiency": -0.0363454375434078,
+      "regime_correct_ratio": 0.42317073170731706,
+      "r_squared": 0.7145037549346765,
+      "signed_r_squared": -0.7145037549346765,
+      "bh_sharpe": -0.28617356833246854,
+      "net_return": -0.5983898305084746,
+      "adx_norm": 0.33334396957157486,
+      "eff_norm": 0.318272812282961,
+      "regime_norm": 0.4235033259423502,
+      "rsq_norm": 0.14274812253266173,
+      "bh_norm": 0.4284566079168829,
+      "composite_score": 0.32875907388358205,
+      "split_idx": null
+    },
+    {
+      "coin": "SOL",
+      "avg_adx": 22.274136131585518,
+      "trend_efficiency": -0.050253712654553466,
+      "regime_correct_ratio": 0.48048780487804876,
+      "r_squared": 0.7177135502061195,
+      "signed_r_squared": -0.7177135502061195,
+      "bh_sharpe": -0.7384351982286147,
+      "net_return": -0.5845726520455992,
+      "adx_norm": 0.3637068065792759,
+      "eff_norm": 0.2487314367272327,
+      "regime_norm": 0.6840354767184034,
+      "rsq_norm": 0.14114322489694026,
+      "bh_norm": 0.3153912004428463,
+      "composite_score": 0.3264206467665597,
+      "split_idx": null
+    },
+    {
+      "coin": "DOGE",
+      "avg_adx": 22.969422264913195,
+      "trend_efficiency": -0.050151079705533036,
+      "regime_correct_ratio": 0.4634146341463415,
+      "r_squared": 0.7718678528085292,
+      "signed_r_squared": -0.7718678528085292,
+      "bh_sharpe": -0.6872179725365855,
+      "net_return": -0.6332862500608836,
+      "adx_norm": 0.39847111324565976,
+      "eff_norm": 0.24924460147233485,
+      "regime_norm": 0.606430155210643,
+      "rsq_norm": 0.1140660735957354,
+      "bh_norm": 0.32819550686585364,
+      "composite_score": 0.3179084320721396,
+      "split_idx": null
+    },
+    {
+      "coin": "ICP",
+      "avg_adx": 21.000702117154383,
+      "trend_efficiency": -0.03968229644365634,
+      "regime_correct_ratio": 0.41097560975609754,
+      "r_squared": 0.7623197767362568,
+      "signed_r_squared": -0.7623197767362568,
+      "bh_sharpe": -0.24214472391319247,
+      "net_return": -0.606093979441997,
+      "adx_norm": 0.30003510585771914,
+      "eff_norm": 0.3015885177817183,
+      "regime_norm": 0.3680709534368069,
+      "rsq_norm": 0.11884011163187158,
+      "bh_norm": 0.4394638190217019,
+      "composite_score": 0.30924701542140826,
+      "split_idx": null
+    },
+    {
+      "coin": "HBAR",
+      "avg_adx": 23.018012714295356,
+      "trend_efficiency": -0.053822760338193436,
+      "regime_correct_ratio": 0.46164021164021163,
+      "r_squared": 0.782077641251438,
+      "signed_r_squared": -0.782077641251438,
+      "bh_sharpe": -0.7263651714177102,
+      "net_return": -0.6004552267806584,
+      "adx_norm": 0.4009006357147678,
+      "eff_norm": 0.23088619830903284,
+      "regime_norm": 0.5983645983645982,
+      "rsq_norm": 0.10896117937428101,
+      "bh_norm": 0.31840870714557246,
+      "composite_score": 0.3090057473504124,
+      "split_idx": null
+    },
+    {
+      "coin": "AVAX",
+      "avg_adx": 24.218235863160423,
+      "trend_efficiency": -0.057148286242070724,
+      "regime_correct_ratio": 0.4792682926829268,
+      "r_squared": 0.7883969249363989,
+      "signed_r_squared": -0.7883969249363989,
+      "bh_sharpe": -1.0101125448922976,
+      "net_return": -0.7210571551353674,
+      "adx_norm": 0.46091179315802117,
+      "eff_norm": 0.2142585687896464,
+      "regime_norm": 0.6784922394678491,
+      "rsq_norm": 0.10580153753180055,
+      "bh_norm": 0.2474718637769256,
+      "composite_score": 0.3075035205418836,
+      "split_idx": null
+    },
+    {
+      "coin": "ALGO",
+      "avg_adx": 23.09756863402128,
+      "trend_efficiency": -0.047315978016777,
+      "regime_correct_ratio": 0.4329268292682927,
+      "r_squared": 0.7325079090535243,
+      "signed_r_squared": -0.7325079090535243,
+      "bh_sharpe": -0.658622402243564,
+      "net_return": -0.6358952340060112,
+      "adx_norm": 0.40487843170106397,
+      "eff_norm": 0.26342010991611503,
+      "regime_norm": 0.46784922394678485,
+      "rsq_norm": 0.13374604547323787,
+      "bh_norm": 0.335344399439109,
+      "composite_score": 0.3073494847806309,
+      "split_idx": null
+    },
+    {
+      "coin": "LTC",
+      "avg_adx": 22.858038736421953,
+      "trend_efficiency": -0.06087705649632057,
+      "regime_correct_ratio": 0.47804878048780486,
+      "r_squared": 0.747061825886757,
+      "signed_r_squared": -0.747061825886757,
+      "bh_sharpe": -0.8671967600944984,
+      "net_return": -0.574654332040187,
+      "adx_norm": 0.39290193682109764,
+      "eff_norm": 0.19561471751839718,
+      "regime_norm": 0.6729490022172947,
+      "rsq_norm": 0.12646908705662152,
+      "bh_norm": 0.2832008099763754,
+      "composite_score": 0.30487534014077633,
+      "split_idx": null
+    },
+    {
+      "coin": "AAVE",
+      "avg_adx": 23.708392937982424,
+      "trend_efficiency": -0.04016067674356996,
+      "regime_correct_ratio": 0.4,
+      "r_squared": 0.8689900645036934,
+      "signed_r_squared": -0.8689900645036934,
+      "bh_sharpe": -0.4092649435025303,
+      "net_return": -0.5568171066326048,
+      "adx_norm": 0.4354196468991212,
+      "eff_norm": 0.2991966162821502,
+      "regime_norm": 0.31818181818181823,
+      "rsq_norm": 0.06550496774815329,
+      "bh_norm": 0.39768376412436746,
+      "composite_score": 0.300361308413401,
+      "split_idx": null
+    },
+    {
+      "coin": "STX",
+      "avg_adx": 23.86221779159683,
+      "trend_efficiency": -0.061816925924076095,
+      "regime_correct_ratio": 0.5292682926829269,
+      "r_squared": 0.9030169707985417,
+      "signed_r_squared": -0.9030169707985417,
+      "bh_sharpe": -1.408527724379578,
+      "net_return": -0.8272633744855967,
+      "adx_norm": 0.4431108895798415,
+      "eff_norm": 0.19091537037961953,
+      "regime_norm": 0.9057649667405765,
+      "rsq_norm": 0.048491514600729146,
+      "bh_norm": 0.1478680689051055,
+      "composite_score": 0.2967255411893898,
+      "split_idx": null
+    },
+    {
+      "coin": "ARB",
+      "avg_adx": 24.28192932634977,
+      "trend_efficiency": -0.0536149407497357,
+      "regime_correct_ratio": 0.4548780487804878,
+      "r_squared": 0.8217027638752278,
+      "signed_r_squared": -0.8217027638752278,
+      "bh_sharpe": -0.9850212590343069,
+      "net_return": -0.8054382259767688,
+      "adx_norm": 0.4640964663174884,
+      "eff_norm": 0.23192529625132152,
+      "regime_norm": 0.5676274944567627,
+      "rsq_norm": 0.08914861806238611,
+      "bh_norm": 0.25374468524142324,
+      "composite_score": 0.2940058131018011,
+      "split_idx": null
+    },
+    {
+      "coin": "BTC",
+      "avg_adx": 22.54090785610051,
+      "trend_efficiency": -0.06407468236751261,
+      "regime_correct_ratio": 0.47317073170731705,
+      "r_squared": 0.7622293109091038,
+      "signed_r_squared": -0.7622293109091038,
+      "bh_sharpe": -0.9138681290960977,
+      "net_return": -0.4124677916579836,
+      "adx_norm": 0.3770453928050255,
+      "eff_norm": 0.17962658816243696,
+      "regime_norm": 0.6507760532150775,
+      "rsq_norm": 0.11888534454544808,
+      "bh_norm": 0.27153296772597557,
+      "composite_score": 0.2907401747842082,
+      "split_idx": null
+    },
+    {
+      "coin": "FIL",
+      "avg_adx": 23.072023965433267,
+      "trend_efficiency": -0.052067629588559566,
+      "regime_correct_ratio": 0.42317073170731706,
+      "r_squared": 0.890693800085991,
+      "signed_r_squared": -0.890693800085991,
+      "bh_sharpe": -0.5429619731492824,
+      "net_return": -0.7584381204500331,
+      "adx_norm": 0.40360119827166335,
+      "eff_norm": 0.2396618520572022,
+      "regime_norm": 0.4235033259423502,
+      "rsq_norm": 0.054653099957004514,
+      "bh_norm": 0.36425950671267937,
+      "composite_score": 0.2859766383159733,
+      "split_idx": null
+    },
+    {
+      "coin": "ATOM",
+      "avg_adx": 23.293086716536987,
+      "trend_efficiency": -0.06086836723283529,
+      "regime_correct_ratio": 0.4658536585365854,
+      "r_squared": 0.8530847162220541,
+      "signed_r_squared": -0.8530847162220541,
+      "bh_sharpe": -1.04242573564165,
+      "net_return": -0.679805942995755,
+      "adx_norm": 0.41465433582684935,
+      "eff_norm": 0.19565816383582355,
+      "regime_norm": 0.6175166297117517,
+      "rsq_norm": 0.07345764188897297,
+      "bh_norm": 0.2393935660895875,
+      "composite_score": 0.27828010568993755,
+      "split_idx": null
+    },
+    {
+      "coin": "SAND",
+      "avg_adx": 25.56258848968209,
+      "trend_efficiency": -0.06443932754186887,
+      "regime_correct_ratio": 0.47540983606557374,
+      "r_squared": 0.9312795745628369,
+      "signed_r_squared": -0.9312795745628369,
+      "bh_sharpe": -1.3349376134440931,
+      "net_return": -0.7976293103448276,
+      "adx_norm": 0.5281294244841044,
+      "eff_norm": 0.17780336229065566,
+      "regime_norm": 0.6609538002980624,
+      "rsq_norm": 0.03436021271858153,
+      "bh_norm": 0.16626559663897672,
+      "composite_score": 0.27125176599344947,
+      "split_idx": null
+    },
+    {
+      "coin": "RUNE",
+      "avg_adx": 24.607290220044757,
+      "trend_efficiency": -0.05981228241139277,
+      "regime_correct_ratio": 0.4378048780487805,
+      "r_squared": 0.9024759997673245,
+      "signed_r_squared": -0.9024759997673245,
+      "bh_sharpe": -1.0882841690567981,
+      "net_return": -0.7357859531772575,
+      "adx_norm": 0.4803645110022378,
+      "eff_norm": 0.20093858794303618,
+      "regime_norm": 0.49002217294900213,
+      "rsq_norm": 0.048762000116337745,
+      "bh_norm": 0.22792895773580046,
+      "composite_score": 0.2625272890356627,
+      "split_idx": null
+    },
+    {
+      "coin": "OP",
+      "avg_adx": 24.589840700223835,
+      "trend_efficiency": -0.055002538974199586,
+      "regime_correct_ratio": 0.4353658536585366,
+      "r_squared": 0.8825385900501759,
+      "signed_r_squared": -0.8825385900501759,
+      "bh_sharpe": -1.272422369808579,
+      "net_return": -0.8690288713910761,
+      "adx_norm": 0.47949203501119175,
+      "eff_norm": 0.22498730512900209,
+      "regime_norm": 0.47893569844789347,
+      "rsq_norm": 0.05873070497491206,
+      "bh_norm": 0.18189440754785524,
+      "composite_score": 0.25723072918305956,
+      "split_idx": null
+    },
+    {
+      "coin": "ADA",
+      "avg_adx": 24.11903945392995,
+      "trend_efficiency": -0.06569544067058639,
+      "regime_correct_ratio": 0.47804878048780486,
+      "r_squared": 0.8456547373416057,
+      "signed_r_squared": -0.8456547373416057,
+      "bh_sharpe": -1.5463814961183864,
+      "net_return": -0.8114226910213533,
+      "adx_norm": 0.4559519726964975,
+      "eff_norm": 0.1715227966470681,
+      "regime_norm": 0.6729490022172947,
+      "rsq_norm": 0.07717263132919716,
+      "bh_norm": 0.1134046259704034,
+      "composite_score": 0.25600152815727617,
+      "split_idx": null
+    },
+    {
+      "coin": "DOT",
+      "avg_adx": 23.82456173105431,
+      "trend_efficiency": -0.06576996380246257,
+      "regime_correct_ratio": 0.46219512195121953,
+      "r_squared": 0.9142497422493846,
+      "signed_r_squared": -0.9142497422493846,
+      "bh_sharpe": -1.401408015430056,
+      "net_return": -0.8264583333333333,
+      "adx_norm": 0.4412280865527155,
+      "eff_norm": 0.17115018098768717,
+      "regime_norm": 0.6008869179600888,
+      "rsq_norm": 0.0428751288753077,
+      "bh_norm": 0.14964799614248597,
+      "composite_score": 0.2450918207345254,
+      "split_idx": null
+    },
+    {
+      "coin": "GALA",
+      "avg_adx": 25.291641691282887,
+      "trend_efficiency": -0.05997894034273082,
+      "regime_correct_ratio": 0.4402439024390244,
+      "r_squared": 0.9227729905684426,
+      "signed_r_squared": -0.9227729905684426,
+      "bh_sharpe": -1.574712083208653,
+      "net_return": -0.884795918367347,
+      "adx_norm": 0.5145820845641443,
+      "eff_norm": 0.20010529828634593,
+      "regime_norm": 0.5011086474501109,
+      "rsq_norm": 0.03861350471577868,
+      "bh_norm": 0.10632197919783676,
+      "composite_score": 0.23668313011633968,
+      "split_idx": null
+    },
+    {
+      "coin": "APT",
+      "avg_adx": 24.48833127101121,
+      "trend_efficiency": -0.06583621374467019,
+      "regime_correct_ratio": 0.4658536585365854,
+      "r_squared": 0.9185178773778511,
+      "signed_r_squared": -0.9185178773778511,
+      "bh_sharpe": -1.795228065252456,
+      "net_return": -0.8938037249283668,
+      "adx_norm": 0.47441656355056044,
+      "eff_norm": 0.17081893127664907,
+      "regime_norm": 0.6175166297117517,
+      "rsq_norm": 0.04074106131107447,
+      "bh_norm": 0.05119298368688602,
+      "composite_score": 0.2274411699924455,
+      "split_idx": null
+    }
+  ],
+  "portfolio_results": {
+    "Original 9-Coin": {
+      "coins": [
+        "BTC",
+        "ETH",
+        "SOL",
+        "BNB",
+        "XRP",
+        "DOGE",
+        "AVAX",
+        "LINK",
+        "INJ"
+      ],
+      "portfolio_metrics": {
+        "total_return": -0.08577474912396377,
+        "annualized_return": -0.07584334267237325,
+        "sharpe": 0.058745346042808955,
+        "sortino": 0.09564130135278637,
+        "max_drawdown": 0.40815711703746804,
+        "calmar": -0.1858189885867186,
+        "profit_factor": 1.082737396666077,
+        "win_rate": 0.4566744730679157,
+        "num_trades": 427
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": -0.3622103902089927,
+          "annualized_return": -0.4827698917972456,
+          "sharpe": -1.6771234628623055,
+          "sortino": -1.7323537760604548,
+          "max_drawdown": 0.40815711703746804,
+          "calmar": -1.1828040517860876,
+          "profit_factor": 0.7686228321717591,
+          "win_rate": 0.4392857142857143,
+          "num_trades": 280
+        },
+        "oos_metrics": {
+          "total_return": 0.22991904731353796,
+          "annualized_return": 0.5762317641487629,
+          "sharpe": 0.9489050753382589,
+          "sortino": 2.7367972981455004,
+          "max_drawdown": 0.22448019133696112,
+          "calmar": 2.5669604107018826,
+          "profit_factor": 1.5419313235726293,
+          "win_rate": 0.48299319727891155,
+          "num_trades": 147
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.411,
+        "p5": -0.17060096428501587,
+        "p50": -0.019527955922412632,
+        "p95": 0.16589450028164376,
+        "mean_return": -0.01253512859484389,
+        "prob_ruin": 0.0
+      }
+    },
+    "Top 3": {
+      "coins": [
+        "BNB",
+        "ETH",
+        "XRP"
+      ],
+      "portfolio_metrics": {
+        "total_return": 0.07267140392750848,
+        "annualized_return": 0.06364331750252883,
+        "sharpe": 0.36650079904931815,
+        "sortino": 0.4371526442523883,
+        "max_drawdown": 0.4337954565396237,
+        "calmar": 0.14671273417709374,
+        "profit_factor": 1.2195459936250388,
+        "win_rate": 0.47107438016528924,
+        "num_trades": 121
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": -0.3456986631969068,
+          "annualized_return": -0.4630233257333025,
+          "sharpe": -1.1908451047371553,
+          "sortino": -0.9209863806037274,
+          "max_drawdown": 0.4272913296438559,
+          "calmar": -1.08362443515816,
+          "profit_factor": 0.7323520868896181,
+          "win_rate": 0.4230769230769231,
+          "num_trades": 78
+        },
+        "oos_metrics": {
+          "total_return": 0.4718187046442641,
+          "annualized_return": 1.339253377447994,
+          "sharpe": 1.4956685861711183,
+          "sortino": 2.878861948132995,
+          "max_drawdown": 0.18122987295458665,
+          "calmar": 7.389804757980434,
+          "profit_factor": 2.1990030160568907,
+          "win_rate": 0.5348837209302325,
+          "num_trades": 43
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.671,
+        "p5": -0.16622271188555493,
+        "p50": 0.07570238406167629,
+        "p95": 0.4395080072012114,
+        "mean_return": 0.09712015809985612,
+        "prob_ruin": 0.0
+      }
+    },
+    "Top 5": {
+      "coins": [
+        "BNB",
+        "ETH",
+        "XRP",
+        "LINK",
+        "XLM"
+      ],
+      "portfolio_metrics": {
+        "total_return": -0.22622759828299,
+        "annualized_return": -0.20194407238407164,
+        "sharpe": -0.1836052564110619,
+        "sortino": -0.23298275161234333,
+        "max_drawdown": 0.4146806020119199,
+        "calmar": -0.4869870242405667,
+        "profit_factor": 0.9839110815522942,
+        "win_rate": 0.45248868778280543,
+        "num_trades": 221
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": -0.37209809368789226,
+          "annualized_return": -0.4944815878564146,
+          "sharpe": -1.4441523466772421,
+          "sortino": -1.337074712638163,
+          "max_drawdown": 0.4146806020119199,
+          "calmar": -1.1924396401889106,
+          "profit_factor": 0.7293475305648992,
+          "win_rate": 0.41304347826086957,
+          "num_trades": 138
+        },
+        "oos_metrics": {
+          "total_return": 0.1750911510239881,
+          "annualized_return": 0.4258472399662552,
+          "sharpe": 0.8198161813031745,
+          "sortino": 1.3736850932927245,
+          "max_drawdown": 0.18839279126672154,
+          "calmar": 2.260422158952738,
+          "profit_factor": 1.4293846195096414,
+          "win_rate": 0.5060240963855421,
+          "num_trades": 83
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.415,
+        "p5": -0.22253247457555167,
+        "p50": -0.028186840055061557,
+        "p95": 0.24461941394521614,
+        "mean_return": -0.014127681238287422,
+        "prob_ruin": 0.0
+      }
+    },
+    "Top 7": {
+      "coins": [
+        "BNB",
+        "ETH",
+        "XRP",
+        "LINK",
+        "XLM",
+        "SOL",
+        "AVAX"
+      ],
+      "portfolio_metrics": {
+        "total_return": -0.034344759868089714,
+        "annualized_return": -0.030270150371104365,
+        "sharpe": 0.16646078786377191,
+        "sortino": 0.23184819728109318,
+        "max_drawdown": 0.3455023365605668,
+        "calmar": -0.08761199901696753,
+        "profit_factor": 1.0945047526782508,
+        "win_rate": 0.47115384615384615,
+        "num_trades": 312
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": -0.2596987963249836,
+          "annualized_return": -0.3564672883877592,
+          "sharpe": -0.9168737759177753,
+          "sortino": -0.8927594737320156,
+          "max_drawdown": 0.3455023365605669,
+          "calmar": -1.0317362595470325,
+          "profit_factor": 0.8649737663171068,
+          "win_rate": 0.4504950495049505,
+          "num_trades": 202
+        },
+        "oos_metrics": {
+          "total_return": 0.240089375601384,
+          "annualized_return": 0.6050330397508668,
+          "sharpe": 0.9615901868984156,
+          "sortino": 1.9311064185411762,
+          "max_drawdown": 0.18096159093271721,
+          "calmar": 3.343433469126729,
+          "profit_factor": 1.4799650037381302,
+          "win_rate": 0.5,
+          "num_trades": 110
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.592,
+        "p5": -0.1551910293258699,
+        "p50": 0.02960303862233571,
+        "p95": 0.26188408648191336,
+        "mean_return": 0.03662629992196892,
+        "prob_ruin": 0.0
+      }
+    },
+    "Strat Top 3": {
+      "coins": [
+        "APT",
+        "AVAX",
+        "OP"
+      ],
+      "portfolio_metrics": {
+        "total_return": 0.8784134349673614,
+        "annualized_return": 0.7410221480047845,
+        "sharpe": 1.2360729755012847,
+        "sortino": 1.2085243628931588,
+        "max_drawdown": 0.2907119717142266,
+        "calmar": 2.5489908228933147,
+        "profit_factor": 1.3996465775931544,
+        "win_rate": 0.5555555555555556,
+        "num_trades": 162
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": 0.6166384114437731,
+          "annualized_return": 1.02207852322283,
+          "sharpe": 1.5544099224840997,
+          "sortino": 1.2914812248832175,
+          "max_drawdown": 0.23743081437844316,
+          "calmar": 4.304742524252685,
+          "profit_factor": 1.4087039760508846,
+          "win_rate": 0.6074766355140186,
+          "num_trades": 107
+        },
+        "oos_metrics": {
+          "total_return": 0.4050071169284748,
+          "annualized_return": 1.1121017049661144,
+          "sharpe": 1.3469268080657442,
+          "sortino": 1.928383983254846,
+          "max_drawdown": 0.1906571591977891,
+          "calmar": 5.832992108166324,
+          "profit_factor": 1.5869951912277687,
+          "win_rate": 0.46296296296296297,
+          "num_trades": 54
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.926,
+        "p5": -0.041653026932440496,
+        "p50": 0.3796804412021909,
+        "p95": 0.9970764482381136,
+        "mean_return": 0.4103319601262316,
+        "prob_ruin": 0.0
+      }
+    },
+    "Strat Top 5": {
+      "coins": [
+        "APT",
+        "AVAX",
+        "OP",
+        "BTC",
+        "RUNE"
+      ],
+      "portfolio_metrics": {
+        "total_return": 0.5290887749331423,
+        "annualized_return": 0.4528202778209618,
+        "sharpe": 1.0109035469490693,
+        "sortino": 1.1428029254932381,
+        "max_drawdown": 0.22520741125739455,
+        "calmar": 2.0106810663678534,
+        "profit_factor": 1.3689506427937101,
+        "win_rate": 0.5186721991701245,
+        "num_trades": 241
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": 0.34853252896597264,
+          "annualized_return": 0.5500978706911828,
+          "sharpe": 1.2436919538051872,
+          "sortino": 1.176617149199787,
+          "max_drawdown": 0.2241565786290457,
+          "calmar": 2.454078635816144,
+          "profit_factor": 1.3560002200272387,
+          "win_rate": 0.5394736842105263,
+          "num_trades": 152
+        },
+        "oos_metrics": {
+          "total_return": 0.2676684555851747,
+          "annualized_return": 0.6845674337514125,
+          "sharpe": 1.161520490296995,
+          "sortino": 1.6667553318291706,
+          "max_drawdown": 0.24683771259519133,
+          "calmar": 2.773350257357508,
+          "profit_factor": 1.5071157436048128,
+          "win_rate": 0.48863636363636365,
+          "num_trades": 88
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.927,
+        "p5": -0.020457988332754026,
+        "p50": 0.2477782542886806,
+        "p95": 0.689420823986476,
+        "mean_return": 0.276520196238641,
+        "prob_ruin": 0.0
+      }
+    },
+    "Strat Top 7": {
+      "coins": [
+        "APT",
+        "AVAX",
+        "OP",
+        "BTC",
+        "RUNE",
+        "ARB",
+        "XLM"
+      ],
+      "portfolio_metrics": {
+        "total_return": 0.3318411968411834,
+        "annualized_return": 0.2866433332642211,
+        "sharpe": 0.7632177387628427,
+        "sortino": 0.9280072706901279,
+        "max_drawdown": 0.28471916216296955,
+        "calmar": 1.0067581369888625,
+        "profit_factor": 1.2974589679539603,
+        "win_rate": 0.4956772334293948,
+        "num_trades": 347
+      },
+      "walk_forward": {
+        "is_metrics": {
+          "total_return": 0.2033730812285377,
+          "annualized_return": 0.3117644296708042,
+          "sharpe": 0.8815403640227415,
+          "sortino": 0.8598068335295526,
+          "max_drawdown": 0.2847191621629695,
+          "calmar": 1.0949892775125347,
+          "profit_factor": 1.2516632752487087,
+          "win_rate": 0.5092592592592593,
+          "num_trades": 216
+        },
+        "oos_metrics": {
+          "total_return": 0.1914191746589673,
+          "annualized_return": 0.46977360450156636,
+          "sharpe": 0.9260284040425645,
+          "sortino": 1.515435948732863,
+          "max_drawdown": 0.2547912896787283,
+          "calmar": 1.843758493839855,
+          "profit_factor": 1.4335390943422637,
+          "win_rate": 0.47692307692307695,
+          "num_trades": 130
+        },
+        "survives": "True",
+        "split_idx": 449
+      },
+      "monte_carlo": {
+        "prob_positive": 0.928,
+        "p5": -0.02105248242915339,
+        "p50": 0.2178091817536103,
+        "p95": 0.5668090966381742,
+        "mean_return": 0.2344027210508076,
+        "prob_ruin": 0.0
+      }
+    }
+  },
+  "dynamic_result": {
+    "portfolio_metrics": {
+      "total_return": -0.2940679091721792,
+      "annualized_return": -0.2638195854912464,
+      "sharpe": 0.4033171188564613,
+      "sortino": 0.4641113350440643,
+      "max_drawdown": 0.8096768832265989,
+      "calmar": -0.325833169942945,
+      "profit_factor": 0.9402367094693963,
+      "win_rate": 0.44986631016042783,
+      "num_trades": 1496
+    },
+    "walk_forward": {
+      "is_metrics": {
+        "total_return": -0.4258671068477867,
+        "annualized_return": -0.5566516188288118,
+        "sharpe": -2.7878925293282424,
+        "sortino": -3.0107553681814516,
+        "max_drawdown": 0.45387157452777344,
+        "calmar": -1.2264518204471715,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "num_trades": 0
+      },
+      "oos_metrics": {
+        "total_return": 0.015669617475901454,
+        "annualized_return": 0.034778220351656675,
+        "sharpe": 0.2799027218723072,
+        "sortino": 0.7201008456961426,
+        "max_drawdown": 0.24536950040307384,
+        "calmar": 0.14173815529039155,
+        "profit_factor": 0.0,
+        "win_rate": 0.0,
+        "num_trades": 0
+      },
+      "survives": "False"
+    },
+    "monte_carlo": {
+      "prob_positive": 0.072,
+      "p5": -0.2094878304249126,
+      "p50": -0.10683158228422401,
+      "p95": 0.01562545643225732,
+      "mean_return": -0.10297051013944238,
+      "prob_ruin": 0.0
+    },
+    "avg_active_coins": 13.583132530120482,
+    "max_active_coins": 27,
+    "adx_threshold": 25
+  },
+  "weighted_result": {
+    "portfolio_metrics": {
+      "total_return": -0.25144307278153366,
+      "annualized_return": -0.22486299922744857,
+      "sharpe": -0.24528666165959162,
+      "sortino": -0.3028271457293033,
+      "max_drawdown": 0.4147406179326196,
+      "calmar": -0.5421774224775368,
+      "profit_factor": 0.9839110815522942,
+      "win_rate": 0.45248868778280543,
+      "num_trades": 221
+    },
+    "walk_forward": {
+      "is_metrics": {
+        "total_return": -0.37209809368789226,
+        "annualized_return": -0.4944815878564146,
+        "sharpe": -1.4441523466772421,
+        "sortino": -1.337074712638163,
+        "max_drawdown": 0.4146806020119199,
+        "calmar": -1.1924396401889106,
+        "profit_factor": 0.7293475305648992,
+        "win_rate": 0.41304347826086957,
+        "num_trades": 138
+      },
+      "oos_metrics": {
+        "total_return": 0.1750911510239881,
+        "annualized_return": 0.4258472399662552,
+        "sharpe": 0.8198161813031745,
+        "sortino": 1.3736850932927245,
+        "max_drawdown": 0.18839279126672154,
+        "calmar": 2.260422158952738,
+        "profit_factor": 1.4293846195096414,
+        "win_rate": 0.5060240963855421,
+        "num_trades": 83
+      },
+      "survives": "True",
+      "split_idx": 449
+    },
+    "monte_carlo": {
+      "prob_positive": 0.415,
+      "p5": -0.22253247457555167,
+      "p50": -0.028186840055061557,
+      "p95": 0.24461941394521614,
+      "mean_return": -0.014127681238287422,
+      "prob_ruin": 0.0
+    },
+    "weights": {
+      "BNB": 0.17318297175109443,
+      "ETH": 0.18848597442053966,
+      "XRP": 0.20835267078095543,
+      "LINK": 0.20371258838211007,
+      "XLM": 0.2262657946653005
+    }
+  },
+  "best_config": {
+    "label": "Top 3",
+    "coins": [
+      "BNB",
+      "ETH",
+      "XRP"
+    ],
+    "portfolio_metrics": {
+      "total_return": 0.07267140392750848,
+      "annualized_return": 0.06364331750252883,
+      "sharpe": 0.36650079904931815,
+      "sortino": 0.4371526442523883,
+      "max_drawdown": 0.4337954565396237,
+      "calmar": 0.14671273417709374,
+      "profit_factor": 1.2195459936250388,
+      "win_rate": 0.47107438016528924,
+      "num_trades": 121
+    },
+    "walk_forward": {
+      "is_metrics": {
+        "total_return": -0.3456986631969068,
+        "annualized_return": -0.4630233257333025,
+        "sharpe": -1.1908451047371553,
+        "sortino": -0.9209863806037274,
+        "max_drawdown": 0.4272913296438559,
+        "calmar": -1.08362443515816,
+        "profit_factor": 0.7323520868896181,
+        "win_rate": 0.4230769230769231,
+        "num_trades": 78
+      },
+      "oos_metrics": {
+        "total_return": 0.4718187046442641,
+        "annualized_return": 1.339253377447994,
+        "sharpe": 1.4956685861711183,
+        "sortino": 2.878861948132995,
+        "max_drawdown": 0.18122987295458665,
+        "calmar": 7.389804757980434,
+        "profit_factor": 2.1990030160568907,
+        "win_rate": 0.5348837209302325,
+        "num_trades": 43
+      },
+      "survives": "True",
+      "split_idx": 449
+    },
+    "monte_carlo": {
+      "prob_positive": 0.671,
+      "p5": -0.16622271188555493,
+      "p50": 0.07570238406167629,
+      "p95": 0.4395080072012114,
+      "mean_return": 0.09712015809985612,
+      "prob_ruin": 0.0
+    },
+    "score": 4.442094899179858,
+    "per_coin": {
+      "BNB": {
+        "total_return": -0.3763658565317326,
+        "annualized_return": -0.33985836074529496,
+        "sharpe": -0.271981812276276,
+        "sortino": -0.15537269781290372,
+        "max_drawdown": 0.7013823232800908,
+        "calmar": -0.48455506998794945,
+        "profit_factor": 0.7924151389873023,
+        "win_rate": 0.4166666666666667,
+        "num_trades": 36
+      },
+      "ETH": {
+        "total_return": 0.9495048234619836,
+        "annualized_return": 0.7988447118964299,
+        "sharpe": 0.9855225051440907,
+        "sortino": 0.9764398383607266,
+        "max_drawdown": 0.3562223711650724,
+        "calmar": 2.2425450408510352,
+        "profit_factor": 1.948721104372503,
+        "win_rate": 0.48717948717948717,
+        "num_trades": 39
+      },
+      "XRP": {
+        "total_return": -0.35512475514772535,
+        "annualized_return": -0.3201228581225003,
+        "sharpe": -0.2636263164057077,
+        "sortino": -0.1449696532921543,
+        "max_drawdown": 0.4835007618083924,
+        "calmar": -0.6620938029656352,
+        "profit_factor": 0.8591363513278042,
+        "win_rate": 0.5,
+        "num_trades": 46
+      }
+    }
+  },
+  "top_3": [
+    "BNB",
+    "ETH",
+    "XRP"
+  ],
+  "top_5": [
+    "BNB",
+    "ETH",
+    "XRP",
+    "LINK",
+    "XLM"
+  ],
+  "top_7": [
+    "BNB",
+    "ETH",
+    "XRP",
+    "LINK",
+    "XLM",
+    "SOL",
+    "AVAX"
+  ]
+}
