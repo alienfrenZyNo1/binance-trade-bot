@@ -1021,6 +1021,67 @@ class Strategy(AutoTrader):
         """Decide what is the current coin, and set it up in the DB."""
         if self.db.get_current_coin() is None:
             current_coin_symbol = self.config.CURRENT_COIN_SYMBOL
+
+            # ------------------------------------------------------------------
+            # Issue #110: Before falling back to random/config, check what's
+            # actually held on Binance. This prevents the bot from picking a
+            # random coin (e.g. TIA) when the real holding is something else
+            # (e.g. INJ).
+            # ------------------------------------------------------------------
+            if not current_coin_symbol:
+                try:
+                    account = self.manager.get_account()
+                    bridge_symbol = self.config.BRIDGE.symbol
+                    held = []  # (symbol, free_balance, usd_value)
+
+                    for bal in account.get("balances", []):
+                        asset = bal["asset"]
+                        free = float(bal["free"])
+                        if asset in (bridge_symbol, "BNB"):
+                            continue
+                        if free <= 0.001:
+                            continue
+                        # Try to get USD value
+                        usd_value = 0.0
+                        try:
+                            price = self.manager.get_ticker_price(f"{asset}{bridge_symbol}")
+                            if price:
+                                usd_value = free * price
+                        except Exception:
+                            pass
+                        held.append((asset, free, usd_value))
+
+                    self.logger.info(
+                        f"Account scan found {len(held)} non-bridge, non-BNB holding(s) "
+                        f"with meaningful balance: {[(a, f) for a, f, _ in held]}"
+                    )
+
+                    if len(held) == 1:
+                        current_coin_symbol = held[0][0]
+                        self.logger.info(
+                            f"initialize_current_coin: exactly one asset held — "
+                            f"selecting {current_coin_symbol} (balance: {held[0][1]})"
+                        )
+                    elif len(held) > 1:
+                        # Pick the one with the highest USD value
+                        held.sort(key=lambda x: x[2], reverse=True)
+                        current_coin_symbol = held[0][0]
+                        self.logger.info(
+                            f"initialize_current_coin: multiple assets held — "
+                            f"selecting {current_coin_symbol} as the largest holding "
+                            f"(balance: {held[0][1]}, ~${held[0][2]:.2f})"
+                        )
+                    else:
+                        self.logger.info(
+                            "initialize_current_coin: no meaningful balances found, "
+                            "falling back to random/config"
+                        )
+                except Exception as e:
+                    self.logger.warning(
+                        f"initialize_current_coin: account scan failed ({e}), "
+                        "falling back to random/config"
+                    )
+
             if not current_coin_symbol:
                 current_coin_symbol = random.choice(self.config.SUPPORTED_COIN_LIST)
 
